@@ -44,6 +44,15 @@ pub struct BlurCache {
     /// Records damage only when the blur texture is actually recomputed.
     /// Cache-hit frames leave this untouched, so the tracker sees zero damage.
     pub damage_bag: DamageBag<i32, Buffer>,
+    /// Force-dirty countdown for the first few frames after creation.
+    /// Clients backing surfaces with DMA-BUF (GTK4, fuzzel, swaync) finish
+    /// their async texture import a frame or two after the surface is mapped.
+    /// If we compute the mask alpha capture before the import lands, the mask
+    /// is empty alpha → the multiply zeros the blur → we cache an invisible
+    /// blur that persists until something else (camera move, geometry change)
+    /// invalidates the cache. Forcing a recompute for the next frame after
+    /// creation gives the import time to settle.
+    pub force_dirty_frames: u8,
 }
 
 impl BlurCache {
@@ -59,6 +68,7 @@ impl BlurCache {
             last_camera_generation: 0, last_background_hash: 0,
             id: Id::new(),
             damage_bag: DamageBag::new(4),
+            force_dirty_frames: 2,
         })
     }
 
@@ -155,7 +165,12 @@ fn blur_pass(
     let dst_w = (tex_size.w >> dst_shift).max(1);
     let dst_h = (tex_size.h >> dst_shift).max(1);
 
-    let half_pixel = [1.0 / src_w as f32, 1.0 / src_h as f32];
+    // Standard Kawase
+    let half_pixel = if downscale {
+        [1.0 / src_w as f32, 1.0 / src_h as f32]
+    } else {
+        [0.5 / src_w as f32, 0.5 / src_h as f32]
+    };
     let pass_offset = offset / (1 << src_shift) as f32;
 
     let dst_phys: Size<i32, Physical> = (dst_w, dst_h).into();
@@ -288,6 +303,10 @@ pub(crate) fn process_blur_requests(
 
         if background_changed || geom_changed || camera_dirty || animated_bg {
             cache.dirty = true;
+        }
+        if cache.force_dirty_frames > 0 {
+            cache.dirty = true;
+            cache.force_dirty_frames -= 1;
         }
         cache.last_background_hash = bg_hash;
         cache.last_geometry_generation = geom_gen;

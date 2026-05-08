@@ -4,9 +4,7 @@
 // normalized [0,1] space via `input_to_geo`. Pixels outside geometry are
 // discarded; pixels near the rounded corners get alpha-faded.
 //
-// Port of niri's clipped_surface.frag + rounding_alpha.frag
-// (https://github.com/niri-wm/niri), combined into one file.
-// Licensed GPL-3.0 (matches driftwm).
+// Combines clipped-surface and rounding-alpha logic into one fragment shader.
 //_DEFINES_
 
 #if defined(EXTERNAL)
@@ -28,10 +26,10 @@ varying vec2 v_coords;
 uniform float tint;
 #endif
 
-uniform float aa_scale;       // output_scale * zoom — keeps AA band ~1 output px wide
-uniform vec2 geo_size;          // window geometry size (pre-zoom physical)
-uniform vec4 corner_radius;     // (top_left, top_right, bottom_right, bottom_left)
-uniform mat3 input_to_geo;      // buffer UV → geometry-normalized [0,1]²
+uniform float aa_scale; // output_scale * zoom — keeps AA band ~1 output px wide
+uniform vec2 geo_size; // window geometry size (pre-zoom physical)
+uniform vec4 corner_radius; // (top_left, top_right, bottom_right, bottom_left)
+uniform mat3 input_to_geo; // buffer UV → geometry-normalized [0,1]²
 
 float corner_alpha(vec2 coords, vec2 size, vec4 r) {
     vec2 center;
@@ -65,7 +63,7 @@ void main() {
     #endif
 
     if (coords_geo.x < 0.0 || 1.0 < coords_geo.x
-        || coords_geo.y < 0.0 || 1.0 < coords_geo.y) {
+            || coords_geo.y < 0.0 || 1.0 < coords_geo.y) {
         color = vec4(0.0);
     } else {
         color = color * corner_alpha(coords_geo.xy * geo_size, geo_size, corner_radius);

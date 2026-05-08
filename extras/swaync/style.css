@@ -1,6 +1,6 @@
-@define-color cc-bg rgba(30, 35, 38, 0.4);
+@define-color cc-bg rgba(30, 35, 38, 0.5);
 @define-color noti-border-color rgba(211, 198, 170, 0.15);
-@define-color noti-bg rgba(30, 35, 38, 0.4);
+@define-color noti-bg rgba(30, 35, 38, 0.5);
 @define-color noti-bg-opaque #1e2326;
 @define-color noti-bg-darker #14181a;
 @define-color noti-bg-hover #2e383c;

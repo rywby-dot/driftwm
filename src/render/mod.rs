@@ -384,15 +384,22 @@ fn build_layer_elements(
             && blur_enabled
             && config.resolve_window_rules(surface.namespace(), "").is_some_and(|r| r.blur)
         {
+            // Skip the request when the surface has no render elements yet
+            // (e.g., layer surface mapped but client hasn't attached its first
+            // buffer). Otherwise the mask pass renders zero elements into
+            // bg_tex, leaving alpha=0, and the alpha-multiply blend zeros the
+            // blur out — visible as missing blur on first frame.
             let elem_count = elements.len() - elem_start;
-            let screen_rect = geo.to_physical_precise_round(output_scale);
-            blur_requests.push(BlurRequestData {
-                surface_id: surface.wl_surface().id(),
-                screen_rect,
-                elem_start,
-                elem_count,
-                layer: layer_tag,
-            });
+            if elem_count > 0 {
+                let screen_rect = geo.to_physical_precise_round(output_scale);
+                blur_requests.push(BlurRequestData {
+                    surface_id: surface.wl_surface().id(),
+                    screen_rect,
+                    elem_start,
+                    elem_count,
+                    layer: layer_tag,
+                });
+            }
         }
     }
 
@@ -909,7 +916,7 @@ pub fn compose_frame(
             push_plain_elements(target, elems, zoom);
         }
 
-        if wants_blur {
+        if wants_blur && (target.len() - elem_start - shadow_count) > 0 {
             let elem_count = target.len() - elem_start - shadow_count;
             let screen_loc: Point<i32, Logical> = Point::from((
                 (render_loc.x * zoom) as i32,
