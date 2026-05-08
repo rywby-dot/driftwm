@@ -92,7 +92,9 @@ impl DriftWm {
         if self.panning() {
             return;
         }
-        let delta = self.with_output_state(|os| os.momentum.tick(dt));
+        let delta = self
+            .with_output_state(|os| os.momentum.tick(dt))
+            .flatten();
         let Some(delta) = delta else {
             return;
         };

@@ -170,10 +170,8 @@ impl DriftWm {
             self.active_layout
         );
 
-        {
-            let home_return = output_state(&self.active_output().unwrap())
-                .home_return
-                .clone();
+        if let Some(output) = self.active_output() {
+            let home_return = output_state(&output).home_return.clone();
             if let Some(ref ret) = home_return {
                 let sz = ret.zoom;
                 let sx = ret.camera.x + vp.w as f64 / (2.0 * sz);

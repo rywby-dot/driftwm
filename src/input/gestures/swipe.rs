@@ -547,6 +547,9 @@ impl DriftWm {
         // so gestures always move the focused window alone.
         let initial_window_location = self.space.element_location(&window).unwrap_or_default();
         let pointer = self.seat.get_pointer().unwrap();
+        let Some(output) = self.active_output() else {
+            return;
+        };
         let grab = MoveSurfaceGrab::new(
             GrabStartData {
                 focus: None,
@@ -555,7 +558,7 @@ impl DriftWm {
             },
             window,
             initial_window_location,
-            self.active_output().unwrap(),
+            output,
             Vec::new(),
             HashSet::new(),
         );
@@ -585,7 +588,9 @@ impl DriftWm {
         keyboard.set_focus(self, Some(FocusTarget(wl_surface.clone())), serial);
         self.enforce_below_windows();
 
-        let initial_location = self.space.element_location(&window).unwrap();
+        let Some(initial_location) = self.space.element_location(&window) else {
+            return;
+        };
         let initial_size = window.geometry().size;
         let edges = edges_from_position(pos, initial_location, initial_size);
 

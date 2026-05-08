@@ -58,13 +58,15 @@ impl DriftWm {
                 }
             }
             Action::PanViewport(dir) => {
-                let zoom = self.with_output_state(|os| {
+                let Some(zoom) = self.with_output_state(|os| {
                     os.camera_target = None;
                     os.zoom_target = None;
                     os.zoom_animation_center = None;
                     os.overview_return = None;
                     os.zoom
-                });
+                }) else {
+                    return;
+                };
                 let step = self.config.pan_step / zoom;
                 let (ux, uy) = dir.to_unit_vec();
                 let delta: Point<f64, smithay::utils::Logical> =
@@ -233,7 +235,9 @@ impl DriftWm {
 
                 if at_home {
                     // We're at home — return to saved position
-                    let ret = self.with_output_state(|os| os.home_return.take());
+                    let ret = self
+                        .with_output_state(|os| os.home_return.take())
+                        .flatten();
                     if let Some(ret) = ret {
                         let can_fullscreen = ret.fullscreen_window.as_ref()
                             .is_some_and(|w| self.space.elements().any(|e| e == w));

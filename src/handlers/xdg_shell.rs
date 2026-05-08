@@ -278,12 +278,17 @@ impl XdgShellHandler for DriftWm {
         // Client-initiated xdg move_request: the client asked to move itself,
         // not its cluster neighbors. Clients don't know about clusters, so
         // always single-window.
-        let initial_window_location = self.space.element_location(&window).unwrap();
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            return;
+        };
+        let Some(output) = self.active_output() else {
+            return;
+        };
         let grab = MoveSurfaceGrab::new(
             start_data,
             window,
             initial_window_location,
-            self.active_output().unwrap(),
+            output,
             Vec::new(),
             HashSet::new(),
         );
@@ -315,8 +320,17 @@ impl XdgShellHandler for DriftWm {
             return;
         };
 
-        let initial_window_location = self.space.element_location(&window).unwrap();
+        let Some(initial_window_location) = self.space.element_location(&window) else {
+            return;
+        };
         let initial_window_size = window.geometry().size;
+
+        // Bail before any side effects — leaving ResizeState, the toplevel's
+        // Resizing flag, and the cursor in "resize" mode without an active
+        // grab would desync the client and the visual cursor.
+        let Some(output) = self.active_output() else {
+            return;
+        };
 
         // Clear fit state — user took manual control
         crate::state::fit::clear_fit_state(&wl_surface);
@@ -340,7 +354,6 @@ impl XdgShellHandler for DriftWm {
         self.cursor.grab_cursor = true;
         self.cursor.cursor_status = CursorImageStatus::Named(resize_cursor(edges));
 
-        let output = self.active_output().unwrap();
         let last_clamped_location = start_data.location;
         // CSD windows trigger resize through xdg_toplevel.resize() when
         // the user drags the client-drawn border. Honor the config flag so

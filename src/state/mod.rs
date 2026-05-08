@@ -810,71 +810,116 @@ impl DriftWm {
         driftwm::canvas::screen_to_canvas(driftwm::canvas::ScreenPos(screen), os.camera, os.zoom).0
     }
 
-    /// Batch-access per-output state under a single mutex lock.
-    pub fn with_output_state<R>(&mut self, f: impl FnOnce(&mut OutputState) -> R) -> R {
-        let output = self.active_output().unwrap();
+    /// Batch-access per-output state under a single mutex lock. Returns
+    /// `None` (and does not invoke `f`) when there is no active output —
+    /// i.e. all physical outputs disconnected and no virtual placeholder is
+    /// present yet. The closure runs at most once: any `OutputState`
+    /// mutations inside it are silently dropped on the no-output branch.
+    /// Callers that just want side effects can discard the `Option<()>` —
+    /// the no-op is the desired behavior, since per-output state has no
+    /// meaning while no output exists. Callers that extract a value should
+    /// provide a fallback (e.g. `unwrap_or(1.0)` for zoom).
+    pub fn with_output_state<R>(
+        &mut self,
+        f: impl FnOnce(&mut OutputState) -> R,
+    ) -> Option<R> {
+        let output = self.active_output()?;
         let mut guard = output_state(&output);
-        f(&mut guard)
+        Some(f(&mut guard))
     }
 
-    // -- Per-output field accessors (delegate to active output's OutputState) --
+    // -- Per-output field accessors (delegate to active output's OutputState).
+    // All getters fall back to a sensible default when no output exists; all
+    // setters silently no-op. Hotplug/lid-close races briefly leave the
+    // compositor with zero outputs — these accessors must not panic then.
 
     pub fn camera(&self) -> Point<f64, Logical> {
-        output_state(&self.active_output().unwrap()).camera
+        self.active_output()
+            .map(|o| output_state(&o).camera)
+            .unwrap_or_default()
     }
     pub fn set_camera(&mut self, val: Point<f64, Logical>) {
-        output_state(&self.active_output().unwrap()).camera = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).camera = val;
+        }
     }
     pub fn zoom(&self) -> f64 {
-        output_state(&self.active_output().unwrap()).zoom
+        // 1.0 (not 0.0) so callers like `step / zoom` don't divide by zero.
+        self.active_output()
+            .map(|o| output_state(&o).zoom)
+            .unwrap_or(1.0)
     }
     pub fn set_zoom(&mut self, val: f64) {
-        output_state(&self.active_output().unwrap()).zoom = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).zoom = val;
+        }
     }
     pub fn zoom_target(&self) -> Option<f64> {
-        output_state(&self.active_output().unwrap()).zoom_target
+        self.active_output().and_then(|o| output_state(&o).zoom_target)
     }
     pub fn set_zoom_target(&mut self, val: Option<f64>) {
-        output_state(&self.active_output().unwrap()).zoom_target = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).zoom_target = val;
+        }
     }
     pub fn zoom_animation_center(&self) -> Option<Point<f64, Logical>> {
-        output_state(&self.active_output().unwrap()).zoom_animation_center
+        self.active_output()
+            .and_then(|o| output_state(&o).zoom_animation_center)
     }
     pub fn set_zoom_animation_center(&mut self, val: Option<Point<f64, Logical>>) {
-        output_state(&self.active_output().unwrap()).zoom_animation_center = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).zoom_animation_center = val;
+        }
     }
     pub fn overview_return(&self) -> Option<(Point<f64, Logical>, f64)> {
-        output_state(&self.active_output().unwrap()).overview_return
+        self.active_output()
+            .and_then(|o| output_state(&o).overview_return)
     }
     pub fn set_overview_return(&mut self, val: Option<(Point<f64, Logical>, f64)>) {
-        output_state(&self.active_output().unwrap()).overview_return = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).overview_return = val;
+        }
     }
     pub fn camera_target(&self) -> Option<Point<f64, Logical>> {
-        output_state(&self.active_output().unwrap()).camera_target
+        self.active_output()
+            .and_then(|o| output_state(&o).camera_target)
     }
     pub fn set_camera_target(&mut self, val: Option<Point<f64, Logical>>) {
-        output_state(&self.active_output().unwrap()).camera_target = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).camera_target = val;
+        }
     }
     pub fn last_scroll_pan(&self) -> Option<Instant> {
-        output_state(&self.active_output().unwrap()).last_scroll_pan
+        self.active_output()
+            .and_then(|o| output_state(&o).last_scroll_pan)
     }
     pub fn set_last_scroll_pan(&mut self, val: Option<Instant>) {
-        output_state(&self.active_output().unwrap()).last_scroll_pan = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).last_scroll_pan = val;
+        }
     }
     pub fn panning(&self) -> bool {
-        output_state(&self.active_output().unwrap()).panning
+        self.active_output()
+            .is_some_and(|o| output_state(&o).panning)
     }
     pub fn set_panning(&mut self, val: bool) {
-        output_state(&self.active_output().unwrap()).panning = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).panning = val;
+        }
     }
     pub fn edge_pan_velocity(&self) -> Option<Point<f64, Logical>> {
-        output_state(&self.active_output().unwrap()).edge_pan_velocity
+        self.active_output()
+            .and_then(|o| output_state(&o).edge_pan_velocity)
     }
     pub fn last_frame_instant(&self) -> Instant {
-        output_state(&self.active_output().unwrap()).last_frame_instant
+        self.active_output()
+            .map(|o| output_state(&o).last_frame_instant)
+            .unwrap_or_else(Instant::now)
     }
     pub fn set_last_frame_instant(&mut self, val: Instant) {
-        output_state(&self.active_output().unwrap()).last_frame_instant = val;
+        if let Some(o) = self.active_output() {
+            output_state(&o).last_frame_instant = val;
+        }
     }
 
     /// Sync each output's position to its camera, so render_output

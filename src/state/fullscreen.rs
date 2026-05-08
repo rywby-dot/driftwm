@@ -16,7 +16,9 @@ impl DriftWm {
         {
             return;
         }
-        let output = self.active_output().unwrap();
+        let Some(output) = self.active_output() else {
+            return;
+        };
 
         // If already fullscreen on this output, exit first
         if self.fullscreen.contains_key(&output) {
