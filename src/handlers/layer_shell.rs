@@ -123,6 +123,13 @@ impl WlrLayerShellHandler for DriftWm {
     fn layer_destroyed(&mut self, surface: LayerSurface) {
         tracing::info!("Layer surface destroyed");
 
+        // Drop any chrome cache entries this layer accumulated. No-op for
+        // screen-anchored layers — they never enter these caches — and for
+        // canvas layers without chrome opted in via window rule.
+        let surface_id = surface.wl_surface().id();
+        self.render.border_cache.remove(&surface_id);
+        self.render.shadow_cache.remove(&surface_id);
+
         // Remove from canvas layers if it was one
         self.canvas_layers
             .retain(|cl| cl.surface.wl_surface() != surface.wl_surface());

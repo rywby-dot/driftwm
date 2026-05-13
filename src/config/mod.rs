@@ -578,6 +578,43 @@ impl Config {
         }
         result
     }
+
+    /// Variant of `resolve_window_rules` for canvas-layer instances. Pairs with
+    /// `match_window_rule_nth`: the Nth positioned rule (matching `app_id`/`title`)
+    /// is treated as *this* instance's positioned rule; other positioned rules
+    /// matching the same app are ignored, so multi-instance layer-shells like
+    /// `waybar` get per-instance chrome. Non-positioned matching rules (e.g. an
+    /// `app_id = "*"` wildcard) are still merged in, so shared chrome still
+    /// applies across instances.
+    pub fn resolve_window_rules_for_layer_instance(
+        &self,
+        app_id: &str,
+        title: &str,
+        instance_idx: usize,
+    ) -> Option<AppliedWindowRule> {
+        let nth_positioned_index: Option<usize> = self
+            .window_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.position.is_some() && r.matches(app_id, title))
+            .map(|(i, _)| i)
+            .nth(instance_idx);
+
+        let mut result: Option<AppliedWindowRule> = None;
+        for (i, rule) in self.window_rules.iter().enumerate() {
+            if !rule.matches(app_id, title) {
+                continue;
+            }
+            if rule.position.is_some() && Some(i) != nth_positioned_index {
+                continue;
+            }
+            match &mut result {
+                None => result = Some(AppliedWindowRule::from(rule)),
+                Some(r) => r.merge_from(rule),
+            }
+        }
+        result
+    }
 }
 
 fn resolve_background_kind(raw: toml::BackgroundFileConfig) -> BackgroundKind {

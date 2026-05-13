@@ -706,23 +706,20 @@ pub fn compose_frame(
 
     let is_fullscreen = state.is_output_fullscreen(output);
     let (overlay_elements, overlay_blur) = build_layer_elements(
-        output, renderer, WlrLayer::Overlay,
-        Some((&state.config, blur_enabled, BlurLayer::Overlay)),
+        state, output, renderer, WlrLayer::Overlay, Some(BlurLayer::Overlay),
     );
     let (top_elements, top_blur) = if !is_fullscreen {
-        build_layer_elements(
-            output, renderer, WlrLayer::Top,
-            Some((&state.config, blur_enabled, BlurLayer::Top)),
-        )
+        build_layer_elements(state, output, renderer, WlrLayer::Top, Some(BlurLayer::Top))
     } else {
         (vec![], vec![])
     };
     let (bottom_elements, _) = if !is_fullscreen {
-        build_layer_elements(output, renderer, WlrLayer::Bottom, None)
+        build_layer_elements(state, output, renderer, WlrLayer::Bottom, None)
     } else {
         (vec![], vec![])
     };
-    let (background_layer_elements, _) = build_layer_elements(output, renderer, WlrLayer::Background, None);
+    let (background_layer_elements, _) =
+        build_layer_elements(state, output, renderer, WlrLayer::Background, None);
 
     // Compute prefix offsets so we know where each group lands in all_elements
     let overlay_prefix = cursor_elements.len();
