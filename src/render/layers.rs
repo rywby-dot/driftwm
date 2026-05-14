@@ -1,14 +1,15 @@
 use smithay::backend::renderer::{
     element::{
-        AsRenderElements,
-        surface::WaylandSurfaceRenderElement,
+        Kind,
+        surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
     },
     gles::GlesRenderer,
 };
-use smithay::desktop::layer_map_for_output;
+use smithay::desktop::{PopupManager, layer_map_for_output};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
@@ -17,9 +18,13 @@ use super::blur::{BlurLayer, BlurRequestData};
 use super::elements::OutputRenderElements;
 
 /// Push compositor chrome (corner clip on surface, border, shadow) for one
-/// layer surface. Returns the number of surface render elements emitted —
-/// callers use this for blur tracking, since blur should only sit behind the
-/// surface elements, not behind the border/shadow elements that follow.
+/// layer surface, plus any popup elements anchored to it. Returns the number
+/// of render elements emitted *above* the eventual blur insertion point
+/// (popups + surface). Border and shadow push after that and are not counted.
+///
+/// Popups push first (z-order above the surface) and are *not* corner-clipped
+/// — they can legitimately extend outside the parent's geometry (tray menus,
+/// network dropdowns, tooltips). Mirrors the window pipeline at `mod.rs:312`.
 ///
 /// `push_plain` is the caller's choice of variant for non-clipped surfaces:
 /// canvas layers push as `Window` (zoom-rescaled), screen-anchored layers
@@ -33,6 +38,7 @@ fn push_layer_chrome(
     applied: Option<&driftwm::config::AppliedWindowRule>,
     surface_id: ObjectId,
     surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     inner_logical: Rectangle<f64, Logical>,
     opacity: f64,
     scale: Scale<f64>,
@@ -62,8 +68,11 @@ fn push_layer_chrome(
     let border_shader = state.render.border_shader.clone();
     let shadow_shader = state.render.shadow_shader.clone();
 
-    let surf_start = target.len();
-    // Z-order: earlier-in-vec = nearer the top.
+    let chrome_start = target.len();
+    // Z-order: earlier-in-vec = nearer the top. Popups go first so they sit
+    // above the (possibly corner-clipped) surface body and any border/shadow.
+    push_plain(target, popup_elements);
+
     if corner_radius > 0 && let Some(ref ccs) = corner_clip_shader {
         let r = corner_radius as f32;
         super::push_corner_clipped_elements(
@@ -78,7 +87,7 @@ fn push_layer_chrome(
     } else {
         push_plain(target, surface_elements);
     }
-    let surface_count = target.len() - surf_start;
+    let chrome_count = target.len() - chrome_start;
 
     // Layers don't keyboard-focus as a "current window" — always unfocused color.
     if border_width > 0 && let Some(ref bs) = border_shader {
@@ -123,7 +132,38 @@ fn push_layer_chrome(
         );
     }
 
-    surface_count
+    chrome_count
+}
+
+/// Walk popups attached to the layer surface and produce render elements at
+/// the same physical anchor as the parent. Mirrors what
+/// `LayerSurface::AsRenderElements` does internally, but as a standalone
+/// function so the caller can corner-clip the parent surface tree without
+/// also clipping these popups.
+fn collect_layer_popup_elements(
+    renderer: &mut GlesRenderer,
+    parent: &WlSurface,
+    parent_loc: Point<i32, Physical>,
+    scale: Scale<f64>,
+    opacity: f32,
+) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+    let mut popups = Vec::new();
+    for (popup, popup_offset) in PopupManager::popups_for_surface(parent) {
+        // Same rounding idiom as the window pipeline's popup walker in
+        // mod.rs so layer-shell popups land on the same pixel as xdg popups
+        // at fractional output scales.
+        let offset: Point<i32, Physical> =
+            (popup_offset - popup.geometry().loc).to_physical_precise_round(scale);
+        popups.extend(render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+            renderer,
+            popup.wl_surface(),
+            parent_loc + offset,
+            scale,
+            opacity,
+            Kind::Unspecified,
+        ));
+    }
+    popups
 }
 
 /// Build render elements for canvas-positioned layer surfaces (zoomed like windows).
@@ -179,14 +219,25 @@ pub(super) fn build_canvas_layer_elements(
         );
         let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
 
-        let surface_elements = state.canvas_layers[idx]
-            .surface
-            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                renderer,
-                physical_loc,
-                scale,
-                opacity as f32,
-            );
+        let wl_surface = state.canvas_layers[idx].surface.wl_surface().clone();
+        let surface_elements = render_elements_from_surface_tree::<
+            _,
+            WaylandSurfaceRenderElement<GlesRenderer>,
+        >(
+            renderer,
+            &wl_surface,
+            physical_loc,
+            scale,
+            opacity as f32,
+            Kind::Unspecified,
+        );
+        let popup_elements = collect_layer_popup_elements(
+            renderer,
+            &wl_surface,
+            physical_loc,
+            scale,
+            opacity as f32,
+        );
 
         let _ = push_layer_chrome(
             &mut elements,
@@ -194,6 +245,7 @@ pub(super) fn build_canvas_layer_elements(
             applied.as_ref(),
             surface_id,
             surface_elements,
+            popup_elements,
             inner_logical,
             opacity,
             scale,
@@ -252,27 +304,44 @@ pub(super) fn build_layer_elements(
         let applied = state.config.resolve_window_rules(surface.namespace(), "");
         let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
 
-        let surface_elements = surface
-            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                renderer,
-                loc,
-                scale,
-                opacity as f32,
-            );
+        // Split surface tree from popups so corner-clip and border only wrap
+        // the bar itself — popups (tray menus, dropdowns, tooltips) can sit
+        // outside the bar's geometry and must not be cropped to it.
+        let wl_surface = surface.wl_surface();
+        let surface_elements = render_elements_from_surface_tree::<
+            _,
+            WaylandSurfaceRenderElement<GlesRenderer>,
+        >(
+            renderer,
+            wl_surface,
+            loc,
+            scale,
+            opacity as f32,
+            Kind::Unspecified,
+        );
+        let surface_has_buffer = !surface_elements.is_empty();
+        let popup_elements = collect_layer_popup_elements(
+            renderer,
+            wl_surface,
+            loc,
+            scale,
+            opacity as f32,
+        );
 
-        let surface_id = surface.wl_surface().id();
+        let surface_id = wl_surface.id();
         let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
             (geo.loc.x as f64, geo.loc.y as f64).into(),
             (geo.size.w as f64, geo.size.h as f64).into(),
         );
 
         let elem_start = elements.len();
-        let surface_count = push_layer_chrome(
+        let chrome_count = push_layer_chrome(
             &mut elements,
             state,
             applied.as_ref(),
             surface_id,
             surface_elements,
+            popup_elements,
             inner_logical,
             opacity,
             scale,
@@ -283,7 +352,7 @@ pub(super) fn build_layer_elements(
 
         if blur_enabled
             && let Some(layer_tag) = blur_layer_tag
-            && surface_count > 0
+            && surface_has_buffer
         {
             let rule_blur = applied.as_ref().is_some_and(|r| r.blur);
             let client_blur_rects = with_states(surface.wl_surface(), |s| {
@@ -326,7 +395,7 @@ pub(super) fn build_layer_elements(
                         surface_id: surface.wl_surface().id(),
                         screen_rect,
                         elem_start,
-                        elem_count: surface_count,
+                        elem_count: chrome_count,
                         layer: layer_tag,
                         region_rects,
                     });
