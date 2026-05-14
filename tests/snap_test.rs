@@ -165,6 +165,74 @@ fn no_snap_perpendicular_gap_exceeds_tolerance() {
 }
 
 #[test]
+fn same_edge_aligns_left_edges_when_perpendicular_adjacent() {
+    // Vertical stack scenario: top window at y=[0,100], dragged bottom window
+    // already snapped at y_low=112 (other.y_high + gap). User slides the bottom
+    // window horizontally to align left edges. perp y has no overlap with other
+    // (windows are stacked, not side-by-side) but they're within gap+threshold
+    // of each other perpendicular — same-edge should engage.
+    let others = vec![SnapRect { x_low: 100.0, x_high: 300.0, y_low: 0.0, y_high: 100.0 }];
+    let p = SnapParams {
+        extent: 200.0, perp_low: 112.0, perp_high: 192.0, horizontal: true,
+        others: &others, gap: 12.0, threshold: 24.0, break_force: 32.0, same_edge: true,
+    };
+    // Natural left at 95 (5px from target.left of 100) — same-edge L→L → origin=100.
+    let (origin, _) = find_snap_candidate(95.0, &p)
+        .expect("same-edge L→L should engage for vertically stacked windows");
+    assert!((origin - 100.0).abs() < 0.001, "expected origin=100, got {origin}");
+}
+
+#[test]
+fn same_edge_aligns_right_edges_when_perpendicular_adjacent() {
+    // Same vertical stack, but dragging so right edges align.
+    let others = vec![SnapRect { x_low: 100.0, x_high: 300.0, y_low: 0.0, y_high: 100.0 }];
+    let p = SnapParams {
+        extent: 200.0, perp_low: 112.0, perp_high: 192.0, horizontal: true,
+        others: &others, gap: 12.0, threshold: 24.0, break_force: 32.0, same_edge: true,
+    };
+    // Natural left at 105 → natural right = 305, 5px from target.right(300).
+    // Same-edge R→R → origin = 300 - 200 = 100.
+    let (origin, _) = find_snap_candidate(105.0, &p)
+        .expect("same-edge R→R should engage for vertically stacked windows");
+    assert!((origin - 100.0).abs() < 0.001, "expected origin=100, got {origin}");
+}
+
+#[test]
+fn same_edge_does_not_engage_when_perpendicular_far() {
+    // Same vertical stack but far apart perpendicular (200px below target's
+    // bottom — well beyond gap+threshold = 36). Same-edge must NOT pull the
+    // dragged window across a large vertical gap.
+    let others = vec![SnapRect { x_low: 100.0, x_high: 300.0, y_low: 0.0, y_high: 100.0 }];
+    let p = SnapParams {
+        extent: 200.0, perp_low: 300.0, perp_high: 380.0, horizontal: true,
+        others: &others, gap: 12.0, threshold: 24.0, break_force: 32.0, same_edge: true,
+    };
+    assert!(
+        find_snap_candidate(95.0, &p).is_none(),
+        "same-edge must require perpendicular proximity within gap+threshold",
+    );
+}
+
+#[test]
+fn opposite_edge_unaffected_by_perpendicular_adjacency() {
+    // Regression: opposite-edge snap must NOT fire for perp-adjacent (non-
+    // overlapping) windows. Otherwise dragging a window below another window
+    // toward its right edge would magnetically dock it side-by-side even
+    // though the windows aren't actually beside each other.
+    let others = vec![SnapRect { x_low: 100.0, x_high: 300.0, y_low: 0.0, y_high: 100.0 }];
+    let p = SnapParams {
+        extent: 200.0, perp_low: 112.0, perp_high: 192.0, horizontal: true,
+        others: &others, gap: 12.0, threshold: 24.0, break_force: 32.0, same_edge: false,
+    };
+    // Natural left at 310 — close to other.x_high(300)+gap(12)=312 (opposite L→R),
+    // but the windows don't perp-overlap. With same_edge=false, no snap.
+    assert!(
+        find_snap_candidate(310.0, &p).is_none(),
+        "opposite-edge must require perpendicular overlap (same_edge=false)",
+    );
+}
+
+#[test]
 fn y_axis_snap_filters_by_x_overlap() {
     let others = vec![
         SnapRect { x_low: 0.0, x_high: 300.0, y_low: 310.0, y_high: 510.0 },

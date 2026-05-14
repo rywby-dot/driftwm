@@ -43,8 +43,15 @@ fn try_candidate(best: &mut Option<(f64, f64)>, snap_pos: f64, dist: f64, thresh
     }
 }
 
-/// Find the best snap candidate along one axis, filtering out windows that
-/// don't overlap on the perpendicular axis (within `threshold` tolerance).
+/// Find the best snap candidate along one axis.
+///
+/// Opposite-edge candidates require strict perpendicular overlap (so a window
+/// only docks side-by-side to neighbors it actually visually overlaps).
+/// Same-edge candidates also fire when the windows are perpendicular-*adjacent*
+/// within `gap + threshold` — the perpendicular distance band where an
+/// opposite-edge snap on the other axis would engage. This makes same-edge
+/// an extension of opposite-edge: once two windows are stacked top-to-bottom,
+/// sliding one horizontally lets their left (or right) edges align.
 ///
 /// Returns `Some((snapped_origin, abs_distance))` for the closest candidate
 /// within `threshold`, or `None`.
@@ -59,27 +66,33 @@ pub fn find_snap_candidate(natural_edge_low: f64, p: &SnapParams<'_>) -> Option<
             (other.y_low, other.y_high, other.x_low, other.x_high)
         };
 
-        if p.perp_high <= other_perp_low || other_perp_high <= p.perp_low {
+        let perp_overlap = p.perp_high > other_perp_low && other_perp_high > p.perp_low;
+        let same_edge_eligible = p.same_edge
+            && (perp_overlap || perp_distance(p.perp_low, p.perp_high, other_perp_low, other_perp_high) < p.gap + p.threshold);
+
+        if !perp_overlap && !same_edge_eligible {
             continue;
         }
 
-        // Opposite-edge: dragged right edge → other left edge
-        try_candidate(
-            &mut best,
-            other_low - p.gap - p.extent,
-            (natural_edge_high - other_low).abs(),
-            p.threshold,
-        );
+        if perp_overlap {
+            // Opposite-edge: dragged right edge → other left edge
+            try_candidate(
+                &mut best,
+                other_low - p.gap - p.extent,
+                (natural_edge_high - other_low).abs(),
+                p.threshold,
+            );
 
-        // Opposite-edge: dragged left edge → other right edge
-        try_candidate(
-            &mut best,
-            other_high + p.gap,
-            (natural_edge_low - other_high).abs(),
-            p.threshold,
-        );
+            // Opposite-edge: dragged left edge → other right edge
+            try_candidate(
+                &mut best,
+                other_high + p.gap,
+                (natural_edge_low - other_high).abs(),
+                p.threshold,
+            );
+        }
 
-        if p.same_edge {
+        if same_edge_eligible {
             // Same-edge: left → left (no gap — edges align exactly)
             try_candidate(
                 &mut best,
@@ -99,6 +112,18 @@ pub fn find_snap_candidate(natural_edge_low: f64, p: &SnapParams<'_>) -> Option<
     }
 
     best
+}
+
+/// Distance between two intervals `[lo1, hi1]` and `[lo2, hi2]`. Zero when
+/// they overlap; otherwise the gap between the nearer endpoints.
+fn perp_distance(lo1: f64, hi1: f64, lo2: f64, hi2: f64) -> f64 {
+    if hi1 < lo2 {
+        lo2 - hi1
+    } else if hi2 < lo1 {
+        lo1 - hi2
+    } else {
+        0.0
+    }
 }
 
 /// Parameters for single-edge snap search (used during resize).
@@ -132,20 +157,26 @@ pub fn find_edge_snap(natural_edge: f64, p: &EdgeSnapParams<'_>) -> Option<(f64,
             (other.y_low, other.y_high, other.x_low, other.x_high)
         };
 
-        if p.perp_high <= other_perp_low || other_perp_high <= p.perp_low {
+        let perp_overlap = p.perp_high > other_perp_low && other_perp_high > p.perp_low;
+        let same_edge_eligible = p.same_edge
+            && (perp_overlap || perp_distance(p.perp_low, p.perp_high, other_perp_low, other_perp_high) < p.gap + p.threshold);
+
+        if !perp_overlap && !same_edge_eligible {
             continue;
         }
 
         if p.high_edge {
             // Right/bottom edge: snap to other's near edge with gap (opposite),
             // and to other's far edge exactly (same-edge alignment).
-            try_candidate(
-                &mut best,
-                other_low - p.gap,
-                (natural_edge - other_low).abs(),
-                p.threshold,
-            );
-            if p.same_edge {
+            if perp_overlap {
+                try_candidate(
+                    &mut best,
+                    other_low - p.gap,
+                    (natural_edge - other_low).abs(),
+                    p.threshold,
+                );
+            }
+            if same_edge_eligible {
                 try_candidate(
                     &mut best,
                     other_high,
@@ -156,13 +187,15 @@ pub fn find_edge_snap(natural_edge: f64, p: &EdgeSnapParams<'_>) -> Option<(f64,
         } else {
             // Left/top edge: snap to other's far edge with gap (opposite),
             // and to other's near edge exactly (same-edge alignment).
-            try_candidate(
-                &mut best,
-                other_high + p.gap,
-                (natural_edge - other_high).abs(),
-                p.threshold,
-            );
-            if p.same_edge {
+            if perp_overlap {
+                try_candidate(
+                    &mut best,
+                    other_high + p.gap,
+                    (natural_edge - other_high).abs(),
+                    p.threshold,
+                );
+            }
+            if same_edge_eligible {
                 try_candidate(
                     &mut best,
                     other_low,
