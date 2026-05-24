@@ -30,6 +30,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify Cargo.lock is in sync
+        run: cargo check --locked
+
       - name: Build tests
         run: cargo test --no-run
 
