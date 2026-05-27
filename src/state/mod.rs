@@ -451,6 +451,15 @@ pub struct DriftWm {
     /// client is still reporting the fit-era geometry.
     pub pending_recenter:
         HashMap<smithay::reexports::wayland_server::backend::ObjectId, PendingRecenter>,
+    /// Last "settled" snap rect per window, captured at initial map and at
+    /// move/resize grab end. Used as the authoritative rect for cluster
+    /// computation in `toplevel_destroyed` — protects against clients
+    /// (notably foot) that shrink/reposition their buffer during the destroy
+    /// sequence, which would otherwise break neighbor detection.
+    pub stable_snap_rects: HashMap<
+        smithay::reexports::wayland_server::backend::ObjectId,
+        driftwm::layout::snap::SnapRect,
+    >,
 
     // -- global: focus/navigation --
     pub focus_history: Vec<Window>,

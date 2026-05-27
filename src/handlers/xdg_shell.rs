@@ -316,6 +316,7 @@ impl XdgShellHandler for DriftWm {
             }
             self.space.unmap_elem(window);
         }
+        self.stable_snap_rects.remove(&wl_surface.id());
     }
 
     fn move_request(

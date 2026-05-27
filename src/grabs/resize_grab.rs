@@ -285,6 +285,12 @@ impl PointerGrab<DriftWm> for ResizeSurfaceGrab {
                     });
             });
 
+            for member in &self.cluster_resize.members {
+                if smithay::utils::IsAlive::alive(&member.window) {
+                    data.refresh_stable_snap_rect(&member.window);
+                }
+            }
+
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }

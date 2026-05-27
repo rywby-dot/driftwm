@@ -1,7 +1,7 @@
 use smithay::{
     desktop::Window,
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
     utils::{Logical, Point},
     wayland::seat::WaylandFocus,
 };
@@ -199,10 +199,26 @@ impl DriftWm {
     /// either a snap-cluster member (auto-placement snaps transients here) or
     /// a geometric overlap. Used to pick a "follow" target when no explicit
     /// `parent_surface()` link exists.
+    ///
+    /// Uses `stable_snap_rects` for `destroyed`'s rect when available — some
+    /// clients (foot) shrink or reposition their surface during the destroy
+    /// sequence, so the live geometry at this point may not reflect what the
+    /// user last saw as the cluster.
     #[allow(clippy::mutable_key_type)]
     pub fn first_spatially_related_in_history(&self, destroyed: &Window) -> Option<Window> {
-        let destroyed_rect = self.snap_rect_for(destroyed)?;
-        let rects = self.all_windows_with_snap_rects();
+        let cached_destroyed_rect = destroyed
+            .wl_surface()
+            .and_then(|s| self.stable_snap_rects.get(&s.id()).copied());
+        let destroyed_rect = cached_destroyed_rect.or_else(|| self.snap_rect_for(destroyed))?;
+
+        let mut rects = self.all_windows_with_snap_rects();
+        if cached_destroyed_rect.is_some() {
+            for (w, r) in &mut rects {
+                if w == destroyed {
+                    *r = destroyed_rect;
+                }
+            }
+        }
         let cluster = driftwm::layout::cluster::cluster_of(
             destroyed,
             &rects,

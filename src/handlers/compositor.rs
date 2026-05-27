@@ -531,6 +531,7 @@ impl CompositorHandler for DriftWm {
                         // One-shot: snapshot is only valid for the first
                         // placement; later commits use the now-mapped state.
                         self.auto_anchor_snapshot.remove(&root);
+                        self.refresh_stable_snap_rect(&window);
                     } else if !has_size {
                         // No size yet — retry next commit
                         self.pending_center.insert(root.clone());
@@ -798,6 +799,7 @@ impl DriftWm {
                     .get_or_insert(|| RefCell::new(ResizeState::Idle))
                     .replace(ResizeState::Idle);
             });
+            self.refresh_stable_snap_rect(window);
         }
     }
 }

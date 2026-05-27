@@ -229,6 +229,20 @@ impl DriftWm {
             .map(|(_, r)| r)
     }
 
+    /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call at
+    /// settled events (initial map, move/resize grab end). The cached rect
+    /// outlives mid-teardown geometry changes and is consulted by
+    /// `first_spatially_related_in_history` when picking a focus follow.
+    pub fn refresh_stable_snap_rect(&mut self, w: &Window) {
+        let Some(rect) = self.snap_rect_for(w) else {
+            return;
+        };
+        let Some(surface) = w.wl_surface() else {
+            return;
+        };
+        self.stable_snap_rects.insert(surface.id(), rect);
+    }
+
     /// Snapshot the focused window's cluster for a move drag.
     ///
     /// Returns both the member offsets (from the primary's canvas position)

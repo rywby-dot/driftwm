@@ -434,6 +434,12 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
             output_state(&self.output).edge_pan_velocity = None;
+            data.refresh_stable_snap_rect(&self.window);
+            for (member, _) in &self.cluster_members {
+                if member.alive() {
+                    data.refresh_stable_snap_rect(member);
+                }
+            }
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
