@@ -615,6 +615,10 @@ impl ForeignToplevelHandler for DriftWm {
     }
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, _wl_output: Option<WlOutput>) {
+        if self.pending_center.contains(&wl_surface) {
+            self.pending_fullscreen.insert(wl_surface);
+            return;
+        }
         let window = self
             .space
             .elements()
@@ -626,23 +630,29 @@ impl ForeignToplevelHandler for DriftWm {
     }
 
     fn unset_fullscreen(&mut self, wl_surface: WlSurface) {
+        self.pending_fullscreen.remove(&wl_surface);
         if let Some(output) = self.find_fullscreen_output_for_surface(&wl_surface) {
             self.exit_fullscreen_on(&output);
         }
     }
 
     fn set_maximized(&mut self, wl_surface: WlSurface) {
+        if self.pending_center.contains(&wl_surface) {
+            self.pending_fit.insert(wl_surface);
+            return;
+        }
         let window = self
             .space
             .elements()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
-            self.decoration_toggle_fit(&window);
+            self.decoration_fit(&window);
         }
     }
 
     fn unset_maximized(&mut self, wl_surface: WlSurface) {
+        self.pending_fit.remove(&wl_surface);
         let window = self
             .space
             .elements()

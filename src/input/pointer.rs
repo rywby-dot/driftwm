@@ -468,6 +468,10 @@ impl DriftWm {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Resizing);
+                // Mirror the FitState clear above so the client's view stays
+                // in sync — otherwise its own restore button dispatches an
+                // unmaximize_request that `unfit_window` would silently drop.
+                state.states.unset(xdg_toplevel::State::Maximized);
             });
         }
 

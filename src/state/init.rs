@@ -258,6 +258,8 @@ impl DriftWm {
             config,
             pending_center: HashSet::new(),
             pending_size: HashSet::new(),
+            pending_fit: HashSet::new(),
+            pending_fullscreen: HashSet::new(),
             auto_anchor_snapshot: HashMap::new(),
             pending_recenter: HashMap::new(),
             stable_snap_rects: HashMap::new(),

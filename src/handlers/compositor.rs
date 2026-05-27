@@ -349,10 +349,10 @@ impl CompositorHandler for DriftWm {
                         } else {
                             self.pending_size.remove(&root);
                         }
-                    } else if has_size && !is_fullscreen {
-                        // Skip positioning for fullscreen windows: enter_fullscreen
-                        // already mapped them to camera_i32, and the bar-shifted
-                        // centering below would override that by bar/2.
+                    } else if has_size && !is_fullscreen && !crate::state::fit::is_fit(&window) {
+                        // Skip positioning for fullscreen / fit windows: they're
+                        // already mapped at their final location, and the
+                        // bar-shifted centering below would override that.
                         //
                         // Position: rule coords are window-center with Y-up convention
                         // (positive = above origin). Negate Y for internal canvas coords.
@@ -502,10 +502,14 @@ impl CompositorHandler for DriftWm {
                         }
 
                         let is_widget = applied.as_ref().is_some_and(|a| a.widget);
+                        // Deferred fit/fullscreen below will override camera/
+                        // zoom/raise/focus — skip navigate_to_window then.
+                        let deferred_fit_or_fs = self.pending_fit.contains(&root)
+                            || self.pending_fullscreen.contains(&root);
                         // Skip for fullscreen: window_ssd_bar() returns 25 once
                         // the decoration is in the map (above), so the camera
                         // target drifts by bar/2 and breaks fullscreen alignment.
-                        if !is_widget && !is_fullscreen {
+                        if !is_widget && !is_fullscreen && !deferred_fit_or_fs {
                             let reset = self.config.zoom_reset_on_new_window;
                             // Cursor mode is opinionated about "stay put". Only
                             // override when the user is in overview (zoom < 1)
@@ -531,7 +535,20 @@ impl CompositorHandler for DriftWm {
                         // One-shot: snapshot is only valid for the first
                         // placement; later commits use the now-mapped state.
                         self.auto_anchor_snapshot.remove(&root);
+                        // Cache the auto-placed (pre-fit/pre-fullscreen) rect.
+                        // `fit_window_snapped` overwrites this with the post-fit
+                        // rect after shifting the cluster; non-snapped fit and
+                        // fullscreen keep this one (cluster stays put / viewport
+                        // state).
                         self.refresh_stable_snap_rect(&window);
+
+                        // Apply any deferred fit/fullscreen now that
+                        // `restore_size` is captured and the window is mapped.
+                        if self.pending_fullscreen.remove(&root) {
+                            self.enter_fullscreen(&window);
+                        } else if self.pending_fit.remove(&root) {
+                            self.decoration_fit(&window);
+                        }
                     } else if !has_size {
                         // No size yet — retry next commit
                         self.pending_center.insert(root.clone());
@@ -558,6 +575,7 @@ impl CompositorHandler for DriftWm {
                             (target_center.y - total_h as f64 / 2.0) as i32 + bar,
                         ));
                         self.space.map_element(window.clone(), new_loc, false);
+                        self.refresh_stable_snap_rect(&window);
                         self.pending_recenter.remove(&root.id());
                     }
                 }

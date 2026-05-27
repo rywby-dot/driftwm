@@ -436,6 +436,12 @@ pub struct DriftWm {
     // -- global: window management --
     pub pending_center: HashSet<WlSurface>,
     pub pending_size: HashSet<WlSurface>,
+    /// Surfaces that requested set_maximized / set_fullscreen before their
+    /// first sized commit. Applied after first-commit positioning runs, so
+    /// `restore_size` / `saved_size` get captured from the client's
+    /// preferred geometry rather than (0,0).
+    pub pending_fit: HashSet<WlSurface>,
+    pub pending_fullscreen: HashSet<WlSurface>,
     /// Snapshot of the keyboard's focused window at `new_toplevel` time,
     /// keyed by the new surface. Used by `auto_placement_pos` to anchor
     /// against whatever the user was working with — *before* `new_toplevel`

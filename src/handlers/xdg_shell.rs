@@ -145,6 +145,13 @@ impl XdgShellHandler for DriftWm {
         _output: Option<wl_output::WlOutput>,
     ) {
         let wl_surface = surface.wl_surface().clone();
+        // Defer until the first sized commit — geometry is still (0,0)
+        // here, which would poison `saved_size`, and the initial-commit
+        // positioning block would clobber the fullscreen map.
+        if self.pending_center.contains(&wl_surface) {
+            self.pending_fullscreen.insert(wl_surface);
+            return;
+        }
         let window = self
             .space
             .elements()
@@ -156,6 +163,7 @@ impl XdgShellHandler for DriftWm {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.pending_fullscreen.remove(surface.wl_surface());
         if let Some(output) = self.find_fullscreen_output_for_surface(surface.wl_surface()) {
             self.exit_fullscreen_on(&output);
         }
@@ -163,18 +171,23 @@ impl XdgShellHandler for DriftWm {
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        if self.pending_center.contains(&wl_surface) {
+            self.pending_fit.insert(wl_surface);
+            return;
+        }
         let window = self
             .space
             .elements()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
-            self.decoration_toggle_fit(&window);
+            self.decoration_fit(&window);
         }
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        self.pending_fit.remove(&wl_surface);
         let window = self
             .space
             .elements()
@@ -193,6 +206,8 @@ impl XdgShellHandler for DriftWm {
         self.pending_ssd.remove(&wl_surface.id());
         self.pending_center.remove(&wl_surface);
         self.pending_size.remove(&wl_surface);
+        self.pending_fit.remove(&wl_surface);
+        self.pending_fullscreen.remove(&wl_surface);
         self.pending_recenter.remove(&wl_surface.id());
         self.image_copy_capture_state.remove_toplevel(&wl_surface);
         // Drop cached capture texture/damage tracker for this surface.

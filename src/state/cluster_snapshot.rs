@@ -230,7 +230,11 @@ impl DriftWm {
     }
 
     /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call at
-    /// settled events (initial map, move/resize grab end). The cached rect
+    /// settled events that change `w`'s canvas rect: initial map,
+    /// move/resize grab end, post-unfit recenter, fit-snapped / unfit-snapped
+    /// cluster members. Fit/unfit primaries are cached explicitly by those
+    /// paths (the client hasn't acked the configure yet, so
+    /// `geometry().size` here would store wrong dimensions). The cached rect
     /// outlives mid-teardown geometry changes and is consulted by
     /// `first_spatially_related_in_history` when picking a focus follow.
     pub fn refresh_stable_snap_rect(&mut self, w: &Window) {

@@ -160,6 +160,10 @@ impl DriftWm {
 
         window.enter_fit_configure(target_size);
         self.space.map_element(window.clone(), new_loc, false);
+        // Don't refresh `stable_snap_rects` here — the fit canvas position
+        // snap-touches nothing, so close-time `cluster_of` would degrade to
+        // `{self}`. The pre-fit rect is the window's cluster identity.
+        // (Snapped fit follows a different rule — see `fit_window_snapped`.)
 
         // Raise, focus, animate camera + zoom to 1.0
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -302,8 +306,25 @@ impl DriftWm {
         let fit = self.compute_fit_geometry(window);
         let old_rect = snap_rect_at(old_loc, old_size, bar, bw);
         let new_rect = snap_rect_at(fit.new_loc, fit.target_size, bar, bw);
+        // Capture the cluster before shifting — members' caches must follow
+        // their new live positions, or close-time `cluster_of` sees stale
+        // cache vs shifted live and can't reconstruct the cluster.
+        let cluster_members: Vec<Window> = {
+            let rects = self.all_windows_with_snap_rects();
+            driftwm::layout::cluster::cluster_of(window, &rects, self.config.snap_gap)
+                .into_iter()
+                .filter(|w| w != window)
+                .collect()
+        };
         self.shift_cluster_around_primary(window, old_rect, new_rect);
         self.fit_window(window);
+        for member in &cluster_members {
+            self.refresh_stable_snap_rect(member);
+        }
+        // Insert the primary's post-fit rect explicitly: `geometry().size`
+        // is still pre-fit until the client acks the configure, so
+        // `refresh_stable_snap_rect` would cache wrong dimensions.
+        self.stable_snap_rects.insert(wl_surface.id(), new_rect);
     }
 
     pub fn unfit_window_snapped(&mut self, window: &Window) {
@@ -329,8 +350,21 @@ impl DriftWm {
         ));
         let old_rect = snap_rect_at(old_loc, old_size, bar, bw);
         let new_rect = snap_rect_at(new_loc, saved_size, bar, bw);
+        // See `fit_window_snapped` for why we refresh member caches here.
+        let cluster_members: Vec<Window> = {
+            let rects = self.all_windows_with_snap_rects();
+            driftwm::layout::cluster::cluster_of(window, &rects, self.config.snap_gap)
+                .into_iter()
+                .filter(|w| w != window)
+                .collect()
+        };
         self.shift_cluster_around_primary(window, old_rect, new_rect);
         self.unfit_window(window);
+        for member in &cluster_members {
+            self.refresh_stable_snap_rect(member);
+        }
+        // Primary's cache is refreshed by the pending_recenter completion
+        // in `handlers/compositor.rs` once the client acks the exit configure.
     }
 
     pub fn toggle_fit_window_snapped(&mut self, window: &Window) {
@@ -346,6 +380,14 @@ impl DriftWm {
             self.toggle_fit_window_snapped(window);
         } else {
             self.toggle_fit_window(window);
+        }
+    }
+
+    pub fn decoration_fit(&mut self, window: &Window) {
+        if self.config.decoration_fit_snapped {
+            self.fit_window_snapped(window);
+        } else {
+            self.fit_window(window);
         }
     }
 
