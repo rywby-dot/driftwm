@@ -21,14 +21,23 @@ The result covers the entire output behind all windows.
 
 ### Custom (provided by driftwm)
 
-| Name       | Type    | Description                               |
-| ---------- | ------- | ----------------------------------------- |
-| `u_camera` | `vec2`  | Viewport position on the canvas in pixels |
-| `u_time`   | `float` | Seconds since compositor start            |
+| Name       | Type    | Description                                                       |
+| ---------- | ------- | ----------------------------------------------------------------- |
+| `u_camera` | `vec2`  | Canvas→screen offset in canvas pixels (viewport's top-left)       |
+| `u_zoom`   | `float` | Canvas→screen scale (1.0 = unzoomed, >1 zoomed in, <1 zoomed out) |
+| `u_time`   | `float` | Seconds since compositor start                                    |
+
+All three are optional — declare only the ones your shader uses. driftwm
+detects each at compile time and skips pushing uniforms the shader doesn't
+consume, so an unreferenced uniform costs nothing per frame.
 
 `v_coords * size` gives screen-local pixel coordinates (top-left = 0,0).
 Adding `u_camera` converts to canvas coordinates — this is how the background
-scrolls with the viewport.
+scrolls with the viewport. Without `u_camera`, the shader is fixed to the
+screen and doesn't scroll. By default features defined in canvas pixels
+grow/shrink with zoom, same as windows; `u_zoom` lets you change that
+relationship if you want (e.g. divide a feature's size by `u_zoom` to keep
+it screen-sized regardless of zoom level).
 
 ## Output
 
@@ -39,9 +48,27 @@ compositor opacity:
 gl_FragColor = vec4(color, 1.0) * alpha;
 ```
 
-## Minimal example
+## Examples
 
-Solid color that shifts hue based on viewport position:
+### Solid color (cheapest)
+
+No camera, no zoom, no time — uniforms are pushed once at init and never again.
+Equivalent in cost to `type = "wallpaper"` with a 1×1 image:
+
+```glsl
+precision mediump float;
+uniform float alpha;
+
+const vec3 BG = vec3(0.07, 0.07, 0.09);
+
+void main() {
+    gl_FragColor = vec4(BG, 1.0) * alpha;
+}
+```
+
+### Hue shift across the canvas
+
+Uses `u_camera` so the gradient scrolls with the viewport:
 
 ```glsl
 precision mediump float;
@@ -78,6 +105,9 @@ void main() {
 - **Animated shaders**: `u_time` gives seconds since compositor start, enabling
   time-driven animations. driftwm re-renders every frame when a shader uses
   `u_time` — declare it in your shader and it will animate continuously.
+- **Zoom-aware shaders**: declare `uniform float u_zoom;` to react to viewport
+  zoom. Common pattern: divide canvas-pixel sizes by `u_zoom` to keep features
+  the same screen size at any zoom level (e.g. `DOT_RADIUS / u_zoom`).
 - **Colors as constants**: Define colors, spacing, and other tunables as
   GLSL `const` values at the top of your shader. This keeps everything in
   one file — no config round-trip needed.

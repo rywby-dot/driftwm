@@ -29,12 +29,12 @@ pub fn update_background_element(
     let canvas_h = (output_size.h as f64 / cur_zoom).ceil() as i32;
     let canvas_area = Rectangle::from_size((canvas_w, canvas_h).into());
 
-    // Only push new uniforms when something the shader consumes has changed —
-    // smithay's update_uniforms unconditionally bumps the element's CommitCounter,
-    // which would otherwise cause the full-screen bg to damage every frame and
-    // force re-composition of every element above it (blur especially).
-    let animated = state.render.background_is_animated;
-    let uniforms_stale = camera_moved || zoom_changed || animated;
+    // Only push uniforms the shader actually consumes — update_uniforms bumps
+    // the element's CommitCounter, which would damage the full-screen bg every
+    // frame and force re-composition of every element above (blur especially).
+    let uniforms_stale = (camera_moved && state.render.background_uses_camera)
+        || (zoom_changed && state.render.background_uses_zoom)
+        || state.render.background_is_animated;
 
     if let Some(elem) = state.render.cached_bg_elements.get_mut(&output_name) {
         elem.resize(canvas_area, Some(vec![canvas_area]));
@@ -43,6 +43,7 @@ pub fn update_background_element(
             elem.update_uniforms(vec![
                 Uniform::new("u_camera", (cur_camera.x as f32, cur_camera.y as f32)),
                 Uniform::new("u_time", time_secs),
+                Uniform::new("u_zoom", cur_zoom as f32),
             ]);
         }
     } else if let Some(elem) = state.render.cached_tile_bg.get_mut(&output_name) {
@@ -74,13 +75,11 @@ pub fn init_background(
     initial_size: Size<i32, Logical>,
     output_name: &str,
 ) {
-    // Each branch is responsible for leaving `background_is_animated` correct:
-    //   - texture branches (tile/wallpaper) set it false on success.
-    //   - shader branch re-derives it on cache miss; on cache hit (second
-    //     output hotplug with the same shader) the flag is already correct
-    //     from the first init.
-    // Resetting eagerly here would clobber that flag on second-monitor cache
-    // hits and silently freeze animated shaders on the new output.
+    // Don't reset the background_uses_*/is_animated flags here: on a
+    // second-monitor cache hit the shader branch reuses the cached compiled
+    // shader and skips re-derivation, so a reset would freeze animated /
+    // stall pan-driven shaders on the new output. Each init branch is
+    // responsible for setting the flags on its own success path.
     let texture_init: Option<bool> = match state.config.background.kind.clone() {
         BackgroundKind::Tile(path) => Some(try_init_texture_bg(
             state, renderer, initial_size, output_name, &path, TextureBgMode::Tile,
@@ -159,10 +158,12 @@ fn try_init_texture_bg(
         TextureBgMode::Wallpaper => &mut state.render.cached_wallpaper_bg,
     };
     target.insert(output_name.to_string(), elem);
-    // Tile/wallpaper modes have no per-frame uniform updates, so the
-    // animated-flag must be false. (A stale `true` from a prior animated
-    // shader would force every-frame redraws and defeat damage savings.)
+    // Clear stale flags from a prior shader-mode bg — otherwise they'd
+    // force every-frame redraws or push uniforms into a texture program
+    // that doesn't declare them.
     state.render.background_is_animated = false;
+    state.render.background_uses_camera = false;
+    state.render.background_uses_zoom = false;
     true
 }
 
@@ -228,7 +229,9 @@ fn init_shader_bg(
             }
         };
 
-        state.render.background_is_animated = shader_source.contains("uniform float u_time");
+        state.render.background_is_animated = references_uniform(&shader_source, "float", "u_time");
+        state.render.background_uses_camera = references_uniform(&shader_source, "vec2", "u_camera");
+        state.render.background_uses_zoom = references_uniform(&shader_source, "float", "u_zoom");
         state.render.background_shader = Some(compiled.clone());
         compiled
     };
@@ -243,7 +246,16 @@ fn init_shader_bg(
         vec![
             Uniform::new("u_camera", (0.0f32, 0.0f32)),
             Uniform::new("u_time", time_secs),
+            Uniform::new("u_zoom", 1.0f32),
         ],
         Kind::Unspecified,
     ));
+}
+
+/// True if `src` declares `uniform <type> <name>` (with optional precision
+/// qualifier). Drives the per-uniform damage gating in `update_background_element`.
+fn references_uniform(src: &str, type_: &str, name: &str) -> bool {
+    ["", "lowp ", "mediump ", "highp "]
+        .iter()
+        .any(|prec| src.contains(&format!("uniform {prec}{type_} {name}")))
 }

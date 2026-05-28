@@ -72,10 +72,12 @@ impl DriftWm {
 
         // Always clear background cache so shader-file edits take effect
         // after `touch`ing config, and type swaps (shader/tile/wallpaper)
-        // are clean. Reset `background_is_animated` so a stale `true` from
-        // a prior animated shader can't force per-frame redraws.
+        // are clean. Reset usage flags so stale `true`s from a prior shader
+        // can't force per-frame redraws or push unused uniforms.
         self.render.background_shader = None;
         self.render.background_is_animated = false;
+        self.render.background_uses_camera = false;
+        self.render.background_uses_zoom = false;
         self.render.cached_bg_elements.clear();
         self.render.tile_shader = None;
         self.render.cached_tile_bg.clear();

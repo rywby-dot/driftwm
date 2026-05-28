@@ -16,7 +16,14 @@ pub struct RenderCache {
     pub border_shader: Option<GlesPixelProgram>,
     pub corner_clip_shader: Option<GlesTexProgram>,
     pub background_shader: Option<GlesPixelProgram>,
+    /// `u_time` is referenced — drives per-frame redraws.
     pub background_is_animated: bool,
+    /// `u_camera` is referenced — gates camera-driven uniform pushes so a
+    /// shader-mode bg referencing none of u_camera/u_zoom/u_time is as cheap
+    /// as wallpaper mode (no per-frame CommitCounter bumps).
+    pub background_uses_camera: bool,
+    /// `u_zoom` is referenced — gates zoom-driven uniform pushes.
+    pub background_uses_zoom: bool,
     pub blur_down_shader: Option<GlesTexProgram>,
     pub blur_up_shader: Option<GlesTexProgram>,
     pub blur_mask_shader: Option<GlesTexProgram>,
@@ -42,6 +49,8 @@ impl RenderCache {
             corner_clip_shader: None,
             background_shader: None,
             background_is_animated: false,
+            background_uses_camera: false,
+            background_uses_zoom: false,
             blur_down_shader: None,
             blur_up_shader: None,
             blur_mask_shader: None,

@@ -138,7 +138,7 @@ mod tests {
         // libdisplay-info reports the achieved refresh, not the requested one,
         // and our name encodes that for easier debugging from kernel logs.
         let m = synth_cvt(1920, 1080, 60).unwrap();
-        let bytes: Vec<u8> = m.name.iter().map(|c| *c as u8).collect();
+        let bytes: Vec<u8> = m.name.iter().map(|&b| b as u8).collect();
         let nul = bytes.iter().position(|&b| b == 0).expect("NUL-terminated");
         let s = std::str::from_utf8(&bytes[..nul]).unwrap();
         assert!(s.starts_with("1920x1080@"), "name = {s:?}");
