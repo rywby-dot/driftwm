@@ -3,7 +3,6 @@ precision highp float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 uniform vec2 u_camera;
 uniform float u_time;
 
@@ -71,5 +70,5 @@ void main() {
     col = mix(col, overlay,  smoothstep(0.56, 0.74, smoke));
     col = mix(col, subtext,  smoothstep(0.68, 0.88, smoke) * 0.55);
 
-    gl_FragColor = vec4(col, 1.0) * alpha;
+    gl_FragColor = vec4(col, 1.0);
 }

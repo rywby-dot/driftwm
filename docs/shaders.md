@@ -17,7 +17,6 @@ The result covers the entire output behind all windows.
 | ---------- | ------- | ------------------------------------------------- |
 | `v_coords` | `vec2`  | Normalized position within the output, 0.0–1.0    |
 | `size`     | `vec2`  | Output dimensions in pixels (e.g. 1920.0, 1080.0) |
-| `alpha`    | `float` | Element opacity, normally 1.0                     |
 
 ### Custom (provided by driftwm)
 
@@ -41,11 +40,10 @@ it screen-sized regardless of zoom level).
 
 ## Output
 
-Set `gl_FragColor` to an RGBA `vec4`. Multiply by `alpha` to respect
-compositor opacity:
+Set `gl_FragColor` to an RGBA `vec4`:
 
 ```glsl
-gl_FragColor = vec4(color, 1.0) * alpha;
+gl_FragColor = vec4(color, 1.0);
 ```
 
 ## Examples
@@ -57,12 +55,11 @@ Equivalent in cost to `type = "wallpaper"` with a 1×1 image:
 
 ```glsl
 precision mediump float;
-uniform float alpha;
 
 const vec3 BG = vec3(0.07, 0.07, 0.09);
 
 void main() {
-    gl_FragColor = vec4(BG, 1.0) * alpha;
+    gl_FragColor = vec4(BG, 1.0);
 }
 ```
 
@@ -75,7 +72,6 @@ precision mediump float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 uniform vec2 u_camera;
 
 void main() {
@@ -85,7 +81,7 @@ void main() {
         sin(canvas.y) * 0.5 + 0.5,
         0.5
     );
-    gl_FragColor = vec4(col, 1.0) * alpha;
+    gl_FragColor = vec4(col, 1.0);
 }
 ```
 

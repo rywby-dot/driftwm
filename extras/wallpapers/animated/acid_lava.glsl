@@ -3,7 +3,6 @@ precision highp float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 uniform vec2 u_camera;
 uniform float u_time;
 
@@ -56,5 +55,5 @@ void main() {
     col += emberCol * ember * 0.65;
     col += hot * pow(ember, 2.2) * 0.30;
 
-    gl_FragColor = vec4(col, 1.0) * alpha;
+    gl_FragColor = vec4(col, 1.0);
 }

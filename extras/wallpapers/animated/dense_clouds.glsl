@@ -3,7 +3,6 @@ precision highp float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 uniform vec2 u_camera;
 uniform float u_time;
 
@@ -72,5 +71,5 @@ void main() {
     col = mix(col, brightEdge, smoothstep(0.58, 0.84, density) * 0.35);
     col = mix(col, sunColor,   sunGlow * 0.50);
 
-    gl_FragColor = vec4(col, 1.0) * alpha;
+    gl_FragColor = vec4(col, 1.0);
 }

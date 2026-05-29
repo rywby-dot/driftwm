@@ -3,7 +3,6 @@ precision highp float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 uniform vec2 u_camera;
 
 vec2 hash2(vec2 p) {
@@ -50,5 +49,5 @@ void main() {
         col = mix(vec3(0.0, 0.7, 0.65), vec3(0.5, 0.95, 0.4), (f - 0.65) / 0.35);
     }
 
-    gl_FragColor = vec4(col, 1.0) * alpha;
+    gl_FragColor = vec4(col, 1.0);
 }

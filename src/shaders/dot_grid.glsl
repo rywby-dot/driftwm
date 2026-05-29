@@ -5,7 +5,6 @@ precision mediump float;
 
 varying vec2 v_coords;
 uniform vec2 size;
-uniform float alpha;
 
 uniform vec2 u_camera;
 
@@ -28,5 +27,5 @@ void main() {
 
     float dot_alpha = 1.0 - smoothstep(DOT_RADIUS - 0.5, DOT_RADIUS + 0.5, d);
 
-    gl_FragColor = mix(BG_COLOR, DOT_COLOR, dot_alpha) * alpha;
+    gl_FragColor = mix(BG_COLOR, DOT_COLOR, dot_alpha);
 }
