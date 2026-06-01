@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
 authors = ["Klim Kostiuk <2601074@gmail.com>"]
+description = "A trackpad-first infinite canvas Wayland compositor"
+repository = "https://github.com/malbiruk/driftwm"
 
 [dependencies]
 smithay = { git = "https://github.com/Smithay/smithay.git", rev = "5312d5caedd0c2ce563a63719d38ae2183149210", default-features = false, features = [

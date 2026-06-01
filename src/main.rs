@@ -40,6 +40,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    if std::env::args().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "driftwm {} — {}\n\
+             \n\
+             USAGE:\n    \
+                 driftwm [OPTIONS]\n\
+             \n\
+             OPTIONS:\n    \
+                 --backend <udev|winit>   Backend (default: udev on TTY, winit if nested)\n    \
+                 --config <path>          Use an alternate config file\n    \
+                 --check-config           Validate config and exit\n    \
+                 -V, --version            Print version\n    \
+                 -h, --help               Print this help\n\
+             \n\
+             {}",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_DESCRIPTION"),
+            env!("CARGO_PKG_REPOSITORY"),
+        );
+        return Ok(());
+    }
+
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("driftwm {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
