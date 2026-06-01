@@ -258,6 +258,11 @@ impl XdgShellHandler for DriftWm {
                 })
                 .or_else(|| self.first_spatially_related_in_history(window));
 
+            // When auto-navigation is off, dropping an off-screen follow target
+            // guarantees focus never lands somewhere the user can't see.
+            let follow = follow
+                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
+
             let keyboard = self.seat.get_keyboard().unwrap();
             let current_focus = keyboard.current_focus();
             let no_keyboard_focus = current_focus.is_none();

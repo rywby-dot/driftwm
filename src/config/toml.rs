@@ -107,6 +107,7 @@ pub(super) struct CursorConfig {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NavigationConfig {
     pub animation_speed: Option<f64>,
+    pub auto_navigate_on_close: Option<bool>,
     pub nudge_step: Option<i32>,
     pub pan_step: Option<f64>,
     pub trackpad_speed: Option<f64>,

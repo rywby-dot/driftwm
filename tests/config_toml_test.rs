@@ -238,6 +238,22 @@ fn toml_zoom_reset_policies_can_be_disabled_independently() {
 }
 
 #[test]
+fn toml_auto_navigate_on_close_defaults_true() {
+    let config = Config::from_toml("").unwrap();
+    assert!(config.auto_navigate_on_close);
+}
+
+#[test]
+fn toml_auto_navigate_on_close_can_be_disabled() {
+    let toml = r#"
+        [navigation]
+        auto_navigate_on_close = false
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert!(!config.auto_navigate_on_close);
+}
+
+#[test]
 fn toml_new_navigation_fields_override_deprecated_scroll() {
     let toml = r#"
         [input.scroll]

@@ -59,6 +59,9 @@ pub struct Config {
     pub edge_pan_max: f64,
     /// Base lerp factor for camera animation (frame-rate independent). 0.15 = smooth.
     pub animation_speed: f64,
+    /// On close, pan the camera to the newly focused window (true). When false,
+    /// focus only moves to an already-visible window — never off-screen.
+    pub auto_navigate_on_close: bool,
     /// Modifier held during window cycling. Release commits selection.
     pub cycle_modifier: CycleModifier,
     /// Zoom step multiplier per keypress. 1.1 = 10% per press.
@@ -492,6 +495,7 @@ impl Config {
             edge_pan_min: raw.navigation.edge_pan.speed_min.unwrap_or(4.0),
             edge_pan_max: raw.navigation.edge_pan.speed_max.unwrap_or(10.0),
             animation_speed: raw.navigation.animation_speed.unwrap_or(0.3),
+            auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
             cycle_modifier,
             zoom_step: raw.zoom.step.unwrap_or(1.1),
             zoom_fit_padding: raw.zoom.fit_padding.unwrap_or(80.0),
