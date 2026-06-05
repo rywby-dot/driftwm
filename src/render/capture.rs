@@ -266,6 +266,35 @@ fn render_to_offscreen(
     }
 }
 
+/// One-shot offscreen render of `elements` into a tightly-packed RGBA8 buffer
+/// (`image`-crate byte order). `size` is the buffer's physical pixel size;
+/// `scale` matches the scale the elements were composed at. `Abgr8888` puts
+/// bytes in R,G,B,A order with a transparent clear, so content lands on a
+/// transparent canvas.
+pub(crate) fn render_elements_to_rgba(
+    renderer: &mut GlesRenderer,
+    size: Size<i32, Physical>,
+    scale: Scale<f64>,
+    elements: &[&OutputRenderElements],
+) -> Result<Vec<u8>, String> {
+    use smithay::backend::renderer::ExportMem;
+
+    let mapping = render_to_offscreen(
+        renderer,
+        size,
+        scale,
+        Transform::Normal,
+        Fourcc::Abgr8888,
+        elements,
+        None,
+    )
+    .map_err(|e| format!("offscreen render failed: {e:?}"))?;
+    let bytes = renderer
+        .map_texture(&mapping)
+        .map_err(|e| format!("map_texture failed: {e:?}"))?;
+    Ok(bytes.to_vec())
+}
+
 /// Render elements directly into a client-provided DMA-BUF (zero CPU copies).
 ///
 /// The caller must choose the correct `transform` for the protocol:

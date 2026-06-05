@@ -84,7 +84,7 @@ Current source layout:
 - **Gesture-driven**: configurable gesture and mouse bindings with context-awareness (on-window/on-canvas/anywhere). Defaults: 2-finger pinch for viewport zoom, 3-finger swipe for pan, 4-finger for navigation. Mouse equivalents use Mod+click modifiers. Unbound gestures forward to apps.
 - **Canvas background**: scrolls with viewport (not fixed to screen). Default is a GLSL dot-grid shader; static shaders are cached and only re-render on viewport changes.
 - **Widgets**: layer-shell surfaces or xdg-toplevel windows placed at canvas positions via window rules (`app_id` glob matching, `position` field). Canvas layers bypass the layer map and render at fixed canvas coordinates.
-- **External tools**: launcher, lock screen, screenshots are external programs (bemenu-run, swaylock, grim) — not built into the compositor.
+- **External tools**: launcher, lock screen, and on-screen screenshots are external programs (bemenu-run, swaylock, grim) — not built into the compositor. Exception: a built-in *canvas/DPI* screenshot (`driftwm msg screenshot`) captures off-screen canvas regions at arbitrary resolution, which grim structurally can't do; grim remains the default for plain on-screen captures.
 
 ## Reference Codebases
 

@@ -10,19 +10,20 @@ JSON, so any language can speak it directly.
 Run `driftwm msg <command>` from inside a driftwm session. Each command reads
 when given no arguments and writes when given arguments.
 
-| Command          | Example                       | Description                                                                                      |
-| ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| `camera`         | `driftwm msg camera`          | Print the camera position (viewport center)                                                      |
-| `camera <x> <y>` | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                       |
-| `zoom`           | `driftwm msg zoom`            | Print the zoom level                                                                             |
-| `zoom <level>`   | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)               |
-| `focus`          | `driftwm msg focus`           | Print the focused window's `app_id`                                                              |
-| `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive); navigates to it only if it's off-screen |
-| `move`           | `driftwm msg move`            | Print the focused window's position                                                              |
-| `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window                                                                          |
-| `layout`         | `driftwm msg layout`          | Print the active keyboard layout                                                                 |
-| `action <spec>`  | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                  |
-| `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory                                                      |
+| Command          | Example                       | Description                                                                                          |
+| ---------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `camera`         | `driftwm msg camera`          | Print the camera position (viewport center)                                                          |
+| `camera <x> <y>` | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                           |
+| `zoom`           | `driftwm msg zoom`            | Print the zoom level                                                                                 |
+| `zoom <level>`   | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                   |
+| `focus`          | `driftwm msg focus`           | Print the focused window's `app_id`                                                                  |
+| `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive); navigates to it only if it's off-screen     |
+| `move`           | `driftwm msg move`            | Print the focused window's position                                                                  |
+| `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window                                                                              |
+| `layout`         | `driftwm msg layout`          | Print the active keyboard layout                                                                     |
+| `action <spec>`  | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                      |
+| `screenshot ...` | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots)) |
+| `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory                                                          |
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
@@ -74,6 +75,39 @@ a **center** point, with **Y pointing up**. So `move 0 0` centers the focused
 window on the canvas origin, `camera 0 0` centers the _viewport_ on the origin,
 and positive `y` is above it.
 
+### Screenshots
+
+`screenshot` is a **canvas capture**, not a screen grab: it re-renders a virtual
+viewport onto the canvas (reaching off-screen content at any resolution) instead
+of copying the framebuffer like `grim`. Windows get full chrome (title bar,
+border, rounded corners, shadow). **Panels/layer-shells and blur aren't drawn** —
+use `grim` for a literal screen grab.
+
+```bash
+driftwm msg screenshot                                # active output's current view
+driftwm msg screenshot window                         # focused window, isolated
+driftwm msg screenshot all --scale 2                  # all windows + background, 2× detail
+driftwm msg screenshot region 0 0 2000 1500           # canvas rect (center, Y-up)
+driftwm msg screenshot region $(slurp) --from-screen  # pick a region with slurp
+driftwm msg screenshot window -o - | wl-copy          # → clipboard, as an image
+```
+
+Targets: **no subcommand** = the active output's viewport (what you see, minus
+panels); **`window`** = the focused window isolated on transparency; **`all`** /
+**`region`** = a scene with the canvas background + every window's chrome (`all`
+adds a `[zoom] fit_padding` margin).
+
+- `--scale N` — pixels per canvas unit (default `1`); higher captures more detail
+  than the screen shows, independent of zoom.
+- `region X Y W H` — canvas coords (center, Y-up). With `--from-screen` they're
+  screen pixels; slurp's native `X,Y WxH` is accepted, so `region $(slurp)` works.
+- `-o PATH` — destination, or `-` for stdout (default
+  `./driftwm-screenshot-<time>.png`); the written path is printed.
+
+**Caveats:** no blur (a translucent window shows a sharp backdrop, not a blurred
+one); a gigapixel TIFF wallpaper uses a coarse pyramid level (softens at extreme
+`--scale`); captures tile internally but cap at 16384 px/side.
+
 ## Wire protocol
 
 The socket path is `$XDG_RUNTIME_DIR/driftwm/ipc-<WAYLAND_DISPLAY>.sock`
@@ -90,15 +124,16 @@ A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 
 ### Requests
 
-| Request          | JSON to send                               |
-| ---------------- | ------------------------------------------ |
-| get / set camera | `{"Camera":null}` / `{"Camera":[500,300]}` |
-| get / set zoom   | `{"Zoom":null}` / `{"Zoom":0.5}`           |
-| get / set focus  | `{"Focus":null}` / `{"Focus":"alacritty"}` |
-| get / set move   | `{"Move":null}` / `{"Move":[100,200]}`     |
-| layout           | `"Layout"`                                 |
-| run action       | `{"Action":"switch-layout next"}`          |
-| state            | `"State"`                                  |
+| Request          | JSON to send                                                              |
+| ---------------- | ------------------------------------------------------------------------- |
+| get / set camera | `{"Camera":null}` / `{"Camera":[500,300]}`                                |
+| get / set zoom   | `{"Zoom":null}` / `{"Zoom":0.5}`                                          |
+| get / set focus  | `{"Focus":null}` / `{"Focus":"alacritty"}`                                |
+| get / set move   | `{"Move":null}` / `{"Move":[100,200]}`                                    |
+| layout           | `"Layout"`                                                                |
+| run action       | `{"Action":"switch-layout next"}`                                         |
+| screenshot       | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}` |
+| state            | `"State"`                                                                 |
 
 ### Responses
 

@@ -27,6 +27,36 @@ pub enum Request {
     /// next"`. Any keybindable action is reachable, so one-shot ops live here
     /// rather than as their own commands.
     Action(String),
+    /// Capture to a PNG at `path` (absolute), at `scale` pixels per canvas unit.
+    /// Windows render with full chrome; `region`/`all` include the background, a
+    /// `window` capture stays transparent (see [`ScreenshotTarget`]).
+    Screenshot {
+        target: ScreenshotTarget,
+        scale: f64,
+        path: String,
+    },
+}
+
+/// What a [`Request::Screenshot`] captures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ScreenshotTarget {
+    /// The active output's current viewport on the canvas — what's visible there
+    /// (the default for a bare `screenshot`). Panels/layer-shells are excluded.
+    Viewport,
+    /// The focused window's geometry rect.
+    Window,
+    /// The bounding box of all non-widget windows.
+    All,
+    /// An explicit rectangle. Canvas coords are center/Y-up (the window-rule
+    /// convention); with `from_screen`, `(x, y, w, h)` is an output-screen pixel
+    /// rect (e.g. from `slurp`) mapped to the canvas via the active viewport.
+    Region {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        from_screen: bool,
+    },
 }
 
 /// A successful reply payload. Pairs with [`Request`] variants.
@@ -48,6 +78,12 @@ pub enum Response {
     Position {
         x: i32,
         y: i32,
+    },
+    /// A written screenshot: absolute `path` and pixel dimensions.
+    Screenshot {
+        path: String,
+        width: u32,
+        height: u32,
     },
     Ok,
 }
@@ -106,6 +142,27 @@ mod tests {
             Request::Move(None),
             Request::Move(Some((0, 0))),
             Request::Action("switch-layout next".into()),
+            Request::Screenshot {
+                target: ScreenshotTarget::Viewport,
+                scale: 1.0,
+                path: "/tmp/view.png".into(),
+            },
+            Request::Screenshot {
+                target: ScreenshotTarget::Window,
+                scale: 2.0,
+                path: "/tmp/shot.png".into(),
+            },
+            Request::Screenshot {
+                target: ScreenshotTarget::Region {
+                    x: -100,
+                    y: 200,
+                    w: 640,
+                    h: 480,
+                    from_screen: true,
+                },
+                scale: 1.0,
+                path: "/tmp/region.png".into(),
+            },
         ] {
             roundtrip(&r);
         }

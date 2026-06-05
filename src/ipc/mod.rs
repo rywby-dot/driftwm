@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
-use smithay::utils::SERIAL_COUNTER;
+use smithay::reexports::wayland_server::Resource;
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
+use smithay::wayland::seat::WaylandFocus;
 
 use crate::state::DriftWm;
 use driftwm::window_ext::WindowExt;
@@ -14,7 +16,7 @@ use driftwm::window_ext::WindowExt;
 pub mod client;
 pub mod protocol;
 
-use self::protocol::{Reply, Request, Response, socket_path};
+use self::protocol::{Reply, Request, Response, ScreenshotTarget, socket_path};
 
 /// Reject a command line longer than this (without a newline) — bounds the
 /// per-connection buffer against a client that never terminates a command.
@@ -149,6 +151,11 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Focus(arg) => cmd_focus(arg, state),
         Request::Move(arg) => cmd_move(arg, state),
         Request::Action(spec) => cmd_action(&spec, state),
+        Request::Screenshot {
+            target,
+            scale,
+            path,
+        } => cmd_screenshot(&target, scale, &path, state),
     }
 }
 
@@ -265,6 +272,188 @@ fn cmd_move(arg: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
             Ok(Response::Position { x, y })
         }
     }
+}
+
+/// Capture a screenshot synchronously to `path`.
+///
+/// The renderer lives on the backend, so we take it out of `state` to split the
+/// borrow (as the render loop does) and put it back on every path.
+fn cmd_screenshot(target: &ScreenshotTarget, scale: f64, path: &str, state: &mut DriftWm) -> Reply {
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("screenshot path must be absolute".to_string());
+    }
+    let region = resolve_screenshot_region(target, state)?;
+    // `window` captures isolate the window on transparency; every other target is
+    // a scene capture with the background.
+    let include_background = !matches!(target, ScreenshotTarget::Window);
+
+    let mut backend = state
+        .backend
+        .take()
+        .ok_or("no renderer available for capture")?;
+    let result = {
+        let renderer = backend.renderer();
+        crate::render::capture_region_to_png(
+            state,
+            renderer,
+            region,
+            scale,
+            include_background,
+            std::path::Path::new(path),
+        )
+    };
+    state.backend = Some(backend);
+
+    let cap = result?;
+    Ok(Response::Screenshot {
+        path: path.to_string(),
+        width: cap.width,
+        height: cap.height,
+    })
+}
+
+/// Resolve a screenshot target to an internal canvas rect (top-left, Y-down).
+fn resolve_screenshot_region(
+    target: &ScreenshotTarget,
+    state: &DriftWm,
+) -> Result<Rectangle<i32, Logical>, String> {
+    match *target {
+        ScreenshotTarget::Viewport => {
+            let output = state.active_output().ok_or("no active output to capture")?;
+            Ok(crate::state::output_viewport_rect(&output))
+        }
+        ScreenshotTarget::Window => {
+            let window = state
+                .focused_window()
+                .filter(|w| !w.is_widget())
+                .ok_or("no focused window to capture")?;
+            window_visual_rect(state, &window)
+                .ok_or_else(|| "focused window has no capturable area".to_string())
+        }
+        ScreenshotTarget::All => {
+            let mut acc: Option<Rectangle<i32, Logical>> = None;
+            for w in state.space.elements().filter(|w| !w.is_widget()) {
+                let Some(r) = window_visual_rect(state, w) else {
+                    continue;
+                };
+                acc = Some(match acc {
+                    Some(a) => union_rect(a, r),
+                    None => r,
+                });
+            }
+            let rect = acc.ok_or_else(|| "no windows to capture".to_string())?;
+            // Frame the windows with `fit_padding` canvas units of margin.
+            // `fit_padding` is defined as screen px at the fit zoom; applied in
+            // canvas units it equals that px count only at `--scale 1`.
+            let pad = state.config.zoom_fit_padding.max(0.0).round() as i32;
+            Ok(Rectangle::new(
+                Point::<i32, Logical>::from((rect.loc.x - pad, rect.loc.y - pad)),
+                Size::<i32, Logical>::from((rect.size.w + 2 * pad, rect.size.h + 2 * pad)),
+            ))
+        }
+        ScreenshotTarget::Region {
+            x,
+            y,
+            w,
+            h,
+            from_screen,
+        } => {
+            if w <= 0 || h <= 0 {
+                return Err("region width and height must be positive".to_string());
+            }
+            if from_screen {
+                // slurp coords live in the output *layout* space (`current_location()`,
+                // what wl_output/xdg-output advertise), NOT the output's position in the
+                // canvas Space (which tracks the camera). Map through the output hit.
+                let point = Point::<i32, Logical>::from((x, y));
+                let output = state
+                    .space
+                    .outputs()
+                    .find(|o| {
+                        Rectangle::new(o.current_location(), crate::state::output_logical_size(o))
+                            .contains(point)
+                    })
+                    .cloned()
+                    .or_else(|| state.active_output())
+                    .ok_or("no output for the screen region")?;
+                let layout_pos = output.current_location();
+                let (camera, zoom) = {
+                    let os = crate::state::output_state(&output);
+                    (os.camera, os.zoom)
+                };
+                let loc = Point::<i32, Logical>::from((
+                    (camera.x + (x - layout_pos.x) as f64 / zoom).round() as i32,
+                    (camera.y + (y - layout_pos.y) as f64 / zoom).round() as i32,
+                ));
+                let size = Size::<i32, Logical>::from((
+                    (w as f64 / zoom).round() as i32,
+                    (h as f64 / zoom).round() as i32,
+                ));
+                Ok(Rectangle::new(loc, size))
+            } else {
+                let size = Size::<i32, Logical>::from((w, h));
+                let loc = driftwm::canvas::rule_to_internal(x, y, size);
+                Ok(Rectangle::new(loc, size))
+            }
+        }
+    }
+}
+
+/// A window's full visual extent on the canvas: content padded by the title bar
+/// (above), border, and shadow radius — must match what `compose_capture_elements`
+/// draws. `None` if the window has no location or zero size.
+fn window_visual_rect(
+    state: &DriftWm,
+    window: &smithay::desktop::Window,
+) -> Option<Rectangle<i32, Logical>> {
+    let loc = state.space.element_location(window)?;
+    let size = window.geometry().size;
+    if size.w <= 0 || size.h <= 0 {
+        return None;
+    }
+    let wl_surface = window.wl_surface()?;
+
+    let is_fullscreen = state.fullscreen.values().any(|fs| &fs.window == window);
+    let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+    let applied = driftwm::config::applied_rule(&wl_surface);
+    let mode = driftwm::config::effective_decoration_mode(
+        applied.as_ref().and_then(|r| r.decoration.as_ref()),
+        &state.config.decorations.default_mode,
+    );
+    let bw = if is_fullscreen {
+        0
+    } else {
+        driftwm::config::effective_border_width(applied.as_ref(), mode, &state.config.decorations)
+    };
+    let shadow = !is_fullscreen
+        && driftwm::config::effective_shadow_enabled(
+            applied.as_ref(),
+            mode,
+            &state.config.decorations,
+        );
+    let bar = if has_ssd {
+        state.config.decorations.title_bar_height
+    } else {
+        0
+    };
+    let pad = if shadow {
+        driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32
+    } else {
+        0
+    };
+    let edge = bw + pad;
+    Some(Rectangle::new(
+        Point::<i32, Logical>::from((loc.x - edge, loc.y - bar - edge)),
+        Size::<i32, Logical>::from((size.w + 2 * edge, size.h + bar + 2 * edge)),
+    ))
+}
+
+fn union_rect(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let x0 = a.loc.x.min(b.loc.x);
+    let y0 = a.loc.y.min(b.loc.y);
+    let x1 = (a.loc.x + a.size.w).max(b.loc.x + b.size.w);
+    let y1 = (a.loc.y + a.size.h).max(b.loc.y + b.size.h);
+    Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
 }
 
 /// Serialize and send a reply. Switches to a bounded blocking write so a large

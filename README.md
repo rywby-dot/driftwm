@@ -184,7 +184,7 @@ window-search script that lets you search and jump to any open window.
 - New window placement: in viewport center (default), under cursor, or snapped adjacent to the focused window's cluster
 - Click-to-focus (default) or focus-follows-mouse (sloppy focus)
 - Session lock (swaylock), idle notify (swayidle/hypridle)
-- Screen capture: screencasting (OBS, Firefox, Discord) and screenshots
+- Screen capture: screencasting (OBS, Firefox, Discord) and screenshots, incl. built-in [canvas/DPI capture](docs/ipc.md#screenshots)
 - 40+ Wayland protocols
 - [IPC control](docs/ipc.md): script the compositor over a Unix socket with `driftwm msg`
 
@@ -277,7 +277,7 @@ improves a feature:
 
 - `xwayland-satellite` (≥ 0.7) — X11 app support (see below).
 - `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting. wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
-- `grim` + `slurp` — screenshots (+ cropping to region).
+- `grim` + `slurp` — screenshots (+ cropping to region). driftwm also has a built-in canvas/DPI capture: see [IPC › Screenshots](docs/ipc.md#screenshots).
 - `adwaita-fonts` — renders SSD title bars in `Adwaita Sans` to match GTK apps; without it a generic sans-serif is substituted. Font, size, weight, and alignment are configurable under `[decorations]`.
 - A cursor theme — most desktops set one up already; on a bare install driftwm falls back to a basic built-in arrow.
 
@@ -351,7 +351,7 @@ Here are some tools that work well with it:
 - **swaylock** — Lock screen
 - **swayidle / hypridle** — Idle timeout (lock, suspend)
 - **swayosd** — Volume/brightness OSD
-- **grim + slurp** — Screenshots
+- **grim + slurp** — Screenshots (or the built-in canvas/DPI capture: [IPC › Screenshots](docs/ipc.md#screenshots))
 - **wlr-randr / wdisplays** — Output configuration
 - **COSMIC Settings** — Wi-Fi, Bluetooth, sound (or **nm-applet** + **blueman** + **pavucontrol**)
 

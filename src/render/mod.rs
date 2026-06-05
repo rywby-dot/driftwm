@@ -1,11 +1,13 @@
 mod background;
 mod blur;
 mod capture;
+mod capture_background;
 mod cursor;
 mod elements;
 mod error_bar;
 mod layers;
 mod lifecycle;
+mod screenshot;
 mod shader_chunks;
 mod shaders;
 mod tile_chunks;
@@ -25,6 +27,7 @@ pub use lifecycle::{
     post_render, refresh_foreign_toplevels, take_presentation_feedback,
     update_primary_scanout_output,
 };
+pub use screenshot::capture_region_to_png;
 pub use shader_chunks::ShaderChunkCache;
 pub use shaders::{
     BorderPhysKey, ShadowPhysKey, compile_border_shader, compile_corner_clip_shader,
@@ -149,6 +152,360 @@ fn push_plain_elements(
             zoom,
         ))
     }));
+}
+
+/// Compose windows + SSD chrome + background for a *virtual* viewport at
+/// top-left canvas coord `camera`, `dpi_scale` pixels per canvas unit. DPI is
+/// folded into the render scale with zoom fixed at 1.0, so elements need no
+/// rescale.
+///
+/// Mirrors `compose_frame`'s per-window chrome but omits blur (the one
+/// framebuffer-sampling effect, which would seam across capture tiles) and the
+/// live per-output background caches (uses `capture_bg` instead). Everything
+/// emitted is a deterministic function of canvas position, so adjacent tiles
+/// stitch with no overlap margin. Layer surfaces, cursor, output outlines, and
+/// the error bar are excluded.
+///
+/// Border/shadow elements share the live `border_cache`/`shadow_cache`; a
+/// capture's keys (scale=dpi, zoom=1.0) differ from the live frame's, so the
+/// next live frame rebuilds those entries once — preferred over a second cache
+/// since captures are rare.
+pub(crate) fn compose_capture_elements(
+    state: &mut crate::state::DriftWm,
+    renderer: &mut GlesRenderer,
+    camera: Point<f64, Logical>,
+    dpi_scale: f64,
+    viewport_logical: Size<i32, Logical>,
+    capture_bg: &capture_background::CaptureBackground,
+) -> Vec<OutputRenderElements> {
+    use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+
+    let zoom = 1.0;
+    let output_scale = dpi_scale;
+    let scale = Scale::from(dpi_scale);
+    let visible_rect = canvas::visible_canvas_rect(camera.to_i32_round(), viewport_logical, zoom);
+
+    let focused_surface = state
+        .seat
+        .get_keyboard()
+        .and_then(|kb| kb.current_focus())
+        .map(|f| f.0);
+
+    let mut normal: Vec<OutputRenderElements> = Vec::new();
+    let mut widgets: Vec<OutputRenderElements> = Vec::new();
+
+    // Collect first: the surface-tree calls borrow `state`, which would conflict
+    // with an in-flight `state.space.elements()` iterator. Windows are Arc-backed.
+    let windows: Vec<smithay::desktop::Window> = state.space.elements().rev().cloned().collect();
+    for window in &windows {
+        let Some(loc) = state.space.element_location(window) else {
+            continue;
+        };
+        let geom_loc = window.geometry().loc;
+        let geom_size = window.geometry().size;
+        let Some(wl_surface) = window.wl_surface() else {
+            continue;
+        };
+        let is_fullscreen = state.fullscreen.values().any(|fs| &fs.window == window);
+        let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+
+        let applied = driftwm::config::applied_rule(&wl_surface);
+        let is_widget = applied.as_ref().is_some_and(|r| r.widget);
+        let is_focused = focused_surface.as_ref().is_some_and(|f| *f == *wl_surface);
+        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
+
+        let effective_mode = driftwm::config::effective_decoration_mode(
+            applied.as_ref().and_then(|r| r.decoration.as_ref()),
+            &state.config.decorations.default_mode,
+        );
+        let effective_bw = if is_fullscreen {
+            0
+        } else {
+            driftwm::config::effective_border_width(
+                applied.as_ref(),
+                effective_mode,
+                &state.config.decorations,
+            )
+        };
+        let border_color = if is_focused {
+            driftwm::config::effective_border_color_focused(
+                applied.as_ref(),
+                &state.config.decorations,
+            )
+        } else {
+            driftwm::config::effective_border_color(applied.as_ref(), &state.config.decorations)
+        };
+        let effective_corner_radius = driftwm::config::effective_corner_radius(
+            applied.as_ref(),
+            effective_mode,
+            &state.config.decorations,
+        );
+        let effective_shadow = !is_fullscreen
+            && driftwm::config::effective_shadow_enabled(
+                applied.as_ref(),
+                effective_mode,
+                &state.config.decorations,
+            );
+
+        let mut bbox = window.bbox();
+        bbox.loc += loc - geom_loc;
+        if has_ssd {
+            let r = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32;
+            let bar = state.config.decorations.title_bar_height;
+            bbox.loc.x -= r;
+            bbox.loc.y -= bar + r;
+            bbox.size.w += 2 * r;
+            bbox.size.h += bar + 2 * r;
+        }
+        if effective_bw > 0 {
+            bbox.loc.x -= effective_bw;
+            bbox.loc.y -= effective_bw;
+            bbox.size.w += 2 * effective_bw;
+            bbox.size.h += 2 * effective_bw;
+        }
+        if !visible_rect.overlaps(bbox) {
+            continue;
+        }
+
+        let render_loc: Point<f64, Logical> = Point::from((
+            loc.x as f64 - geom_loc.x as f64 - camera.x,
+            loc.y as f64 - geom_loc.y as f64 - camera.y,
+        ));
+        let loc_phys: Point<i32, Physical> = render_loc.to_physical_precise_round(scale);
+
+        let (elems, popup_elems) = if let Some(toplevel) = window.toplevel() {
+            let root = toplevel.wl_surface();
+            let top =
+                render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<GlesRenderer>>(
+                    renderer,
+                    root,
+                    loc_phys,
+                    scale,
+                    opacity as f32,
+                    Kind::Unspecified,
+                );
+            let mut popups: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+            for (popup, popup_offset) in smithay::desktop::PopupManager::popups_for_surface(root) {
+                let offset: Point<i32, Physical> = (window.geometry().loc + popup_offset
+                    - popup.geometry().loc)
+                    .to_physical_precise_round(scale);
+                popups.extend(render_elements_from_surface_tree::<
+                    _,
+                    WaylandSurfaceRenderElement<GlesRenderer>,
+                >(
+                    renderer,
+                    popup.wl_surface(),
+                    loc_phys + offset,
+                    scale,
+                    opacity as f32,
+                    Kind::Unspecified,
+                ));
+            }
+            (top, popups)
+        } else {
+            let elems = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                renderer,
+                loc_phys,
+                scale,
+                opacity as f32,
+            );
+            (elems, Vec::new())
+        };
+
+        let target = if is_widget { &mut widgets } else { &mut normal };
+        // Popups push first so they sit above the title bar and window content.
+        push_plain_elements(target, popup_elems, zoom);
+
+        if has_ssd {
+            let bar_height = state.config.decorations.title_bar_height;
+
+            // Reuse the buffer the live frame rasterized (no re-`update`): keeps
+            // borrows simple, text is microseconds-stale at worst.
+            if let Some(deco) = state.decorations.get(&wl_surface.id()) {
+                let bar_loc: Point<f64, Logical> =
+                    Point::from((render_loc.x, render_loc.y - bar_height as f64));
+                let bar_physical: Point<f64, Physical> = bar_loc.to_physical_precise_round(scale);
+                let bar_alpha = if opacity < 1.0 {
+                    Some(opacity as f32)
+                } else {
+                    None
+                };
+                if let Ok(bar_elem) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    bar_physical,
+                    &deco.title_bar,
+                    bar_alpha,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                ) {
+                    target.push(OutputRenderElements::Decoration(
+                        PixelSnapRescaleElement::from_element(
+                            bar_elem,
+                            Point::<i32, Physical>::from((0, 0)),
+                            zoom,
+                        ),
+                    ));
+                }
+            }
+
+            // Only bottom corners round (title bar covers the top edge).
+            if let Some(ref shader) = state.render.corner_clip_shader {
+                let radius = effective_corner_radius as f32;
+                if radius > 0.0 {
+                    let wg = window.geometry();
+                    let geometry = Rectangle::new(
+                        Point::<f64, Logical>::from((
+                            render_loc.x + wg.loc.x as f64,
+                            render_loc.y + wg.loc.y as f64,
+                        )),
+                        Size::<f64, Logical>::from((wg.size.w as f64, wg.size.h as f64)),
+                    );
+                    push_corner_clipped_elements(
+                        target,
+                        elems,
+                        shader,
+                        geometry,
+                        [0.0, 0.0, radius, radius],
+                        zoom,
+                        output_scale,
+                    );
+                } else {
+                    push_plain_elements(target, elems, zoom);
+                }
+            } else {
+                push_plain_elements(target, elems, zoom);
+            }
+
+            if effective_bw > 0
+                && let Some(shader) = state.render.border_shader.clone()
+            {
+                let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
+                    (render_loc.x, render_loc.y - bar_height as f64).into(),
+                    (geom_size.w as f64, (geom_size.h + bar_height) as f64).into(),
+                );
+                push_border_element(
+                    target,
+                    &mut state.render.border_cache,
+                    wl_surface.id(),
+                    &shader,
+                    inner_logical,
+                    effective_corner_radius as f32,
+                    effective_bw,
+                    border_color,
+                    is_focused,
+                    opacity,
+                    scale,
+                    zoom,
+                );
+            }
+
+            if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
+                let bw = effective_bw as f64;
+                let body_logical: Rectangle<f64, Logical> = Rectangle::new(
+                    (render_loc.x - bw, render_loc.y - bar_height as f64 - bw).into(),
+                    (
+                        geom_size.w as f64 + 2.0 * bw,
+                        (geom_size.h + bar_height) as f64 + 2.0 * bw,
+                    )
+                        .into(),
+                );
+                push_shadow_element(
+                    target,
+                    &mut state.render.shadow_cache,
+                    wl_surface.id(),
+                    &shader,
+                    body_logical,
+                    (effective_corner_radius + effective_bw) as f32,
+                    opacity,
+                    scale,
+                    zoom,
+                );
+            }
+        } else if let Some(ref shader) = state.render.corner_clip_shader {
+            let geo = window.geometry();
+            let radius = effective_corner_radius as f32;
+            let bare = matches!(effective_mode, driftwm::config::DecorationMode::None);
+
+            if !bare && !is_fullscreen {
+                let geometry = Rectangle::new(
+                    Point::<f64, Logical>::from((
+                        render_loc.x + geo.loc.x as f64,
+                        render_loc.y + geo.loc.y as f64,
+                    )),
+                    Size::<f64, Logical>::from((geo.size.w as f64, geo.size.h as f64)),
+                );
+                push_corner_clipped_elements(
+                    target,
+                    elems,
+                    shader,
+                    geometry,
+                    [radius, radius, radius, radius],
+                    zoom,
+                    output_scale,
+                );
+
+                if effective_bw > 0
+                    && let Some(border_shader) = state.render.border_shader.clone()
+                {
+                    push_border_element(
+                        target,
+                        &mut state.render.border_cache,
+                        wl_surface.id(),
+                        &border_shader,
+                        geometry,
+                        radius,
+                        effective_bw,
+                        border_color,
+                        is_focused,
+                        opacity,
+                        scale,
+                        zoom,
+                    );
+                }
+
+                if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
+                    let bw = effective_bw as f64;
+                    let body_logical: Rectangle<f64, Logical> = Rectangle::new(
+                        (
+                            render_loc.x + geo.loc.x as f64 - bw,
+                            render_loc.y + geo.loc.y as f64 - bw,
+                        )
+                            .into(),
+                        (geom_size.w as f64 + 2.0 * bw, geom_size.h as f64 + 2.0 * bw).into(),
+                    );
+                    push_shadow_element(
+                        target,
+                        &mut state.render.shadow_cache,
+                        wl_surface.id(),
+                        &shader,
+                        body_logical,
+                        (effective_corner_radius + effective_bw) as f32,
+                        opacity,
+                        scale,
+                        zoom,
+                    );
+                }
+            } else {
+                push_plain_elements(target, elems, zoom);
+            }
+        } else {
+            push_plain_elements(target, elems, zoom);
+        }
+    }
+
+    // Normal windows stack above widgets (earlier = on top); background below
+    // both, matching compose_frame.
+    let bg = capture_bg.tile_elements(
+        camera,
+        viewport_logical,
+        state.start_time.elapsed().as_secs_f32(),
+    );
+    let mut all = Vec::with_capacity(normal.len() + widgets.len() + bg.len());
+    all.extend(normal);
+    all.extend(widgets);
+    all.extend(bg);
+    all
 }
 
 /// Assemble all render elements for a frame. Caller provides cursor elements

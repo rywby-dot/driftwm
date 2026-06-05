@@ -304,6 +304,25 @@ pub fn output_state(output: &Output) -> MutexGuard<'_, OutputState> {
         .expect("OutputState mutex poisoned")
 }
 
+/// An output's current viewport as a canvas rect: `screen = (canvas − camera) ·
+/// zoom`, so it spans `size / zoom` canvas units from the camera. Single source
+/// of truth for the bare-`screenshot` region and the capture wallpaper anchor,
+/// which must agree or the wallpaper crop misaligns.
+pub fn output_viewport_rect(output: &Output) -> Rectangle<i32, Logical> {
+    let (camera, zoom) = {
+        let os = output_state(output);
+        (os.camera, os.zoom)
+    };
+    let size = output_logical_size(output);
+    Rectangle::new(
+        camera.to_i32_round(),
+        Size::<i32, Logical>::from((
+            (size.w as f64 / zoom).round() as i32,
+            (size.h as f64 / zoom).round() as i32,
+        )),
+    )
+}
+
 /// Central compositor state.
 pub struct DriftWm {
     pub start_time: Instant,

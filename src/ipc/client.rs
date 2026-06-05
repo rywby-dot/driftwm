@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use super::protocol::{Reply, Request, Response, socket_path};
+use super::protocol::{Reply, Request, Response, ScreenshotTarget, socket_path};
 
 /// `driftwm msg <...>` subcommands. Variants with optional positionals read when
 /// omitted and write when given.
@@ -33,10 +33,47 @@ pub enum Msg {
         #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
         spec: Vec<String>,
     },
+    /// Capture a canvas PNG (custom DPI). With no subcommand, captures the active
+    /// output's current view of the canvas.
+    Screenshot {
+        #[command(subcommand)]
+        target: Option<ShotTarget>,
+        /// Pixels per canvas unit — higher captures more detail than the screen shows.
+        #[arg(long, default_value_t = 1.0, global = true)]
+        scale: f64,
+        /// Output PNG path, or `-` for stdout [default: ./driftwm-screenshot-<time>.png].
+        #[arg(short, long, global = true)]
+        output: Option<String>,
+    },
+}
+
+/// What `driftwm msg screenshot` captures.
+#[derive(clap::Subcommand, Debug)]
+pub enum ShotTarget {
+    /// The focused window.
+    Window,
+    /// The bounding box of all windows.
+    All,
+    /// A rectangle — `X Y W H` (canvas coords, center/Y-up) or slurp's native
+    /// `X,Y WxH`. Commas and the `x` separator are tolerated, so `$(slurp)`
+    /// drops in directly. Treated as output-screen pixels with `--from-screen`.
+    #[command(allow_negative_numbers = true)]
+    Region {
+        /// Four ints `X Y W H`, or slurp's `X,Y WxH` (quoted or not).
+        #[arg(required = true, num_args = 1..=4)]
+        coords: Vec<String>,
+        /// Treat the rectangle as output-screen pixels mapped via the active viewport.
+        #[arg(long)]
+        from_screen: bool,
+    },
 }
 
 pub fn run(msg: &Msg, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let request = to_request(msg)?;
+
+    // `screenshot -o -`: the compositor writes a temp file (it can't stream over
+    // the JSON socket), which we then relay to stdout and delete.
+    let stdout_capture = matches!(msg, Msg::Screenshot { output: Some(o), .. } if o == "-");
 
     // A client launched inside a driftwm session inherits its WAYLAND_DISPLAY, so
     // the derived path targets that instance. DRIFTWM_SOCKET is an explicit
@@ -64,6 +101,16 @@ pub fn run(msg: &Msg, json: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Err("no response from compositor".into());
     }
     let reply: Reply = serde_json::from_str(line.trim_end())?;
+
+    // `-o -` claims stdout for the PNG bytes, so it takes precedence over --json.
+    // Clean up the temp file unconditionally, even if the read or write fails.
+    if stdout_capture && let Ok(Response::Screenshot { path, .. }) = &reply {
+        let bytes = std::fs::read(path);
+        let _ = std::fs::remove_file(path);
+        let bytes = bytes.map_err(|e| format!("cannot read capture {path}: {e}"))?;
+        std::io::stdout().write_all(&bytes)?;
+        return Ok(());
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&reply)?);
@@ -100,7 +147,83 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
             _ => return Err("move needs both <x> and <y>".to_string()),
         },
         Msg::Action { spec } => Request::Action(spec.join(" ")),
+        Msg::Screenshot {
+            target,
+            scale,
+            output,
+        } => {
+            let target = match target {
+                None => ScreenshotTarget::Viewport,
+                Some(ShotTarget::Window) => ScreenshotTarget::Window,
+                Some(ShotTarget::All) => ScreenshotTarget::All,
+                Some(ShotTarget::Region {
+                    coords,
+                    from_screen,
+                }) => {
+                    let (x, y, w, h) = parse_region(coords)?;
+                    ScreenshotTarget::Region {
+                        x,
+                        y,
+                        w,
+                        h,
+                        from_screen: *from_screen,
+                    }
+                }
+            };
+            Request::Screenshot {
+                target,
+                scale: *scale,
+                path: resolve_output_path(output)?,
+            }
+        }
     })
+}
+
+/// Parse a region rectangle, accepting both `X Y W H` and slurp's native
+/// `X,Y WxH`. The comma and `x` separators are normalized to spaces, so
+/// `$(slurp)` drops in whether shell-quoted (one token) or not (two tokens).
+fn parse_region(tokens: &[String]) -> Result<(i32, i32, i32, i32), String> {
+    let normalized = tokens.join(" ").replace([',', 'x'], " ");
+    let nums = normalized
+        .split_whitespace()
+        .map(|t| t.parse::<i32>().map_err(|_| t.to_string()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|bad| {
+            format!("region: '{bad}' is not an integer (expected X Y W H, or slurp's X,Y WxH)")
+        })?;
+    match nums.as_slice() {
+        [x, y, w, h] => Ok((*x, *y, *w, *h)),
+        _ => Err(format!(
+            "region needs 4 values (X Y W H, or slurp's X,Y WxH), got {}",
+            nums.len()
+        )),
+    }
+}
+
+/// Resolve the output path the compositor will write to. It must be absolute —
+/// the compositor's working directory differs from the client's.
+fn resolve_output_path(output: &Option<String>) -> Result<String, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let raw = match output.as_deref() {
+        // `-` → a temp file the client streams to stdout, then deletes.
+        Some("-") => std::env::temp_dir().join(format!(
+            "driftwm-screenshot-{}-{secs}.png",
+            std::process::id()
+        )),
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(format!("driftwm-screenshot-{secs}.png")),
+    };
+    let abs = if raw.is_absolute() {
+        raw
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot resolve current directory: {e}"))?
+            .join(raw)
+    };
+    Ok(abs.to_string_lossy().into_owned())
 }
 
 fn print_response(response: Response) {
@@ -111,6 +234,7 @@ fn print_response(response: Response) {
         Response::Focused(Some(app_id)) => println!("{app_id}"),
         Response::Focused(None) => println!("(none)"),
         Response::Position { x, y } => println!("{x} {y}"),
+        Response::Screenshot { path, .. } => println!("{path}"),
         Response::Ok => println!("ok"),
         Response::State {
             camera,
@@ -133,5 +257,57 @@ fn print_response(response: Response) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_region;
+
+    fn tokens(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn region_four_ints() {
+        assert_eq!(
+            parse_region(&tokens("0 0 2000 1500")).unwrap(),
+            (0, 0, 2000, 1500)
+        );
+    }
+
+    #[test]
+    fn region_negative_canvas_coords() {
+        assert_eq!(
+            parse_region(&tokens("-100 -200 300 400")).unwrap(),
+            (-100, -200, 300, 400)
+        );
+    }
+
+    #[test]
+    fn region_slurp_unquoted() {
+        // `$(slurp)` without quotes expands to two tokens.
+        assert_eq!(
+            parse_region(&tokens("1340,1135 768x361")).unwrap(),
+            (1340, 1135, 768, 361)
+        );
+    }
+
+    #[test]
+    fn region_slurp_quoted() {
+        // `"$(slurp)"` is a single token containing a space.
+        let one = vec!["1340,1135 768x361".to_string()];
+        assert_eq!(parse_region(&one).unwrap(), (1340, 1135, 768, 361));
+    }
+
+    #[test]
+    fn region_wrong_count_errors() {
+        assert!(parse_region(&tokens("0 0 100")).is_err());
+        assert!(parse_region(&tokens("0 0 100 200 300")).is_err());
+    }
+
+    #[test]
+    fn region_non_integer_errors() {
+        assert!(parse_region(&tokens("a b c d")).is_err());
     }
 }
