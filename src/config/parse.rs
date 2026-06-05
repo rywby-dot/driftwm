@@ -135,6 +135,20 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
             let dir = parse_direction(arg.ok_or("send-to-output requires a direction")?)?;
             Ok(Action::SendToOutput(dir))
         }
+        "switch-layout" => {
+            let arg = arg.ok_or("switch-layout requires next, prev, or a layout index")?;
+            let target = match arg.trim().to_lowercase().as_str() {
+                "next" => LayoutSwitch::Next,
+                "prev" | "previous" => LayoutSwitch::Prev,
+                other => {
+                    let idx: usize = other.parse().map_err(|_| {
+                        format!("switch-layout: expected next, prev, or an index, got '{other}'")
+                    })?;
+                    LayoutSwitch::Index(idx)
+                }
+            };
+            Ok(Action::SwitchLayout(target))
+        }
         "reload-config" => Ok(Action::ReloadConfig),
         "quit" => Ok(Action::Quit),
         other => Err(format!("unknown action: {other}")),
@@ -277,7 +291,8 @@ fn parse_threshold_action(s: &str) -> Result<Option<ThresholdAction>, String> {
         }
         s if s.starts_with("exec ")
             || s.starts_with("spawn ")
-            || s.starts_with("send-to-output ") =>
+            || s.starts_with("send-to-output ")
+            || s.starts_with("switch-layout ") =>
         {
             let action = parse_action(s)?;
             Ok(Some(ThresholdAction::Fixed(action)))

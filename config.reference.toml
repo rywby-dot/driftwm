@@ -244,9 +244,11 @@
 #   zoom-to-fit-snapped     — fit only the focused window's snap cluster
 #   toggle-fullscreen       — toggle focused window fullscreen
 #   fit-window              — toggle maximize: centers + resets zoom + fills viewport; restore only resizes back
+#   fit-window-snapped      — fit-window for the focused window's whole snap cluster
 #   reload-config           — hot-reload config file
 #   quit                    — exit the compositor
 #   send-to-output <dir>    — move focused window to adjacent output
+#   switch-layout <target>  — cycle keyboard layout: next, prev, or a 0-based index
 #   none                    — unbind this key combo
 #
 # Directions: up, down, left, right, up-left, up-right, down-left, down-right

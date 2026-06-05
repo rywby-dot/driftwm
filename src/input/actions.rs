@@ -1,11 +1,11 @@
 use smithay::{
-    input::pointer::MotionEvent,
+    input::{keyboard::Layout, pointer::MotionEvent},
     utils::{Point, SERIAL_COUNTER, Size},
 };
 
 use crate::state::{DriftWm, FocusTarget, HomeReturn};
 use driftwm::canvas::{self};
-use driftwm::config::Action;
+use driftwm::config::{Action, LayoutSwitch};
 use driftwm::window_ext::WindowExt;
 
 /// Use the focused window as the cone-search origin only when it's fully
@@ -29,7 +29,10 @@ impl DriftWm {
         if self.is_fullscreen()
             && !matches!(
                 action,
-                Action::ToggleFullscreen | Action::Spawn(_) | Action::ReloadConfig
+                Action::ToggleFullscreen
+                    | Action::Spawn(_)
+                    | Action::ReloadConfig
+                    | Action::SwitchLayout(_)
             )
         {
             self.exit_fullscreen();
@@ -391,6 +394,30 @@ impl DriftWm {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.raise_and_focus(&window, serial);
                 }
+            }
+            Action::SwitchLayout(target) => {
+                // with_xkb_state broadcasts the layout/modifier change to the
+                // focused client on exit, so the app sees the new layout too.
+                let keyboard = self.seat.get_keyboard().unwrap();
+                let name = keyboard.with_xkb_state(self, |mut ctx| {
+                    match target {
+                        LayoutSwitch::Next => ctx.cycle_next_layout(),
+                        LayoutSwitch::Prev => ctx.cycle_prev_layout(),
+                        LayoutSwitch::Index(i) => {
+                            let count = ctx.xkb().lock().unwrap().layouts().count();
+                            if *i < count {
+                                ctx.set_layout(Layout(*i as u32));
+                            } else {
+                                tracing::warn!(
+                                    "switch-layout: index {i} out of range ({count} layouts)"
+                                );
+                            }
+                        }
+                    }
+                    let xkb = ctx.xkb().lock().unwrap();
+                    xkb.layout_name(xkb.active_layout()).to_owned()
+                });
+                self.active_layout = name;
             }
             Action::ReloadConfig => {
                 self.reload_config();

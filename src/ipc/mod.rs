@@ -147,13 +147,8 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Layout => Ok(Response::Layout(state.active_layout.clone())),
         Request::State => Ok(cmd_state(state)),
         Request::Focus(arg) => cmd_focus(arg, state),
-        Request::Close => cmd_close(state),
         Request::Move(arg) => cmd_move(arg, state),
-        Request::Quit => {
-            tracing::info!("IPC quit received, shutting down");
-            state.loop_signal.stop();
-            Ok(Response::Ok)
-        }
+        Request::Action(spec) => cmd_action(&spec, state),
     }
 }
 
@@ -163,8 +158,8 @@ fn is_mutating(request: &Request) -> bool {
         Request::Camera(Some(_))
             | Request::Zoom(Some(_))
             | Request::Focus(Some(_))
-            | Request::Close
             | Request::Move(Some(_))
+            | Request::Action(_)
     )
 }
 
@@ -245,14 +240,12 @@ fn cmd_focus(arg: Option<String>, state: &mut DriftWm) -> Reply {
     }
 }
 
-fn cmd_close(state: &mut DriftWm) -> Reply {
-    match state.focused_window().filter(|w| !w.is_widget()) {
-        Some(window) => {
-            window.send_close();
-            Ok(Response::Ok)
-        }
-        None => Err("no focused window to close".to_string()),
-    }
+/// Reuses the config-file parser so the IPC `action` command stays in lockstep
+/// with keybindable actions.
+fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
+    let action = driftwm::config::parse_action(spec)?;
+    state.execute_action(&action);
+    Ok(Response::Ok)
 }
 
 fn cmd_move(arg: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {

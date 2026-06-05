@@ -1,8 +1,9 @@
 use driftwm::config::{
     Action, BTN_LEFT, BTN_RIGHT, BackgroundKind, BindingContext, Config, ContinuousAction,
-    Direction, GestureConfigEntry, ModKey, MouseAction, MouseTrigger, ThresholdAction,
-    parse_action, parse_direction, parse_gesture_binding, parse_gesture_config_entry,
-    parse_gesture_trigger, parse_key_combo, parse_mouse_action, parse_mouse_binding,
+    Direction, GestureConfigEntry, LayoutSwitch, ModKey, MouseAction, MouseTrigger,
+    ThresholdAction, parse_action, parse_direction, parse_gesture_binding,
+    parse_gesture_config_entry, parse_gesture_trigger, parse_key_combo, parse_mouse_action,
+    parse_mouse_binding,
 };
 use smithay::backend::input::AxisSource;
 use smithay::input::keyboard::{Keysym, ModifiersState, keysyms};
@@ -144,6 +145,32 @@ fn parse_action_cycle_windows_backward() {
 fn parse_action_zoom_in() {
     let result = parse_action("zoom-in").unwrap();
     assert!(matches!(result, Action::ZoomIn));
+}
+
+#[test]
+fn parse_action_switch_layout_next_prev() {
+    assert!(matches!(
+        parse_action("switch-layout next").unwrap(),
+        Action::SwitchLayout(LayoutSwitch::Next)
+    ));
+    assert!(matches!(
+        parse_action("switch-layout prev").unwrap(),
+        Action::SwitchLayout(LayoutSwitch::Prev)
+    ));
+}
+
+#[test]
+fn parse_action_switch_layout_index() {
+    assert!(matches!(
+        parse_action("switch-layout 2").unwrap(),
+        Action::SwitchLayout(LayoutSwitch::Index(2))
+    ));
+}
+
+#[test]
+fn parse_action_switch_layout_invalid_is_error() {
+    assert!(parse_action("switch-layout sideways").is_err());
+    assert!(parse_action("switch-layout").is_err());
 }
 
 #[test]

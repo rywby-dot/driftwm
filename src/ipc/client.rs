@@ -23,13 +23,16 @@ pub enum Msg {
     State,
     /// Print the focused window, or focus a window by app_id substring.
     Focus { app_id: Option<String> },
-    /// Close the focused window.
-    Close,
     /// Get the focused window position, or move it (center, Y-up) with `<x> <y>`.
     #[command(allow_negative_numbers = true)]
     Move { x: Option<i32>, y: Option<i32> },
-    /// Shut the compositor down.
-    Quit,
+    /// Run a config action, e.g. `action close-window`, `action quit`, `action switch-layout next`.
+    #[command(allow_negative_numbers = true)]
+    Action {
+        /// Action and arguments, exactly as written in config (e.g. `nudge-window up`).
+        #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
+        spec: Vec<String>,
+    },
 }
 
 pub fn run(msg: &Msg, json: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -91,13 +94,12 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         Msg::Layout => Request::Layout,
         Msg::State => Request::State,
         Msg::Focus { app_id } => Request::Focus(app_id.clone()),
-        Msg::Close => Request::Close,
         Msg::Move { x, y } => match (x, y) {
             (None, None) => Request::Move(None),
             (Some(x), Some(y)) => Request::Move(Some((*x, *y))),
             _ => return Err("move needs both <x> and <y>".to_string()),
         },
-        Msg::Quit => Request::Quit,
+        Msg::Action { spec } => Request::Action(spec.join(" ")),
     })
 }
 

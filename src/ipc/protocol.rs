@@ -21,10 +21,12 @@ pub enum Request {
     State,
     /// Focus a window by `app_id` substring when `Some`.
     Focus(Option<String>),
-    Close,
     /// Coordinates are window-center, Y-up (the window-rule convention).
     Move(Option<(i32, i32)>),
-    Quit,
+    /// Run a config action by its config-grammar string, e.g. `"switch-layout
+    /// next"`. Any keybindable action is reachable, so one-shot ops live here
+    /// rather than as their own commands.
+    Action(String),
 }
 
 /// A successful reply payload. Pairs with [`Request`] variants.
@@ -101,10 +103,9 @@ mod tests {
             Request::Layout,
             Request::State,
             Request::Focus(Some("alacritty".into())),
-            Request::Close,
             Request::Move(None),
             Request::Move(Some((0, 0))),
-            Request::Quit,
+            Request::Action("switch-layout next".into()),
         ] {
             roundtrip(&r);
         }

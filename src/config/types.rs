@@ -21,6 +21,14 @@ pub enum Direction {
     DownRight,
 }
 
+/// Cycle relative to the active keyboard layout, or jump to a keymap index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutSwitch {
+    Next,
+    Prev,
+    Index(usize),
+}
+
 impl Direction {
     /// Normalized direction vector for this direction.
     pub fn to_unit_vec(&self) -> (f64, f64) {
@@ -59,6 +67,7 @@ pub enum Action {
     FitWindowSnapped,
     SendToOutput(Direction),
     FocusCenter,
+    SwitchLayout(LayoutSwitch),
     ReloadConfig,
     Quit,
 }
