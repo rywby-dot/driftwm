@@ -31,6 +31,8 @@ https://github.com/user-attachments/assets/a5f14739-7762-4515-abb1-0de6990de4a3
 Infinite 2D canvas with viewport panning, zoom, and scroll momentum. A quick
 flick carries the viewport smoothly until friction stops it.
 
+<details><summary><b>Pan &amp; zoom bindings</b></summary>
+
 | Input              | Action            | Context   |
 | ------------------ | ----------------- | --------- |
 | 3-finger swipe     | Pan viewport      | anywhere  |
@@ -43,6 +45,8 @@ flick carries the viewport smoothly until friction stops it.
 | `Mod+=` / `Mod+-`  | Zoom in / out     | —         |
 | `Mod+0` / `Mod+Z`  | Reset zoom to 1.0 | —         |
 
+</details>
+
 ### Window navigation
 
 https://github.com/user-attachments/assets/5b7d89cd-b065-4309-ae74-30bfe68a8abb
@@ -51,6 +55,8 @@ Jump to the nearest window in any direction via cone search. MRU cycling
 (`Alt-Tab`) with hold-to-commit. Zoom-to-fit shows all windows at once.
 Configurable anchors act as navigation targets for directional jumps even
 with no window there — useful for areas with pinned widgets.
+
+<details><summary><b>Navigation bindings</b></summary>
 
 | Input                        | Action                                     |
 | ---------------------------- | ------------------------------------------ |
@@ -65,6 +71,8 @@ with no window there — useful for areas with pinned widgets.
 
 All 4-finger navigation gestures also work as `Mod` + 3-finger for smaller
 trackpads.
+
+</details>
 
 ### Snapping
 
@@ -83,6 +91,8 @@ zoom to 1.0, and resizes the window to fill the screen. Toggle again to
 restore. Fullscreen (`Mod+F`) is a viewport mode, not a window state — any canvas
 action (launching an app, navigating) naturally exits it.
 
+<details><summary><b>Snapping &amp; window bindings</b></summary>
+
 | Input                                     | Action                        |
 | ----------------------------------------- | ----------------------------- |
 | 3-finger doubletap-swipe                  | Move window                   |
@@ -98,6 +108,8 @@ action (launching an app, navigating) naturally exits it.
 | `Alt` + 3-finger pinch in/out             | Toggle fullscreen             |
 | `Mod` + MMB click / `Mod+F`               | Toggle fullscreen             |
 | `Mod+Shift` + arrow                       | Nudge window 20px             |
+
+</details>
 
 ### Infinite background
 
