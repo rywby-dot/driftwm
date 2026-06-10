@@ -323,7 +323,7 @@ impl XdgShellHandler for DriftWm {
                     if let Some(target) = target {
                         self.raise_and_focus(&target, serial);
                     } else {
-                        keyboard.set_focus(self, None, serial);
+                        self.set_keyboard_focus(None, serial);
                     }
                 }
             }

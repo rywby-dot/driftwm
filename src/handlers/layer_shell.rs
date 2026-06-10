@@ -160,7 +160,7 @@ impl WlrLayerShellHandler for DriftWm {
                 .focus_history
                 .first()
                 .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())));
-            keyboard.set_focus(self, new_focus, serial);
+            self.set_keyboard_focus(new_focus, serial);
         }
     }
 

@@ -260,7 +260,7 @@ impl DriftWm {
                             }
                             _ => {
                                 // Widget title bar or other — just focus
-                                keyboard.set_focus(self, Some(FocusTarget(wl_surface)), serial);
+                                self.set_keyboard_focus(Some(FocusTarget(wl_surface)), serial);
                             }
                         }
                     }
@@ -396,17 +396,16 @@ impl DriftWm {
                     self.raise_and_focus(window, serial);
                 } else if let Some((focus, _)) = self.canvas_layer_under(pos) {
                     // Widget window but canvas layer is above it: focus the layer
-                    keyboard.set_focus(self, Some(focus), serial);
+                    self.set_keyboard_focus(Some(focus), serial);
                 } else {
                     // Widget window with no canvas layer above: focus the widget
-                    keyboard.set_focus(
-                        self,
+                    self.set_keyboard_focus(
                         window.wl_surface().map(|s| FocusTarget(s.into_owned())),
                         serial,
                     );
                 }
             } else if let Some((focus, _)) = self.canvas_layer_under(pos) {
-                keyboard.set_focus(self, Some(focus), serial);
+                self.set_keyboard_focus(Some(focus), serial);
             }
         }
 
@@ -469,8 +468,7 @@ impl DriftWm {
                 }
                 _ => {
                     if let Some(s) = window.wl_surface() {
-                        let keyboard = self.seat.get_keyboard().unwrap();
-                        keyboard.set_focus(self, Some(FocusTarget(s.into_owned())), serial);
+                        self.set_keyboard_focus(Some(FocusTarget(s.into_owned())), serial);
                     }
                 }
             }

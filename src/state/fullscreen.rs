@@ -106,9 +106,8 @@ impl DriftWm {
         // Without pointer focus, pointer constraints (e.g. game cursor lock)
         // activate on whatever surface had focus before — not the game.
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        let keyboard = self.seat.get_keyboard().unwrap();
         let focus = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
-        keyboard.set_focus(self, focus, serial);
+        self.set_keyboard_focus(focus, serial);
 
         if let Some(wl_surface) = window.wl_surface() {
             let pointer = self.seat.get_pointer().unwrap();

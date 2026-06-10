@@ -211,8 +211,7 @@ impl CompositorHandler for DriftWm {
                     locker.lock();
                     tracing::info!("Session lock confirmed");
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                    let keyboard = self.seat.get_keyboard().unwrap();
-                    keyboard.set_focus(self, Some(FocusTarget(surface.clone())), serial);
+                    self.set_keyboard_focus(Some(FocusTarget(surface.clone())), serial);
                 }
                 return;
             }
@@ -498,9 +497,8 @@ impl CompositorHandler for DriftWm {
                             self.focus_history.retain(|w| w != &window);
                             if let Some(prev) = self.focus_history.first().cloned() {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                                let keyboard = self.seat.get_keyboard().unwrap();
                                 let focus = prev.wl_surface().map(|s| FocusTarget(s.into_owned()));
-                                keyboard.set_focus(self, focus, serial);
+                                self.set_keyboard_focus(focus, serial);
                             }
                         }
                     }
@@ -654,7 +652,7 @@ impl DriftWm {
             .is_some_and(|f| f.0 == *surface);
         if !already_focused {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            keyboard.set_focus(self, Some(FocusTarget(surface.clone())), serial);
+            self.set_keyboard_focus(Some(FocusTarget(surface.clone())), serial);
         }
     }
 

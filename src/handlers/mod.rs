@@ -1003,8 +1003,7 @@ impl SessionLockHandler for DriftWm {
         self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
         // Clear keyboard focus — no window should be interactable
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        let keyboard = self.seat.get_keyboard().unwrap();
-        keyboard.set_focus(self, None::<FocusTarget>, serial);
+        self.set_keyboard_focus(None, serial);
         self.mark_all_dirty();
     }
 
@@ -1015,9 +1014,8 @@ impl SessionLockHandler for DriftWm {
         // Restore focus to the most recent window
         if let Some(window) = self.focus_history.first().cloned() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            let keyboard = self.seat.get_keyboard().unwrap();
             let focus = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
-            keyboard.set_focus(self, focus, serial);
+            self.set_keyboard_focus(focus, serial);
         }
         self.mark_all_dirty();
     }

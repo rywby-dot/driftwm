@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::state::{DriftWm, FocusTarget, HomeReturn};
+use crate::state::{DriftWm, HomeReturn};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch};
 use driftwm::window_ext::WindowExt;
@@ -205,8 +205,7 @@ impl DriftWm {
                     Some(NavTarget::Anchor(p)) => {
                         // Unfocus so next CenterNearest searches from viewport center (= this anchor)
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                        let keyboard = self.seat.get_keyboard().unwrap();
-                        keyboard.set_focus(self, None::<FocusTarget>, serial);
+                        self.set_keyboard_focus(None, serial);
                         self.with_output_state(|os| os.momentum.stop());
                         let vc = self.usable_center_screen();
                         let zoom = self.zoom();

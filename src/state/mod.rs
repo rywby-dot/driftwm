@@ -710,8 +710,17 @@ impl DriftWm {
             .or(Some(window.clone()))
             .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())));
 
+        self.set_keyboard_focus(focus_surface, serial);
+    }
+
+    /// Single point where keyboard focus is applied.
+    pub fn set_keyboard_focus(
+        &mut self,
+        target: Option<FocusTarget>,
+        serial: smithay::utils::Serial,
+    ) {
         let keyboard = self.seat.get_keyboard().unwrap();
-        keyboard.set_focus(self, focus_surface, serial);
+        keyboard.set_focus(self, target, serial);
     }
 
     pub fn mark_all_dirty(&mut self) {

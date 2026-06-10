@@ -286,7 +286,7 @@ impl DriftWm {
         }
 
         let serial = SERIAL_COUNTER.next_serial();
-        keyboard.set_focus(self, focus_surface, serial);
+        self.set_keyboard_focus(focus_surface, serial);
     }
 
     /// Deactivate the constraint on the previous focus if focus changed,

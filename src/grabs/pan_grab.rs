@@ -7,7 +7,7 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use crate::state::{DriftWm, FocusTarget, output_state};
+use crate::state::{DriftWm, output_state};
 use driftwm::canvas::{CanvasPos, canvas_to_screen};
 
 /// Max squared screen-pixel distance for a press-release to count as a
@@ -82,8 +82,7 @@ impl PointerGrab<DriftWm> for PanGrab {
             // access would deadlock there.
             if self.from_empty_canvas && !self.dragged {
                 let serial = SERIAL_COUNTER.next_serial();
-                let keyboard = data.seat.get_keyboard().unwrap();
-                keyboard.set_focus(data, None::<FocusTarget>, serial);
+                data.set_keyboard_focus(None, serial);
             }
             data.set_panning(false);
             data.launch_momentum_on(&self.output);
