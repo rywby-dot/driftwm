@@ -187,6 +187,9 @@ pub fn init_winit(
             // --- Camera animation (window navigation) ---
             data.apply_camera_animation(dt);
 
+            // --- Coalesced pointer motion (after input + animations) ---
+            data.flush_pointer_resync();
+
             // --- Exec loading cursor timeout ---
             data.check_exec_cursor_timeout();
 

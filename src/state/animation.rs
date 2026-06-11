@@ -60,32 +60,76 @@ impl DriftWm {
         }
     }
 
-    /// Send a synthetic pointer motion to keep the cursor at the same screen
-    /// position after a camera or zoom change. When a constraint is active,
-    /// silently update the internal location instead — `wl_pointer.motion`
+    /// Whether the focused surface holds an active pointer constraint. Motion
     /// to a locked surface reads as a phantom absolute move (snap-back).
-    pub(crate) fn warp_pointer(&mut self, new_pos: Point<f64, Logical>) {
+    fn pointer_constraint_active(&self) -> bool {
         let pointer = self.seat.get_pointer().unwrap();
-
-        let constraint_active = pointer.current_focus().is_some_and(|focus| {
+        pointer.current_focus().is_some_and(|focus| {
             smithay::wayland::pointer_constraints::with_pointer_constraint(
                 &focus.0,
                 &pointer,
                 |c| c.is_some_and(|c| c.is_active()),
             )
-        });
-        if constraint_active {
+        })
+    }
+
+    /// Keep the cursor at the same screen position after a camera or zoom
+    /// change. When a constraint is active, silently update the internal
+    /// location (see [`Self::pointer_constraint_active`]).
+    ///
+    /// A pointer grab (window move/resize, edge-pan) drives its repositioning
+    /// off this motion and needs every event, so send synchronously. Otherwise
+    /// the cursor is free over a sliding canvas: update the internal location
+    /// now (hit-testing stays correct) but defer the client-facing motion to
+    /// [`Self::flush_pointer_resync`], coalescing to one motion per frame.
+    pub(crate) fn warp_pointer(&mut self, new_pos: Point<f64, Logical>) {
+        let pointer = self.seat.get_pointer().unwrap();
+
+        if self.pointer_constraint_active() {
             pointer.set_location(new_pos);
             return;
         }
 
-        let under = self.focus_under(new_pos);
+        if pointer.is_grabbed() {
+            let under = self.focus_under(new_pos);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            pointer.motion(
+                self,
+                under,
+                &smithay::input::pointer::MotionEvent {
+                    location: new_pos,
+                    serial,
+                    time: self.start_time.elapsed().as_millis() as u32,
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
+
+        pointer.set_location(new_pos);
+        self.pending_pointer_resync = true;
+    }
+
+    /// Flush a pointer resync deferred by [`Self::warp_pointer`]. Sends a single
+    /// `wl_pointer.motion` to the surface under the (already-updated) cursor,
+    /// refreshing focus/hover and enter/leave. Called once per rendered frame.
+    pub(crate) fn flush_pointer_resync(&mut self) {
+        if !std::mem::take(&mut self.pending_pointer_resync) {
+            return;
+        }
+        // A constraint may have activated since the deferred warp.
+        if self.pointer_constraint_active() {
+            return;
+        }
+        let pointer = self.seat.get_pointer().unwrap();
+        let pos = pointer.current_location();
+        let under = self.focus_under(pos);
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         pointer.motion(
             self,
             under,
             &smithay::input::pointer::MotionEvent {
-                location: new_pos,
+                location: pos,
                 serial,
                 time: self.start_time.elapsed().as_millis() as u32,
             },

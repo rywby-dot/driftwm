@@ -519,6 +519,10 @@ pub struct DriftWm {
     /// last_frame_instant to avoid double-ticking when multiple outputs
     /// render in one iteration.
     pub last_animation_tick: Instant,
+    /// A deferred pointer resync is pending. Flushed once per rendered frame so
+    /// a 90-140 Hz pan/momentum stream doesn't re-render a hover-reactive client
+    /// per event. See [`DriftWm::warp_pointer`].
+    pub pending_pointer_resync: bool,
     /// Output the pointer is on (for input routing).
     pub focused_output: Option<Output>,
     /// Output a gesture started on (pinned for the gesture's duration).

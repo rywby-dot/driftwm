@@ -167,6 +167,7 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         && !data.output_config_dirty
         && data.pending_dpms.is_empty()
         && !any_chunked_pending
+        && !data.pending_pointer_resync
     {
         return;
     }
@@ -177,6 +178,9 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
 
     // 1. Tick animations once for all outputs (before device borrow)
     data.tick_all_animations();
+
+    // Emit the one coalesced pointer motion for this frame, after animations.
+    data.flush_pointer_resync();
 
     let mut dev = device.0.borrow_mut();
 
