@@ -1,5 +1,3 @@
-
-
 <h1 align="center"><img alt="driftwm" src="assets/logo.jpg" width="500"></h1>
 <p align="center">A trackpad-first infinite canvas Wayland compositor.</p>
 <p align="center">
@@ -120,7 +118,7 @@ https://github.com/user-attachments/assets/fb1cd5a1-242c-45d7-b302-952a15aaa24d
 The background is part of the canvas — it scrolls and zooms with the viewport,
 not stuck to the screen. This gives spatial awareness when panning.
 
-Four modes — the first three rendered as shaders internally:
+Four modes:
 
 - **`shader`** — procedural GLSL, animated or static, optionally sampling an image via `texture`. Default is a dot grid. See [docs/shaders.md](docs/shaders.md) to write your own. Bundled shaders live in `extras/wallpapers/{static,animated,textured}/`.
 - **`tile`** — PNG/JPG (single texture, tiled infinitely), or a tiled pyramidal TIFF for [gigapixel wallpapers](docs/gigapixel-wallpapers.md).
