@@ -16,7 +16,7 @@ use smithay::{
             compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
         },
-        egl::{EGLContext, EGLDevice, EGLDisplay},
+        egl::{EGLContext, EGLDevice, EGLDisplay, context::ContextPriority},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::ImportDma,
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
@@ -412,13 +412,19 @@ pub fn init_udev(
                     continue;
                 }
             };
-            let egl_context = match EGLContext::new(&egl_display) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("{}: failed to create EGL context ({e})", path.display());
-                    continue;
-                }
-            };
+            // High priority lets the compositor's composite preempt a
+            // GPU-saturating client (shader compile, screen-share encode) instead
+            // of queuing behind it. EGL_IMG_context_priority is best-effort:
+            // smithay falls back to default priority if the extension is absent, and
+            // some drivers (notably NVIDIA) may only partially honor it.
+            let egl_context =
+                match EGLContext::new_with_priority(&egl_display, ContextPriority::High) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("{}: failed to create EGL context ({e})", path.display());
+                        continue;
+                    }
+                };
             let render_formats: Vec<Format> = egl_context
                 .dmabuf_render_formats()
                 .iter()
