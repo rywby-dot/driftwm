@@ -4,10 +4,12 @@ The B1–B14 perf push shipped (see `git log`). What's left, in priority order.
 Line numbers predate the push — re-verify on pickup. Profiling tooling:
 [PROFILING.md](PROFILING.md).
 
-## Blur (B5 + S1 + edge-fade)
+## Blur (B5 + S1 + edge-fade + fullscreen cull)
 
 The only substantive perf work left; deferred behind touchscreen + session
-restoration (GH #125). Do the three together — one FBO/crop/mask rework.
+restoration (GH #125). B5 + S1 + edge-fade are one FBO/crop/mask rework; the
+fullscreen cull is a separable window-loop early-skip in the same code. So the
+blur wins span three contexts: during a pan, on zoom (S1), and under fullscreen.
 
 **B5 — multi-output churn + FBO retention.**
 
@@ -35,6 +37,21 @@ or key on (quantized position, behind-element commits).
 Kawase kernel clamps at window edges and the blur tapers inward. Fix: blur a
 radius-padded region and crop back — same surface as B5/S1. Cost caveat is at the
 `blur` field in `docs/window-rules.md`.
+
+**Fullscreen occlusion-cull.** `compose_frame` does not short-circuit for a
+fullscreen output — it runs the full window loop (`src/render/mod.rs:585`, only
+viewport-visibility culled at `:650`) and `process_blur_requests` (`:1180`); only
+the background (`:1088`) and Top/Bottom layer-shell (`:1123-1132`) are skipped. So
+a blurred window behind a fullscreen opaque window still pays its Kawase passes
+every frame, _before_ smithay's render-time occlusion cull + direct scanout
+(`src/backend/udev.rs:1507`) drop the composited result — wasted GPU that competes
+with the fullscreen client, and compounds under screen-share (the capture path
+re-composites the whole scene and defeats direct scanout). Only bites when a
+blurred window is actually behind fullscreen (empty `blur_requests` → already
+fast-skipped). Fix: skip blur for normal windows occluded by the fullscreen
+window — but preserve pinned-to-screen windows (they render above fullscreen), the
+fullscreen window's own popups, and the Overlay layer, and guard a transparent
+fullscreen window.
 
 ## Lower-priority backlog (do only if a profile flags it)
 
