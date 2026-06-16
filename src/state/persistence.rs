@@ -91,6 +91,13 @@ impl DriftWm {
     /// Write viewport center + zoom to `$XDG_RUNTIME_DIR/driftwm/state` if changed.
     /// Atomic: writes to .tmp then renames.
     pub fn write_state_file_if_dirty(&mut self) {
+        // Throttle to ~10/sec (100ms between writes), checked before the
+        // allocating window_inventory() + with_states locks so the frequent
+        // sub-throttle calls during pans/drags stay cheap.
+        if self.state_file_last_write.elapsed() < std::time::Duration::from_millis(100) {
+            return;
+        }
+
         let window_fps = self.window_inventory();
 
         // Layer-shell namespaces (waybar, notifications, etc.).
@@ -129,11 +136,6 @@ impl DriftWm {
             || layers.len() != self.state_file_layer_count;
 
         if !layout_dirty && !any_output_dirty && !windows_dirty {
-            return;
-        }
-        // Throttle attempts to ~10/sec max (100ms between writes). Updated even
-        // if the write below fails — we still want to limit retry frequency.
-        if self.state_file_last_write.elapsed() < std::time::Duration::from_millis(100) {
             return;
         }
         self.state_file_last_write = Instant::now();
