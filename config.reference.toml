@@ -294,6 +294,11 @@
 # "XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 # "XF86MonBrightnessUp" = "spawn brightnessctl set +5%"
 # "XF86MonBrightnessDown" = "spawn brightnessctl set 5%-"
+# "XF86AudioPlay" = "spawn playerctl play-pause"
+# "XF86AudioPause" = "spawn playerctl play-pause"
+# "XF86AudioNext" = "spawn playerctl next"
+# "XF86AudioPrev" = "spawn playerctl previous"
+# "XF86AudioStop" = "spawn playerctl stop"
 # "Print" = "spawn grim - | wl-copy"
 # "shift+Print" = "spawn grim -g \"$(slurp -d)\" - | wl-copy"
 # Example: built-in window capture (isolated window + shadow) to clipboard

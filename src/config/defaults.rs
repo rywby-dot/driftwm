@@ -319,6 +319,41 @@ pub(super) fn default_bindings(
             },
             Action::Spawn("brightnessctl set 5%-".into()),
         ),
+        (
+            KeyCombo {
+                modifiers: Modifiers::EMPTY,
+                sym: Keysym::from(keysyms::KEY_XF86AudioPlay),
+            },
+            Action::Spawn("playerctl play-pause".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: Modifiers::EMPTY,
+                sym: Keysym::from(keysyms::KEY_XF86AudioPause),
+            },
+            Action::Spawn("playerctl play-pause".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: Modifiers::EMPTY,
+                sym: Keysym::from(keysyms::KEY_XF86AudioNext),
+            },
+            Action::Spawn("playerctl next".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: Modifiers::EMPTY,
+                sym: Keysym::from(keysyms::KEY_XF86AudioPrev),
+            },
+            Action::Spawn("playerctl previous".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: Modifiers::EMPTY,
+                sym: Keysym::from(keysyms::KEY_XF86AudioStop),
+            },
+            Action::Spawn("playerctl stop".into()),
+        ),
         // Screenshot
         (
             KeyCombo {
