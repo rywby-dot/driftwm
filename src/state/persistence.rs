@@ -150,8 +150,11 @@ impl DriftWm {
         }
         let path = dir.join("state");
         let tmp = dir.join("state.tmp");
+        // no separate dirty field: layout_short follows the active XKB group, so the
+        // layout-dirty check covers it (except two layouts sharing a display name).
+        let layout_short = crate::ipc::active_layout_short(self);
         let mut content = format!(
-            "x={cx:.0}\ny={cy:.0}\nzoom={z:.3}\nlayout={}\n",
+            "x={cx:.0}\ny={cy:.0}\nzoom={z:.3}\nlayout={}\nlayout_short={layout_short}\n",
             self.active_layout
         );
 
