@@ -243,10 +243,6 @@ pub struct OutputState {
     /// from config for multi-monitor.
     pub layout_position: Point<i32, Logical>,
     pub home_return: Option<HomeReturn>,
-    /// Bumped per VBlank (or render tick on winit). Gates frame_callback
-    /// emission to one-per-cycle per surface so vsync-ignoring clients
-    /// (Wine games) can't pin the main thread.
-    pub frame_callback_sequence: u32,
 }
 
 pub fn init_output_state(
@@ -276,7 +272,6 @@ pub fn init_output_state(
             last_frame_instant: Instant::now(),
             layout_position,
             home_return: None,
-            frame_callback_sequence: 0,
         })
     });
 }
@@ -1856,7 +1851,6 @@ mod tests {
             last_frame_instant: Instant::now(),
             layout_position: Point::from(layout_position),
             home_return: None,
-            frame_callback_sequence: 0,
         }
     }
 

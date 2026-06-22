@@ -77,6 +77,18 @@ fullscreen window.
   (`src/render/mod.rs` — time-budget, or upload after `queue_frame`); shadow shader
   evaluates ERF quadrature over the full window+pad quad (`src/shaders/shadow.glsl`
   — early-out interior fragments).
+- **Redundant EmptyFrame composites in non-integer refresh:content beats.**
+  `post_render` runs after every `render_frame`, including the `EmptyFrame`
+  branch (`src/backend/udev.rs:1604`), and the VBlank handler re-renders directly
+  (`:651-653`), bypassing the `render_if_needed` gate (`:305-308`). At ratios like
+  144Hz/60fps video a second client commit can land mid-cycle and force a full
+  `compose_frame` that smithay then drops as `EmptyFrame` — GPU compositing with no
+  page flip. Bounded by the estimated-vblank timer (can't spin) and only during
+  active rendering, not idle. niri avoids it via `RedrawState` (one render/cycle;
+  callbacks sent at defined sequence boundaries, never from an empty-render branch
+  — `niri/src/niri.rs:492-504`). Fix: skip the `compose_frame`/callback-send on the
+  `EmptyFrame` path, and/or route the VBlank-handler render through the gate.
+  Surfaced during the #157 frame-callback dedup-guard removal.
 - **niri patterns** not yet adopted: animations sampled at predicted
   presentation time (`niri/src/niri.rs:4601-4604` — small judder source vs
   driftwm's `Instant::now()`); on-demand VRR by window visibility

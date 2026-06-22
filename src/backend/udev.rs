@@ -642,8 +642,6 @@ pub fn init_udev(
                         Err(e) => tracing::warn!("frame_submitted error: {e:?}"),
                     }
                     data.frames_pending.remove(&crtc);
-                    // The sequence was already bumped at queue_frame time so the
-                    // just-presented commit's frame callback fires this cycle.
                     // Real VBlank beat any estimated-VBlank timer we might have armed.
                     if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
                         data.loop_handle.remove(token);
@@ -1547,13 +1545,6 @@ fn render_frame(
             match queue_result {
                 Ok(()) => {
                     data.frames_pending.insert(crtc);
-                    // Bump the frame-callback sequence here, before post_render
-                    // emits frame callbacks. If we waited for the VBlank handler
-                    // the just-rendered commit's filter would still see the old
-                    // sequence and suppress its callback — clients halve their
-                    // FPS while waiting one vblank longer than necessary.
-                    let mut os = crate::state::output_state(output);
-                    os.frame_callback_sequence = os.frame_callback_sequence.wrapping_add(1);
                 }
                 Err(FrameError::EmptyFrame) => {
                     // No page flip - no real VBlank to wake us. Always arm the
@@ -1672,15 +1663,10 @@ fn queue_estimated_vblank_timer(data: &mut DriftWm, output: &Output, crtc: crtc:
         .unwrap_or_else(|| Duration::from_micros(16_667));
 
     let timer = Timer::from_duration(duration);
-    let output_for_timer = output.clone();
     match data
         .loop_handle
         .insert_source(timer, move |_, _, data: &mut DriftWm| {
             data.estimated_vblank_timers.remove(&crtc);
-            // No real VBlank arrived in time; advance the throttle sequence so
-            // surfaces can receive a fresh frame_callback on the next render.
-            let mut os = crate::state::output_state(&output_for_timer);
-            os.frame_callback_sequence = os.frame_callback_sequence.wrapping_add(1);
             TimeoutAction::Drop
         }) {
         Ok(tok) => {
