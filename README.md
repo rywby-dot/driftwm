@@ -428,6 +428,7 @@ tying it all together. Use it as a starting point or steal pieces.
 
 - [driftwm-settings](https://github.com/wwmaxik/driftwm-settings) — GTK4 GUI config editor
 - [driftwm-noctalia](https://github.com/youssefvdel/driftwm-noctalia) — noctalia shell fork adapted for driftwm
+- [Just Enough Shell](https://github.com/ORFLEM/just_enough_shell) — minimal QuickShell desktop shell, driftwm-focused
 - [Gallery](https://github.com/malbiruk/driftwm/discussions/143) — community shaders & rices, share your own
 
 ## Contributing
