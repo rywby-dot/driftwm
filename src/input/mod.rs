@@ -2,6 +2,7 @@ mod actions;
 pub(crate) mod gestures;
 pub(crate) mod keyboard;
 mod pointer;
+pub(crate) mod touch;
 
 use smithay::{
     backend::input::{
@@ -168,6 +169,11 @@ impl DriftWm {
                     pointer.axis(self, frame);
                     pointer.frame(self);
                 }
+                InputEvent::TouchDown { event } => self.on_touch_down::<I>(event),
+                InputEvent::TouchMotion { event } => self.on_touch_motion::<I>(event),
+                InputEvent::TouchUp { event } => self.on_touch_up::<I>(event),
+                InputEvent::TouchCancel { event } => self.on_touch_cancel::<I>(event),
+                InputEvent::TouchFrame { event } => self.on_touch_frame::<I>(event),
                 _ => {}
             }
             return;
@@ -183,6 +189,8 @@ impl DriftWm {
                 | InputEvent::GestureSwipeBegin { .. }
                 | InputEvent::GesturePinchBegin { .. }
                 | InputEvent::GestureHoldBegin { .. }
+                | InputEvent::TouchDown { .. }
+                | InputEvent::TouchMotion { .. }
         ) {
             self.tap.taint();
         }
@@ -203,6 +211,11 @@ impl DriftWm {
             InputEvent::GesturePinchEnd { event } => self.on_gesture_pinch_end::<I>(event),
             InputEvent::GestureHoldBegin { event } => self.on_gesture_hold_begin::<I>(event),
             InputEvent::GestureHoldEnd { event } => self.on_gesture_hold_end::<I>(event),
+            InputEvent::TouchDown { event } => self.on_touch_down::<I>(event),
+            InputEvent::TouchMotion { event } => self.on_touch_motion::<I>(event),
+            InputEvent::TouchUp { event } => self.on_touch_up::<I>(event),
+            InputEvent::TouchCancel { event } => self.on_touch_cancel::<I>(event),
+            InputEvent::TouchFrame { event } => self.on_touch_frame::<I>(event),
             _ => {}
         }
     }
@@ -418,6 +431,8 @@ impl DriftWm {
         &mut self,
         event: I::PointerMotionAbsoluteEvent,
     ) {
+        // Real pointer motion restores the cursor that touch input hid.
+        self.cursor.hidden_by_touch = false;
         let output = match self.active_output() {
             Some(o) => o,
             None => return,
@@ -481,6 +496,8 @@ impl DriftWm {
     /// Multi-monitor aware: converts to layout space for output crossing,
     /// then to target output's canvas coords.
     fn on_pointer_motion_relative<I: InputBackend>(&mut self, event: I::PointerMotionEvent) {
+        // Real pointer motion restores the cursor that touch input hid.
+        self.cursor.hidden_by_touch = false;
         // When locked, pointer only targets the lock surface
         if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
             let pointer = self.seat.get_pointer().unwrap();
@@ -733,6 +750,11 @@ impl DriftWm {
         };
         // During a grab (e.g. window move) the grab owns edge_pan_velocity.
         if pointer.is_grabbed() {
+            return;
+        }
+        // A touch window-move owns edge_pan_velocity too; don't let the resting
+        // (hidden) cursor's position overwrite it.
+        if self.seat.get_touch().is_some_and(|t| t.is_grabbed()) {
             return;
         }
         if !self.cursor_edge_pan {
