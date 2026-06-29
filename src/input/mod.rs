@@ -15,12 +15,13 @@ use smithay::{
 };
 
 use smithay::desktop::Window;
+use smithay::desktop::space::SpaceElement;
 use smithay::reexports::wayland_server::Resource;
 use smithay::wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint};
 use smithay::wayland::seat::WaylandFocus;
 
-use smithay::utils::{Logical, Rectangle};
-use smithay::wayland::compositor::{RectangleKind, RegionAttributes};
+use smithay::utils::Logical;
+use smithay::wayland::compositor::RegionAttributes;
 
 use crate::decorations::DecorationHit;
 use crate::state::{DriftWm, FocusTarget};
@@ -77,20 +78,6 @@ fn window_origin_for_surface(
         .elements()
         .find(|w| w.wl_surface().as_deref() == Some(surface))?;
     Some(state.space.element_location(window)?.to_f64())
-}
-
-/// Compute the bounding box of all Add rectangles in a region.
-fn region_bounding_box(region: &RegionAttributes) -> Rectangle<i32, Logical> {
-    let mut bbox: Option<Rectangle<i32, Logical>> = None;
-    for (kind, rect) in &region.rects {
-        if matches!(kind, RectangleKind::Add) {
-            bbox = Some(match bbox {
-                Some(b) => b.merge(*rect),
-                None => *rect,
-            });
-        }
-    }
-    bbox.unwrap_or_default()
 }
 
 impl DriftWm {
@@ -279,15 +266,26 @@ impl DriftWm {
     /// Sloppy focus: when enabled, focus the non-widget window under the pointer
     /// without raising it. Skips layers, widgets, and empty canvas.
     fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
-        if !self.config.focus_follows_mouse
-            || self.pointer_over_layer
-            || self.active_fullscreen().is_some()
-        {
+        if !self.config.focus_follows_mouse || self.pointer_over_layer {
             return;
         }
         // A pointer grab (popup menu, window move/resize) owns input. Letting
         // hover change focus under it would tear down a live popup grab.
         if self.seat.get_pointer().unwrap().is_grabbed() {
+            return;
+        }
+        // On a fullscreen output the window owns focus; re-assert it rather than
+        // hit-testing for a hover target. This reclaims focus that hover moved to
+        // another output's window, which nothing else here would restore.
+        if let Some(window) = self.active_fullscreen().map(|fs| fs.window.clone()) {
+            let focus_surface = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
+            let already_focused = focus_surface
+                .as_ref()
+                .is_some_and(|t| self.window_focus.as_ref().is_some_and(|f| f.0 == t.0));
+            if !already_focused {
+                let serial = SERIAL_COUNTER.next_serial();
+                self.set_window_focus(focus_surface, serial);
+            }
             return;
         }
         // Pinned windows render above the canvas and hit-test in screen space,
@@ -301,7 +299,7 @@ impl DriftWm {
         .0;
         let window = match self.pinned_window_under(screen_pos, canvas_pos) {
             Some((focus, _)) => self.window_for_surface(&focus.0),
-            None => self.space.element_under(canvas_pos).map(|(w, _)| w.clone()),
+            None => self.element_under(canvas_pos).map(|(w, _)| w.clone()),
         };
         let Some(window) = window else { return };
         let is_widget = window
@@ -541,6 +539,36 @@ impl DriftWm {
             }
         }
 
+        // A confined pointer (e.g. a fullscreen game in its menu/inventory) must
+        // not leave its surface or region. Capture the active confine now; the
+        // prevent check after the new position is computed rejects an offending
+        // move rather than clamping it — clamping to a region's bounding box
+        // would let the cursor slip onto another output, after which the
+        // constraint can never re-establish.
+        let confined: Option<(FocusTarget, Option<RegionAttributes>)> =
+            pointer.current_focus().and_then(|focus| {
+                let region = with_pointer_constraint(&focus.0, &pointer, |c| {
+                    let c = c?;
+                    if !c.is_active() {
+                        return None;
+                    }
+                    match &*c {
+                        PointerConstraint::Confined(confine) => Some(confine.region().cloned()),
+                        _ => None,
+                    }
+                })?;
+                // A confine only restricts motion while the pointer is inside its
+                // region; if it's currently outside, leave this motion free so it
+                // can move back in — the same gate activation uses.
+                if let Some(region) = &region
+                    && let Some(origin) = window_origin_for_surface(self, &focus.0)
+                    && !region.contains((old_canvas - origin).to_i32_round())
+                {
+                    return None;
+                }
+                Some((focus, region))
+            });
+
         let cur_output = match self.active_output() {
             Some(o) => o,
             None => return,
@@ -570,113 +598,53 @@ impl DriftWm {
         let new_layout: Point<f64, smithay::utils::Logical> =
             (old_layout.x + delta.x, old_layout.y + delta.y).into();
 
-        // Find target output at new layout pos
-        let (target_output, mut screen_pos) =
-            if let Some(target) = self.output_at_layout_pos(new_layout) {
-                if target != cur_output {
-                    // Cross to target output
-                    let target_lp = crate::state::output_state(&target).layout_position;
-                    let target_screen: Point<f64, smithay::utils::Logical> = (
-                        new_layout.x - target_lp.x as f64,
-                        new_layout.y - target_lp.y as f64,
-                    )
-                        .into();
-                    (target, target_screen)
-                } else {
-                    // Same output — compute screen pos within it
-                    let screen: Point<f64, smithay::utils::Logical> = (
-                        new_layout.x - cur_layout_pos.x as f64,
-                        new_layout.y - cur_layout_pos.y as f64,
-                    )
-                        .into();
-                    (cur_output.clone(), screen)
-                }
-            } else {
-                // No output at new pos → clamp to current output
-                let clamped: Point<f64, smithay::utils::Logical> = (
-                    (old_screen.x + delta.x).clamp(0.0, output_size.w as f64 - 1.0),
-                    (old_screen.y + delta.y).clamp(0.0, output_size.h as f64 - 1.0),
+        // Find target output at new layout pos. A confined pointer is pinned to
+        // its current output — it must never cross to one whose camera views a
+        // different canvas region, after which the confine could never
+        // re-establish. The reject below keeps it inside its surface in this
+        // output's coordinate space.
+        let (target_output, screen_pos) = if confined.is_none()
+            && let Some(target) = self.output_at_layout_pos(new_layout)
+        {
+            if target != cur_output {
+                // Cross to target output
+                let target_lp = crate::state::output_state(&target).layout_position;
+                let target_screen: Point<f64, smithay::utils::Logical> = (
+                    new_layout.x - target_lp.x as f64,
+                    new_layout.y - target_lp.y as f64,
                 )
                     .into();
-                (cur_output.clone(), clamped)
-            };
+                (target, target_screen)
+            } else {
+                // Same output — compute screen pos within it
+                let screen: Point<f64, smithay::utils::Logical> = (
+                    new_layout.x - cur_layout_pos.x as f64,
+                    new_layout.y - cur_layout_pos.y as f64,
+                )
+                    .into();
+                (cur_output.clone(), screen)
+            }
+        } else {
+            // No output at new pos, or a confined pointer staying put →
+            // clamp to the current output.
+            let clamped: Point<f64, smithay::utils::Logical> = (
+                (old_screen.x + delta.x).clamp(0.0, output_size.w as f64 - 1.0),
+                (old_screen.y + delta.y).clamp(0.0, output_size.h as f64 - 1.0),
+            )
+                .into();
+            (cur_output.clone(), clamped)
+        };
 
         // Convert target-output-local screen pos to canvas via target's camera/zoom
         let (target_camera, target_zoom) = {
             let os = crate::state::output_state(&target_output);
             (os.camera, os.zoom)
         };
-        let mut canvas_pos =
+        let canvas_pos =
             driftwm::canvas::screen_to_canvas(ScreenPos(screen_pos), target_camera, target_zoom).0;
 
-        // Pointer confinement: clamp position to the constraint region
-        if let Some(focus) = pointer.current_focus() {
-            // Resolve window geometry *before* with_pointer_constraint locks the
-            // surface's user_data: Window::geometry() also calls with_states(),
-            // which would re-lock the same mutex from the same thread and
-            // deadlock (std::sync::Mutex is not reentrant).
-            let window_size = self
-                .space
-                .elements()
-                .find(|w| w.wl_surface().as_deref() == Some(&focus.0))
-                .map(|w| w.geometry().size);
-
-            let clamped = with_pointer_constraint(&focus.0, &pointer, |c| {
-                let c = c?;
-                if !c.is_active() {
-                    return None;
-                }
-                let PointerConstraint::Confined(_) = &*c else {
-                    return None;
-                };
-
-                // Look up the constrained window's origin directly
-                let surface_origin = window_origin_for_surface(self, &focus.0)?;
-                let local = canvas_pos - surface_origin;
-
-                if let Some(region) = c.region() {
-                    if region.contains(local.to_i32_round()) {
-                        return None; // Inside region, no clamping needed
-                    }
-                    // Clamp to bounding box of the region's Add rects (approximation)
-                    let bbox = region_bounding_box(region);
-                    let clamped_local: Point<f64, smithay::utils::Logical> = (
-                        local
-                            .x
-                            .clamp(bbox.loc.x as f64, (bbox.loc.x + bbox.size.w) as f64),
-                        local
-                            .y
-                            .clamp(bbox.loc.y as f64, (bbox.loc.y + bbox.size.h) as f64),
-                    )
-                        .into();
-                    Some(surface_origin + clamped_local)
-                } else {
-                    // No region = confine to entire surface (window geometry pre-fetched above)
-                    let size = window_size?;
-                    let clamped_local: Point<f64, smithay::utils::Logical> = (
-                        local.x.clamp(0.0, size.w as f64),
-                        local.y.clamp(0.0, size.h as f64),
-                    )
-                        .into();
-                    if local == clamped_local {
-                        return None;
-                    }
-                    Some(surface_origin + clamped_local)
-                }
-            });
-            if let Some(pos) = clamped {
-                canvas_pos = pos;
-                // Recompute screen_pos so layer shell hit-testing uses the clamped position
-                screen_pos = driftwm::canvas::canvas_to_screen(
-                    driftwm::canvas::CanvasPos(canvas_pos),
-                    target_camera,
-                    target_zoom,
-                )
-                .0;
-            }
-        }
-
-        // Update focused_output
+        let prev_focused_output = self.focused_output.clone();
+        let prev_pointer_over_layer = self.pointer_over_layer;
         self.focused_output = Some(target_output);
 
         let old_focus = pointer.current_focus();
@@ -685,6 +653,40 @@ impl DriftWm {
         // surface — otherwise relative motion lands on a window underneath a
         // layer surface while wl_pointer.motion lands on the layer.
         let under = self.pointer_focus_under(screen_pos, canvas_pos);
+
+        // Reject a confined move that would leave the surface or its region:
+        // forward only the relative delta (the app still tracks motion) and hold
+        // the absolute cursor in place, so it can't cross to another output and
+        // strand the constraint.
+        if let Some((focus, region)) = &confined {
+            let origin = window_origin_for_surface(self, &focus.0);
+            let leaves_surface = under.as_ref().map(|(f, _)| &f.0) != Some(&focus.0);
+            let leaves_region = match (region, origin) {
+                (Some(region), Some(origin)) => {
+                    !region.contains((canvas_pos - origin).to_i32_round())
+                }
+                // No region, or the confined surface's origin can't be located
+                // (a confine not owned by a space window) — fall back to the
+                // surface check rather than freeze the cursor.
+                _ => false,
+            };
+            if leaves_surface || leaves_region {
+                self.focused_output = prev_focused_output;
+                self.pointer_over_layer = prev_pointer_over_layer;
+                pointer.relative_motion(
+                    self,
+                    Some((focus.clone(), origin.unwrap_or(old_canvas))),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: Event::time(&event),
+                    },
+                );
+                pointer.frame(self);
+                return;
+            }
+        }
+
         pointer.motion(
             self,
             under.clone(),
@@ -775,6 +777,60 @@ impl DriftWm {
         crate::state::output_state(&output).edge_pan_velocity = velocity;
     }
 
+    /// True when `surface`'s window is fullscreen on an output *other* than the
+    /// active one. Cameras overlap on the canvas, so the active output's
+    /// canvas-space hit-tests must ignore such a window — it is visible only on
+    /// its own output (mirrors the render isolation in `window_render_transform`).
+    fn fullscreen_on_other_output(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        active: &Option<smithay::output::Output>,
+    ) -> bool {
+        self.find_fullscreen_output_for_surface(surface)
+            .is_some_and(|fs| active.as_ref() != Some(&fs))
+    }
+
+    /// Isolation-aware `Space::element_under`: the same hit-test, but skips a
+    /// window fullscreen on another output (see `fullscreen_on_other_output`).
+    /// Every canvas-space pointer path must use this rather than
+    /// `self.space.element_under`, or an off-output fullscreen window leaks into
+    /// focus / grab / binding-context lookups on the other monitor.
+    pub(crate) fn element_under(
+        &self,
+        point: Point<f64, Logical>,
+    ) -> Option<(&Window, Point<i32, Logical>)> {
+        let active = self.active_output();
+        // Fast path: smithay's native O(n) hit-test. Reuse it verbatim unless
+        // the top hit is an off-output fullscreen window — the only case the
+        // skip matters (and only possible while some output is fullscreen).
+        let hit = self.space.element_under(point);
+        let needs_skip = matches!(&hit, Some((w, _))
+            if w.wl_surface().is_some_and(|s| self.fullscreen_on_other_output(&s, &active)));
+        if !needs_skip {
+            return hit;
+        }
+        // Rare: redo the hit-test skipping off-output fullscreen windows, so a
+        // window beneath one on this output is still found. Mirrors smithay's
+        // `Space::element_under` (bbox filter, render_location, input region).
+        self.space
+            .elements()
+            .rev()
+            .filter(|w| {
+                w.wl_surface()
+                    .is_none_or(|s| !self.fullscreen_on_other_output(&s, &active))
+            })
+            .filter(|w| {
+                self.space
+                    .element_bbox(w)
+                    .is_some_and(|bbox| bbox.to_f64().contains(point))
+            })
+            .find_map(|w| {
+                let render_location = self.space.element_location(w)? - w.geometry().loc;
+                w.is_in_input_region(&(point - render_location.to_f64()))
+                    .then_some((w, render_location))
+            })
+    }
+
     /// Find the Wayland surface and local coordinates under the given canvas position.
     /// This is the foundation for all hit-testing — focus, gestures, resize grabs.
     /// Also checks SSD decoration areas (title bar, resize borders), interleaved
@@ -787,6 +843,7 @@ impl DriftWm {
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+        let active_output = self.active_output();
 
         for window in self.space.elements().rev() {
             let Some(wl_surface) = window.wl_surface() else {
@@ -795,6 +852,11 @@ impl DriftWm {
             // Pinned windows live in screen space — hit-tested by
             // `pinned_window_under`, never by the canvas-space path.
             if self.is_pinned(window) {
+                continue;
+            }
+            // A window fullscreen on a different output isn't visible here; on
+            // its own output the path below still hit-tests it.
+            if self.fullscreen_on_other_output(&wl_surface, &active_output) {
                 continue;
             }
             let rule = driftwm::config::applied_rule(&wl_surface);
@@ -841,7 +903,7 @@ impl DriftWm {
                 // on seeing our Tiled hint. Clients that kept their handles
                 // (Brave, Nautilus) own the inside; we own the outside — no overlap.
                 let is_widget = rule.as_ref().is_some_and(|r| r.widget);
-                let is_fullscreen = self.fullscreen.values().any(|fs| &fs.window == window);
+                let is_fullscreen = self.is_window_fullscreen(window);
                 if !is_widget
                     && !is_fullscreen
                     && crate::decorations::resize_edge_at(pos, loc, size, 0, border_width).is_some()
@@ -1114,6 +1176,7 @@ impl DriftWm {
     ) -> Option<(Window, DecorationHit)> {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+        let active = self.active_output();
 
         // Iterate in z-order (topmost first, matching space.elements().rev())
         for window in self.space.elements().rev() {
@@ -1123,6 +1186,12 @@ impl DriftWm {
             // Pinned windows are screen-space; canvas-space decoration hit-test
             // doesn't apply (their SSD is handled via pinned_window_under).
             if self.is_pinned(window) {
+                continue;
+            }
+            // An off-output fullscreen window isn't visible here — and skipping
+            // it also prevents its surface from short-circuiting the loop below
+            // (the occlusion `return None`) over a window beneath it on this output.
+            if self.fullscreen_on_other_output(&wl_surface, &active) {
                 continue;
             }
             let Some(loc) = self.space.element_location(window) else {
@@ -1147,7 +1216,7 @@ impl DriftWm {
                 // CSD: only the outer resize margin (see surface_under).
                 let is_widget =
                     driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget);
-                let is_fullscreen = self.fullscreen.values().any(|fs| &fs.window == window);
+                let is_fullscreen = self.is_window_fullscreen(window);
                 if self.config.resize_on_border
                     && !is_widget
                     && !is_fullscreen
