@@ -230,10 +230,21 @@ impl DriftWm {
         screen_pos: Point<f64, smithay::utils::Logical>,
         canvas_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
+        // A fullscreen window occludes the Top/Bottom/Background layers on its
+        // output — only Overlay renders above it (mirror compose_frame's layer
+        // culling). Hit-testing the hidden layers here would route clicks to a
+        // bar covered by the fullscreen window instead of the window itself.
+        let output_fullscreen = self
+            .active_output()
+            .is_some_and(|o| self.is_output_fullscreen(&o));
+
         // Overlay and Top layers
-        if let Some(hit) =
-            self.layer_surface_under(screen_pos, canvas_pos, &[WlrLayer::Overlay, WlrLayer::Top])
-        {
+        let above: &[WlrLayer] = if output_fullscreen {
+            &[WlrLayer::Overlay]
+        } else {
+            &[WlrLayer::Overlay, WlrLayer::Top]
+        };
+        if let Some(hit) = self.layer_surface_under(screen_pos, canvas_pos, above) {
             self.pointer_over_layer = true;
             return Some(hit);
         }
@@ -262,12 +273,14 @@ impl DriftWm {
             return Some(hit);
         }
 
-        // Bottom and Background layers
-        if let Some(hit) = self.layer_surface_under(
-            screen_pos,
-            canvas_pos,
-            &[WlrLayer::Bottom, WlrLayer::Background],
-        ) {
+        // Bottom and Background layers (also occluded by a fullscreen window)
+        if !output_fullscreen
+            && let Some(hit) = self.layer_surface_under(
+                screen_pos,
+                canvas_pos,
+                &[WlrLayer::Bottom, WlrLayer::Background],
+            )
+        {
             self.pointer_over_layer = true;
             return Some(hit);
         }
