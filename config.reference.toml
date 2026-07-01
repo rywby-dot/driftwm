@@ -101,6 +101,8 @@
                               # false = camera stays put; focus only moves to a visible window
 # nudge_step = 20             # px per nudge-window action (mod-shift-arrow by default)
 # pan_step = 100.0            # px per pan-viewport action (mod-ctrl-arrow by default)
+# center_cursor = false       # center-nearest also moves the cursor to the new
+                              # window's visual center (or to the anchor point)
 # # Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow)
 # # even when no window is there. Uses Y-up coordinate system.
 # anchors = [[0, 0]]

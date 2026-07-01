@@ -108,6 +108,9 @@ pub(super) struct CursorConfig {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NavigationConfig {
+    /// When `true`, the `center-nearest` action also moves the cursor to
+    /// the visual center of the newly-focused window (or to the anchor point).
+    pub center_cursor: Option<bool>,
     pub animation_speed: Option<f64>,
     pub auto_navigate_on_close: Option<bool>,
     pub nudge_step: Option<i32>,

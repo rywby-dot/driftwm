@@ -294,7 +294,7 @@ impl DriftWm {
 
     /// Sloppy focus: when enabled, focus the non-widget window under the pointer
     /// without raising it. Skips layers, widgets, and empty canvas.
-    fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
+pub(crate) fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
         if !self.config.focus_follows_mouse || self.pointer_over_layer {
             return;
         }

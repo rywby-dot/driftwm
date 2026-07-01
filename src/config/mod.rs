@@ -84,6 +84,9 @@ pub struct Config {
     /// Padding (viewport/screen pixels) around the bounding box for ZoomToFit.
     /// Screen-space so the gutter is consistent regardless of the resulting zoom.
     pub zoom_fit_padding: f64,
+    /// When `true`, `center-nearest` moves the cursor to the visual center
+    /// of the newly-focused window (or to the anchor point). Default: false.
+    pub center_cursor: bool,
     /// Animate zoom back to 1.0 when a new window is mapped
     /// (true) or preserve current zoom (false).
     pub zoom_reset_on_new_window: bool,
@@ -723,6 +726,7 @@ impl Config {
             ),
             animation_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
+            center_cursor: raw.navigation.center_cursor.unwrap_or(false),
             cycle_hold,
             zoom_step: non_negative(raw.zoom.step.unwrap_or(1.1), "zoom.step", &mut errors),
             zoom_touch_speed: non_negative(

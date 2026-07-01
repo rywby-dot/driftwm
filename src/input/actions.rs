@@ -214,6 +214,11 @@ impl DriftWm {
                 match nearest {
                     Some(NavTarget::Window(w)) => {
                         self.navigate_to_window(&w, false);
+                        if self.config.center_cursor {
+                            if let Some(canvas_pos) = self.window_visual_center(&w) {
+                                self.warp_pointer(canvas_pos);
+                            }
+                        }
                     }
                     Some(NavTarget::Anchor(p)) => {
                         // Unfocus so next CenterNearest searches from viewport center (= this anchor)
@@ -223,9 +228,13 @@ impl DriftWm {
                         let vc = self.usable_center_screen();
                         let zoom = self.zoom();
                         self.set_camera_target(Some(Point::from((
-                            p.x - vc.x / zoom,
-                            p.y - vc.y / zoom,
+                                        p.x - vc.x / zoom,
+                                        p.y - vc.y / zoom,
                         ))));
+                        if self.config.center_cursor {
+                            let internal = Point::<f64, Logical>::from((p.x, -p.y));
+                            self.warp_pointer(internal);
+                        }
                     }
                     None => {}
                 }
