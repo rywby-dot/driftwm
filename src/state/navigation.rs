@@ -10,11 +10,27 @@ use smithay::{
 
 use super::{DriftWm, output_state};
 
+/// Skip the activation pan only when the window is already fully inside its
+/// home output's viewport. Any clipping → pan that output to bring it fully
+/// into view; activation is a request to look at the window.
+const ACTIVATION_VISIBLE_THRESHOLD: f64 = 1.0;
+
 impl DriftWm {
-    /// Navigate the viewport to center on a window: raise, focus, animate camera.
-    /// When `reset_zoom` is true, zoom animates to 1.0 (intentional navigation).
-    /// Otherwise preserves current zoom, or restores saved zoom if leaving overview.
+    /// Navigate the active output's viewport to center on a window: raise,
+    /// focus, animate camera. When `reset_zoom` is true, zoom animates to 1.0
+    /// (intentional navigation). Otherwise preserves current zoom, or restores
+    /// saved zoom if leaving overview.
     pub fn navigate_to_window(&mut self, window: &Window, reset_zoom: bool) {
+        if let Some(output) = self.active_output() {
+            self.navigate_to_window_on(window, &output, reset_zoom);
+        }
+    }
+
+    /// As `navigate_to_window`, but pans `output`'s camera instead of the
+    /// active one. Lets xdg-activation reveal a window on the monitor it
+    /// already lives on rather than dragging the active monitor's camera
+    /// across to it.
+    pub fn navigate_to_window_on(&mut self, window: &Window, output: &Output, reset_zoom: bool) {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
 
         // A fullscreen window lives in screen space, shown only on its own
@@ -26,7 +42,7 @@ impl DriftWm {
             .wl_surface()
             .and_then(|s| self.find_fullscreen_output_for_surface(&s))
         {
-            if self.active_output().as_ref() == Some(&fs_output) {
+            if &fs_output == output {
                 self.raise_and_focus(window, serial);
             }
             return;
@@ -35,22 +51,22 @@ impl DriftWm {
         self.raise_and_focus(window, serial);
 
         let target_zoom = if reset_zoom {
-            self.set_overview_return(None);
+            output_state(output).overview_return = None;
             1.0
         } else {
-            let overview_ret = self.overview_return();
-            self.set_overview_return(None);
+            let overview_ret = output_state(output).overview_return;
+            output_state(output).overview_return = None;
             if let Some((_, saved_zoom)) = overview_ret {
                 saved_zoom
             } else {
-                self.zoom()
+                output_state(output).zoom
             }
         };
 
         let window_loc = self.space.element_location(window).unwrap_or_default();
         let window_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
-        let vc = self.usable_center_screen();
+        let vc = self.usable_center_screen_on(output);
         let target =
             driftwm::canvas::camera_to_center_window(window_loc, window_size, vc, target_zoom, bar);
 
@@ -60,12 +76,27 @@ impl DriftWm {
                 window_loc.y as f64 + window_size.h as f64 / 2.0,
             ))
         });
-        self.with_output_state(|os| {
-            os.momentum.stop();
-            os.zoom_animation_center = Some(window_center);
-            os.camera_target = Some(target);
-            os.zoom_target = Some(target_zoom);
-        });
+        let mut os = output_state(output);
+        os.momentum.stop();
+        os.zoom_animation_center = Some(window_center);
+        os.camera_target = Some(target);
+        os.zoom_target = Some(target_zoom);
+    }
+
+    /// Reveal and focus `window` on the output it already lives on, without
+    /// dragging a different monitor's camera to it: fully visible on its home
+    /// output → just focus; any clipping → pan that output into view. A window
+    /// off every screen falls back to the active output.
+    pub fn activate_window_output_local(&mut self, window: &Window) {
+        let Some(home) = self.output_for_window(window) else {
+            return;
+        };
+        if self.window_visible_at_least_on(window, &home, ACTIVATION_VISIBLE_THRESHOLD) {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.raise_and_focus(window, serial);
+        } else {
+            self.navigate_to_window_on(window, &home, self.config.zoom_reset_on_activation);
+        }
     }
 
     /// Dynamic minimum zoom based on the current window layout.

@@ -1655,7 +1655,14 @@ impl DriftWm {
 
     /// Screen-space center of the usable area (= viewport center when no panels exist).
     pub fn usable_center_screen(&self) -> Point<f64, Logical> {
-        let usable = self.get_usable_area();
+        self.active_output()
+            .map(|o| self.usable_center_screen_on(&o))
+            .unwrap_or_else(|| Point::from((0.5, 0.5)))
+    }
+
+    /// Screen-space center of `output`'s usable area (viewport minus panels).
+    pub fn usable_center_screen_on(&self, output: &Output) -> Point<f64, Logical> {
+        let usable = smithay::desktop::layer_map_for_output(output).non_exclusive_zone();
         Point::from((
             usable.loc.x as f64 + usable.size.w as f64 / 2.0,
             usable.loc.y as f64 + usable.size.h as f64 / 2.0,
@@ -1721,17 +1728,31 @@ impl DriftWm {
         )))
     }
 
-    /// True if at least `threshold` of the window's area is inside the viewport.
+    /// True if at least `threshold` of the window's area is inside the active
+    /// output's viewport.
     pub fn window_visible_at_least(&self, window: &Window, threshold: f64) -> bool {
+        self.active_output()
+            .is_some_and(|o| self.window_visible_at_least_on(window, &o, threshold))
+    }
+
+    /// As `window_visible_at_least`, but against `output`'s viewport instead
+    /// of the active one.
+    pub fn window_visible_at_least_on(
+        &self,
+        window: &Window,
+        output: &Output,
+        threshold: f64,
+    ) -> bool {
         let Some(loc) = self.space.element_location(window) else {
             return false;
         };
+        let os = output_state(output);
         driftwm::canvas::visible_fraction(
             loc,
             window.geometry().size,
-            self.camera(),
-            self.get_viewport_size(),
-            self.zoom(),
+            os.camera,
+            output_logical_size(output),
+            os.zoom,
         ) >= threshold
     }
 
