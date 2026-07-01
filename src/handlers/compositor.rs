@@ -612,6 +612,8 @@ impl CompositorHandler for DriftWm {
                         self.pending_recenter.remove(&root.id());
                     }
                 }
+
+                self.reflow_grown_snapped_window(&window, &root);
             }
         }
 
@@ -859,6 +861,101 @@ impl DriftWm {
                     .replace(ResizeState::Idle);
             });
             self.refresh_stable_snap_rect(window);
+        }
+    }
+
+    /// A snapped window that resizes *itself* larger — not via a resize grab —
+    /// can grow over its neighbors. The classic case is a game that maps at a
+    /// small size then jumps to its full render resolution a frame later. Move
+    /// it beside its former cluster so the snap gaps survive, and recenter the
+    /// camera if it's the focused window.
+    ///
+    /// No-ops unless the footprint actually grew into an overlap: shrinks and
+    /// grows into free space keep their position. Resize-grab motion (and its
+    /// cluster cascade) is owned by `handle_resize_commit`, so this fires only
+    /// on `ResizeState::Idle`.
+    fn reflow_grown_snapped_window(
+        &mut self,
+        window: &smithay::desktop::Window,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
+        let resize_state = with_states(surface, |states| {
+            *states
+                .data_map
+                .get_or_insert(|| RefCell::new(ResizeState::Idle))
+                .borrow()
+        });
+        if !matches!(resize_state, ResizeState::Idle) {
+            return;
+        }
+        if self.is_window_fullscreen(window) || crate::state::fit::is_fit(window) {
+            return;
+        }
+
+        let Some(&stable) = self.stable_snap_rects.get(&surface.id()) else {
+            return;
+        };
+        // `snap_rect_for` returns `None` for widgets / pinned / fullscreen, so
+        // this also filters those out.
+        let Some(current) = self.snap_rect_for(window) else {
+            return;
+        };
+
+        // Cheap early-out: `commit` runs on every frame, so bail before any
+        // cluster math unless the footprint grew past its settled size.
+        const EPS: f64 = 1.0;
+        let grew = (current.x_high - current.x_low) > (stable.x_high - stable.x_low) + EPS
+            || (current.y_high - current.y_low) > (stable.y_high - stable.y_low) + EPS;
+        if !grew {
+            return;
+        }
+
+        let gap = self.config.snap_gap;
+        let others: Vec<(smithay::desktop::Window, driftwm::layout::snap::SnapRect)> = self
+            .space
+            .elements()
+            .filter(|w| *w != window)
+            .filter_map(|w| self.snap_rect_for(w).map(|r| (w.clone(), r)))
+            .collect();
+
+        // Gate on "was snapped", measured from the pre-grow (stable) rect: the
+        // grown rect may already overlap a neighbor and no longer read as
+        // edge-adjacent. The first such neighbor also anchors re-placement.
+        let anchor = others
+            .iter()
+            .find(|(_, r)| driftwm::layout::cluster::adjacent_side(&stable, r, gap).is_some())
+            .map(|(w, _)| w.clone());
+        let Some(anchor) = anchor else {
+            return;
+        };
+
+        // Only reflow when the grow actually collided; growing into free space
+        // keeps the window put.
+        if !others.iter().any(|(_, r)| current.overlaps(r)) {
+            return;
+        }
+
+        let content_size = window.geometry().size;
+        let bar = self.window_ssd_bar(window);
+        let Some((x, y)) = self.place_adjacent_to(&anchor, window, content_size, bar) else {
+            return;
+        };
+        let new_loc = Point::from((x, y));
+        if self.space.element_location(window) == Some(new_loc) {
+            return;
+        }
+        self.space.map_element(window.clone(), new_loc, false);
+        self.refresh_stable_snap_rect(window);
+
+        // Recenter only when the reflow pushed the focused window (partly) out
+        // of view — a large jump (the game landing beside its neighbor) follows
+        // the window; an in-view nudge (sidebar toggle, font bump) leaves the
+        // camera alone. `0.999` absorbs subpixel rounding at the viewport edge.
+        const FULLY_VISIBLE: f64 = 0.999;
+        if self.focused_window().as_ref() == Some(window)
+            && !self.window_visible_at_least(window, FULLY_VISIBLE)
+        {
+            self.navigate_to_window(window, false);
         }
     }
 }

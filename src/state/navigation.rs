@@ -1,5 +1,4 @@
 use crate::surface_tree::focus_belongs_to_window;
-use driftwm::layout::snap::SnapRect;
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
@@ -10,10 +9,6 @@ use smithay::{
 };
 
 use super::{DriftWm, output_state};
-
-fn rects_overlap(a: &SnapRect, b: &SnapRect) -> bool {
-    a.x_low < b.x_high && b.x_low < a.x_high && a.y_low < b.y_high && b.y_low < a.y_high
-}
 
 impl DriftWm {
     /// Navigate the viewport to center on a window: raise, focus, animate camera.
@@ -241,7 +236,7 @@ impl DriftWm {
                 cluster.contains(*w)
                     || self
                         .snap_rect_for(w)
-                        .is_some_and(|r| rects_overlap(&destroyed_rect, &r))
+                        .is_some_and(|r| destroyed_rect.overlaps(&r))
             })
             .cloned()
     }

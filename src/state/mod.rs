@@ -1810,13 +1810,29 @@ impl DriftWm {
             return None;
         }
 
+        self.place_adjacent_to(focused, new_window, new_size, bar)
+    }
+
+    /// Geometry-only placement of `placing` (content sized `new_size`, SSD
+    /// bar `bar`) adjacent to `anchor`'s snap cluster, treating every other
+    /// mapped window as an obstacle. Returns the content top-left in canvas
+    /// coords, or `None` when `anchor` is ineligible or no slot fits.
+    pub fn place_adjacent_to(
+        &self,
+        anchor: &Window,
+        placing: &Window,
+        new_size: Size<i32, Logical>,
+        bar: i32,
+    ) -> Option<(i32, i32)> {
+        let placing_surface = placing.wl_surface()?.into_owned();
+
         // Widgets sit visually below windows (wallpaper-like) — neither
         // anchors nor obstacles for auto placement.
         let mut rects: Vec<driftwm::layout::auto_placement::Rect> = Vec::new();
         let mut eligible: HashSet<usize> = HashSet::new();
-        let mut focused_idx: Option<usize> = None;
+        let mut anchor_idx: Option<usize> = None;
         for w in self.space.elements() {
-            if w == new_window {
+            if w == placing {
                 continue;
             }
             let widget = w
@@ -1841,13 +1857,13 @@ impl DriftWm {
                 h: (size.h + b) as f64 + 2.0 * bw,
             });
             eligible.insert(idx);
-            if w == focused {
-                focused_idx = Some(idx);
+            if w == anchor {
+                anchor_idx = Some(idx);
             }
         }
-        let focused_idx = focused_idx?;
+        let anchor_idx = anchor_idx?;
 
-        let new_bw = self.window_border_width(&new_surface) as f64;
+        let new_bw = self.window_border_width(&placing_surface) as f64;
         let new_w_f = new_size.w as f64 + 2.0 * new_bw;
         let new_h_f = (new_size.h + bar) as f64 + 2.0 * new_bw;
 
@@ -1858,7 +1874,7 @@ impl DriftWm {
 
         let pos = driftwm::layout::auto_placement::place_auto(
             &rects,
-            focused_idx,
+            anchor_idx,
             &eligible,
             new_w_f,
             new_h_f,
