@@ -85,9 +85,14 @@ impl SeatHandler for DriftWm {
             && matches!(&image, CursorImageStatus::Named(icon) if *icon == CursorIcon::Default)
         {
             self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Wait);
-            return;
+        } else {
+            self.cursor.cursor_status = image;
         }
-        self.cursor.cursor_status = image;
+        // A wp_cursor_shape change (set_shape) commits no buffer, so nothing
+        // else marks the scene dirty; without this the new cursor isn't
+        // composited until the next unrelated damage. Surface cursors dodge
+        // this via their own buffer commit.
+        self.mark_all_dirty();
     }
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: keyboard::LedState) {
