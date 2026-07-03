@@ -4,6 +4,9 @@
 //! `super::types`, applying defaults, clamping, and validation. No
 //! compositor state is touched — these are pure functions.
 
+use crate::config::toml::HotCornersFile;
+use crate::config::HashMap;
+use crate::config::Action;
 use smithay::utils::Transform;
 
 use super::parse::parse_key_combo;
@@ -14,7 +17,7 @@ use super::toml::{
 use super::types::{
     BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, KeyCombo, ModKey,
     OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys, Pattern, TitleAlign,
-    WindowRule,
+    WindowRule, HotCorners,
 };
 
 /// How actionable a config warning is. The error bar has room for one message,
@@ -522,13 +525,52 @@ pub(super) fn parse_output_rule(r: OutputRuleFile) -> Result<OutputConfig, Strin
         .map(|s| parse_output_mode(&s))
         .transpose()?
         .unwrap_or_default();
+
+    let hot_corners = match r.hot_corners {
+        Some(hcf) => parse_hot_corners(hcf)?,
+        None => HotCorners::default(),
+    };
+
     Ok(OutputConfig {
         name: r.name,
         scale,
         transform,
         position,
         mode,
+        hot_corners,
     })
+}
+
+pub(super) fn parse_hot_corners(hcf: HotCornersFile) -> Result<HotCorners, String> {
+    use super::parse::parse_action;
+    use super::types::HotCorner;
+
+    let threshold = hcf.threshold.unwrap_or(4.0);
+    if threshold <= 0.0 {
+        return Err(format!("hot_corners.threshold must be > 0, got {threshold}"));
+    }
+
+    let mut bindings = HashMap::new();
+    let try_set = |corner: HotCorner, raw: &Option<String>, bindings: &mut HashMap<HotCorner, Action>|
+        -> Result<(), String>
+    {
+        if let Some(s) = raw {
+            if s == "none" {
+                bindings.remove(&corner);
+            } else {
+                let action = parse_action(s)?;
+                bindings.insert(corner, action);
+            }
+        }
+        Ok(())
+    };
+
+    try_set(HotCorner::TopLeft,     &hcf.top_left,     &mut bindings)?;
+    try_set(HotCorner::TopRight,    &hcf.top_right,    &mut bindings)?;
+    try_set(HotCorner::BottomLeft,  &hcf.bottom_left,  &mut bindings)?;
+    try_set(HotCorner::BottomRight, &hcf.bottom_right, &mut bindings)?;
+
+    Ok(HotCorners { bindings, threshold })
 }
 
 #[cfg(test)]

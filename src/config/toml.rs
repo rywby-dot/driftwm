@@ -288,14 +288,32 @@ pub(super) struct GestureFileConfig {
     pub anywhere: Option<HashMap<String, String>>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct OutputRuleFile {
     pub name: String,
     pub scale: Option<f64>,
     pub transform: Option<String>,
     pub position: Option<::toml::Value>,
     pub mode: Option<String>,
+    /// Hot-corner bindings for this output. Format:
+    /// ```toml
+    /// [outputs.hot_corners]
+    /// threshold = 4
+    /// top-left     = "exec foot --client"
+    /// bottom-right = "exec wofi --show drun"
+    /// ```
+    pub hot_corners: Option<HotCornersFile>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct HotCornersFile {
+    pub threshold: Option<f64>,
+    pub top_left:     Option<String>,
+    pub top_right:    Option<String>,
+    pub bottom_left:  Option<String>,
+    pub bottom_right: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

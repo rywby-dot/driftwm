@@ -943,6 +943,72 @@ pub struct OutputConfig {
     pub transform: Option<Transform>,
     pub position: OutputPosition,
     pub mode: OutputMode,
+    pub hot_corners: HotCorners,
+}
+
+/// Which corner of the screen to bind a hot-corner action to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HotCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl HotCorner {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "top-left"     => Some(Self::TopLeft),
+            "top-right"    => Some(Self::TopRight),
+            "bottom-left"  => Some(Self::BottomLeft),
+            "bottom-right" => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+
+    /// True when `(x, y)` in output-local screen coords is within `threshold`
+    /// pixels of this corner.
+    pub fn contains(
+        &self,
+        x: f64,
+        y: f64,
+        out_w: f64,
+        out_h: f64,
+        threshold: f64,
+    ) -> bool {
+        let on_left   = x < threshold;
+        let on_right  = x > out_w - threshold;
+        let on_top    = y < threshold;
+        let on_bottom = y > out_h - threshold;
+        match self {
+            Self::TopLeft     => on_left && on_top,
+            Self::TopRight    => on_right && on_top,
+            Self::BottomLeft  => on_left && on_bottom,
+            Self::BottomRight => on_right && on_bottom,
+        }
+    }
+}
+
+/// Per-output hot-corner bindings. Empty map = no corners configured.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HotCorners {
+    /// Action to fire when the cursor enters this corner. `None` disables the corner.
+    pub bindings: HashMap<HotCorner, Action>,
+    /// Activation zone size in logical pixels. Defaults to 4.
+    pub threshold: f64,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            scale: None,
+            transform: None,
+            position: OutputPosition::default(),
+            mode: OutputMode::default(),
+            hot_corners: HotCorners::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

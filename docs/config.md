@@ -882,6 +882,12 @@ Per-output configuration. Each [[outputs]] entry matches by connector name. Find
 
 `mode` accepts "preferred", "WxH", or "WxH@Hz". A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
 
+## Hot-corners: bind any keyboard action to a screen corner. The action fires
+
+when the cursor enters that corner of THIS output (per-monitor setting), and re-arms when the cursor leaves. The whole `[[outputs]]` block can be omitted if you don't need any hot corners on a particular monitor.
+
+Supported actions: any of the actions documented in `[keybindings]` / `[mouse]` (exec, exec-terminal, exec-launcher, spawn, zoom-to-fit, cycle-windows, reload-config, quit, ...). Pass "none" to leave a corner unbound.
+
 **Example:**
 
 ```toml
@@ -891,6 +897,13 @@ scale = 1.5              # fractional scale (default: 1.0)
 transform = "normal"     # normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
 position = "auto"        # "auto" (left-to-right) or [x, y] in layout coords
 mode = "preferred"       # "preferred", "1920x1080", or "2560x1440@144"
+
+[outputs.hot_corners]
+threshold = 4         # activation radius in logical px (default: 4)
+top_left = "zoom-to-fit"
+top_right = "none"
+bottom_left = "spawn grim - | wl-copy"
+bottom_right = "exec-launcher"
 
 [[outputs]]
 name = "HDMI-A-1"

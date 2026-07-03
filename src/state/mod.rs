@@ -77,7 +77,7 @@ use crate::backend::Backend;
 use crate::input::gestures::GestureState;
 use crate::input::keyboard::TapTracker;
 use driftwm::canvas::MomentumState;
-use driftwm::config::Config;
+use driftwm::config::{Config, HotCorner};
 use driftwm::window_ext::WindowExt;
 
 /// Min visible fraction of the focused window for auto-placement to anchor a
@@ -598,6 +598,11 @@ pub struct DriftWm {
         Instant,
         smithay::reexports::wayland_server::backend::ObjectId,
     )>,
+
+    /// Last hot-corner that fired, per output. The latch prevents spamming the
+    /// bound action on every motion event while the cursor sits in the corner:
+    /// re-arm when the cursor leaves the corner.
+    pub hot_corners_armed: HashMap<Output, HotCorner>,
 
     /// Compositor-generated errors shown in the on-screen error bar, keyed by
     /// source. Empty = no bar. Use [`Self::set_error`]/[`Self::clear_error`].

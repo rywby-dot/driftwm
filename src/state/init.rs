@@ -363,6 +363,7 @@ impl DriftWm {
             satellite: None,
             udev_device: None,
             last_titlebar_click: None,
+            hot_corners_armed: HashMap::new(),
             errors: init_errors,
             cursor_edge_pan: edge_pan_cursor,
             touch_state: crate::input::touch::TouchState::new(),

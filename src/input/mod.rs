@@ -28,6 +28,7 @@ use crate::decorations::DecorationHit;
 use crate::state::{DriftWm, FocusTarget};
 use driftwm::canvas::{ScreenPos, screen_to_canvas};
 use driftwm::protocols::output_power::OutputPowerHandler;
+use driftwm::config::HotCorner;
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of a screen edge, directed away
@@ -82,6 +83,51 @@ fn window_origin_for_surface(
 }
 
 impl DriftWm {
+    /// Fire any hot-corner action the cursor is currently inside.
+    /// `screen_pos` is output-local screen-space. `output` is the output the
+    /// cursor is on (the caller knows — for absolute motion it's `active_output()`,
+    /// for relative motion it's the one we computed from `output_at_layout_pos`).
+    fn check_hot_corners(
+        &mut self,
+        output: &smithay::output::Output,
+        screen_pos: Point<f64, smithay::utils::Logical>,
+    ) {
+        let Some(cfg) = self.config.output_config(&output.name()).cloned() else {
+            return;
+        };
+        if cfg.hot_corners.bindings.is_empty() {
+            return;
+        }
+
+        let size = crate::state::output_logical_size(output);
+        let out_w = size.w as f64;
+        let out_h = size.h as f64;
+        let threshold = cfg.hot_corners.threshold;
+
+        let active_corner = [
+            HotCorner::TopLeft, HotCorner::TopRight,
+            HotCorner::BottomLeft, HotCorner::BottomRight,
+        ]
+        .into_iter()
+        .find(|c| c.contains(screen_pos.x, screen_pos.y, out_w, out_h, threshold));
+
+        let armed = self.hot_corners_armed.get(output).copied();
+
+        match (active_corner, armed) {
+            (Some(c), prev) if prev != Some(c) => {
+                if let Some(action) = cfg.hot_corners.bindings.get(&c).cloned() {
+                    tracing::info!("hot-corner fired: {:?} on {}", c, output.name());
+                    self.execute_action(&action);
+                }
+                self.hot_corners_armed.insert(output.clone(), c);
+            }
+            (None, _) => {
+                // Cursor left every corner — re-arm.
+                self.hot_corners_armed.remove(output);
+            }
+            _ => {}
+        }
+    }
     fn wake_dpms_off_outputs(&mut self) {
         if self.dpms_off_outputs.is_empty() {
             return;
@@ -504,6 +550,9 @@ impl DriftWm {
         pointer.frame(self);
         self.update_decoration_cursor(canvas_pos);
         self.update_pointer_constraint(old_focus);
+        if let Some(out) = self.active_output() {
+            self.check_hot_corners(&out, screen_pos);
+        }
         self.maybe_hover_focus(canvas_pos);
         self.refresh_cursor_edge_pan();
     }
@@ -678,7 +727,7 @@ impl DriftWm {
 
         let prev_focused_output = self.focused_output.clone();
         let prev_pointer_over_layer = self.pointer_over_layer;
-        self.focused_output = Some(target_output);
+        self.focused_output = Some(target_output.clone());
 
         let old_focus = pointer.current_focus();
         // Compute the focus once and use it for both motion and relative_motion,
@@ -741,6 +790,7 @@ impl DriftWm {
         pointer.frame(self);
         self.update_decoration_cursor(canvas_pos);
         self.update_pointer_constraint(old_focus);
+        self.check_hot_corners(&target_output, screen_pos);
         self.maybe_hover_focus(canvas_pos);
         self.refresh_cursor_edge_pan();
     }
