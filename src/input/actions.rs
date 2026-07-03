@@ -149,6 +149,13 @@ impl DriftWm {
                     }
                 }
             }
+            Action::CenterCursor => {
+                // Center of the active output's usable area in canvas
+                // coords — matches the anchor used by send-cursor-to-output
+                // and window_placement = "center", so it ignores panels.
+                let target = self.viewport_center_canvas();
+                self.warp_pointer(target);
+            }
             Action::CenterNearest(dir) => {
                 #[derive(Clone, PartialEq)]
                 enum NavTarget {

@@ -121,6 +121,7 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         }
         "center-window" => Ok(Action::CenterWindow),
         "focus-center" => Ok(Action::FocusCenter),
+        "center-cursor" => Ok(Action::CenterCursor),
         "center-nearest" => {
             let dir = parse_direction(arg.ok_or("center-nearest requires a direction")?)?;
             Ok(Action::CenterNearest(dir))
@@ -309,6 +310,7 @@ fn parse_threshold_action(s: &str) -> Result<Option<ThresholdAction>, String> {
         | "exec-terminal"
         | "exec-launcher"
         | "focus-center"
+        | "center-cursor"
         | "home-toggle"
         | "zoom-to-fit"
         | "zoom-to-fit-snapped"

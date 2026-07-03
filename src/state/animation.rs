@@ -135,6 +135,7 @@ impl DriftWm {
             },
         );
         pointer.frame(self);
+        self.maybe_hover_focus(pos);
     }
 
     /// Apply scroll momentum each frame. Suppressed during active

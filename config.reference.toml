@@ -276,6 +276,7 @@
 # #   send-to-output <dir>    — move focused window to adjacent output
 # #   send-cursor-to-output <dir>  — move the cursor to adjacent output
 # #   switch-layout <target>  — cycle keyboard layout: next, prev, or a 0-based index
+# #   center-cursor           — centers cursor
 # #   none                    — unbind this key combo
 # #
 # # Directions: up, down, left, right, up-left, up-right, down-left, down-right
