@@ -956,16 +956,6 @@ pub enum HotCorner {
 }
 
 impl HotCorner {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "top-left"     => Some(Self::TopLeft),
-            "top-right"    => Some(Self::TopRight),
-            "bottom-left"  => Some(Self::BottomLeft),
-            "bottom-right" => Some(Self::BottomRight),
-            _ => None,
-        }
-    }
-
     /// True when `(x, y)` in output-local screen coords is within `threshold`
     /// pixels of this corner.
     pub fn contains(

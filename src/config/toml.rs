@@ -296,13 +296,6 @@ pub(super) struct OutputRuleFile {
     pub transform: Option<String>,
     pub position: Option<::toml::Value>,
     pub mode: Option<String>,
-    /// Hot-corner bindings for this output. Format:
-    /// ```toml
-    /// [outputs.hot_corners]
-    /// threshold = 4
-    /// top-left     = "exec foot --client"
-    /// bottom-right = "exec wofi --show drun"
-    /// ```
     pub hot_corners: Option<HotCornersFile>,
 }
 

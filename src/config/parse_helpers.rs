@@ -4,20 +4,19 @@
 //! `super::types`, applying defaults, clamping, and validation. No
 //! compositor state is touched — these are pure functions.
 
-use crate::config::toml::HotCornersFile;
-use crate::config::HashMap;
-use crate::config::Action;
+use std::collections::HashMap;
+
 use smithay::utils::Transform;
 
 use super::parse::parse_key_combo;
 use super::toml::{
-    BackendFileConfig, DecorationFileConfig, EffectsFileConfig, OutputOutlineConfig,
+    BackendFileConfig, DecorationFileConfig, EffectsFileConfig, HotCornersFile, OutputOutlineConfig,
     OutputRuleFile, PassKeysFile, WindowRuleFile,
 };
 use super::types::{
-    BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, KeyCombo, ModKey,
-    OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys, Pattern, TitleAlign,
-    WindowRule, HotCorners,
+    Action, BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, KeyCombo,
+    ModKey, OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys, Pattern,
+    TitleAlign, WindowRule, HotCorners,
 };
 
 /// How actionable a config warning is. The error bar has room for one message,

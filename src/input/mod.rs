@@ -118,8 +118,11 @@ impl DriftWm {
                 if let Some(action) = cfg.hot_corners.bindings.get(&c).cloned() {
                     tracing::info!("hot-corner fired: {:?} on {}", c, output.name());
                     self.execute_action(&action);
+                    self.hot_corners_armed.insert(output.clone(), c);
+                } else {
+                    // Not configured - we consider it not armed.
+                    self.hot_corners_armed.remove(output);
                 }
-                self.hot_corners_armed.insert(output.clone(), c);
             }
             (None, _) => {
                 // Cursor left every corner — re-arm.
