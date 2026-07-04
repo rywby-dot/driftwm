@@ -936,7 +936,7 @@ impl Default for OutputOutlineSettings {
 }
 
 /// Per-output configuration from `[[outputs]]` config sections.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct OutputConfig {
     pub name: String,
     pub scale: Option<f64>,
@@ -958,22 +958,15 @@ pub enum HotCorner {
 impl HotCorner {
     /// True when `(x, y)` in output-local screen coords is within `threshold`
     /// pixels of this corner.
-    pub fn contains(
-        &self,
-        x: f64,
-        y: f64,
-        out_w: f64,
-        out_h: f64,
-        threshold: f64,
-    ) -> bool {
-        let on_left   = x < threshold;
-        let on_right  = x > out_w - threshold;
-        let on_top    = y < threshold;
+    pub fn contains(&self, x: f64, y: f64, out_w: f64, out_h: f64, threshold: f64) -> bool {
+        let on_left = x < threshold;
+        let on_right = x > out_w - threshold;
+        let on_top = y < threshold;
         let on_bottom = y > out_h - threshold;
         match self {
-            Self::TopLeft     => on_left && on_top,
-            Self::TopRight    => on_right && on_top,
-            Self::BottomLeft  => on_left && on_bottom,
+            Self::TopLeft => on_left && on_top,
+            Self::TopRight => on_right && on_top,
+            Self::BottomLeft => on_left && on_bottom,
             Self::BottomRight => on_right && on_bottom,
         }
     }
@@ -997,19 +990,6 @@ impl Default for HotCorners {
             threshold: 4.0,
             disable_when_fullscreen: true,
             disable_while_dragging: true,
-        }
-    }
-}
-
-impl Default for OutputConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            scale: None,
-            transform: None,
-            position: OutputPosition::default(),
-            mode: OutputMode::default(),
-            hot_corners: HotCorners::default(),
         }
     }
 }

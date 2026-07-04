@@ -10,13 +10,13 @@ use smithay::utils::Transform;
 
 use super::parse::parse_key_combo;
 use super::toml::{
-    BackendFileConfig, DecorationFileConfig, EffectsFileConfig, HotCornersFile, OutputOutlineConfig,
-    OutputRuleFile, PassKeysFile, WindowRuleFile,
+    BackendFileConfig, DecorationFileConfig, EffectsFileConfig, HotCornersFile,
+    OutputOutlineConfig, OutputRuleFile, PassKeysFile, WindowRuleFile,
 };
 use super::types::{
-    Action, BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, KeyCombo,
-    ModKey, OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys, Pattern,
-    TitleAlign, WindowRule, HotCorners,
+    Action, BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, HotCorners,
+    KeyCombo, ModKey, OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys,
+    Pattern, TitleAlign, WindowRule,
 };
 
 /// How actionable a config warning is. The error bar has room for one message,
@@ -546,13 +546,16 @@ pub(super) fn parse_hot_corners(hcf: HotCornersFile) -> Result<HotCorners, Strin
 
     let threshold = hcf.threshold.unwrap_or(4.0);
     if threshold <= 0.0 {
-        return Err(format!("hot_corners.threshold must be > 0, got {threshold}"));
+        return Err(format!(
+            "hot_corners.threshold must be > 0, got {threshold}"
+        ));
     }
 
     let mut bindings = HashMap::new();
-    let try_set = |corner: HotCorner, raw: &Option<String>, bindings: &mut HashMap<HotCorner, Action>|
-        -> Result<(), String>
-    {
+    let try_set = |corner: HotCorner,
+                   raw: &Option<String>,
+                   bindings: &mut HashMap<HotCorner, Action>|
+     -> Result<(), String> {
         if let Some(s) = raw {
             if s == "none" {
                 bindings.remove(&corner);
@@ -564,13 +567,13 @@ pub(super) fn parse_hot_corners(hcf: HotCornersFile) -> Result<HotCorners, Strin
         Ok(())
     };
 
-    try_set(HotCorner::TopLeft,     &hcf.top_left,     &mut bindings)?;
-    try_set(HotCorner::TopRight,    &hcf.top_right,    &mut bindings)?;
-    try_set(HotCorner::BottomLeft,  &hcf.bottom_left,  &mut bindings)?;
+    try_set(HotCorner::TopLeft, &hcf.top_left, &mut bindings)?;
+    try_set(HotCorner::TopRight, &hcf.top_right, &mut bindings)?;
+    try_set(HotCorner::BottomLeft, &hcf.bottom_left, &mut bindings)?;
     try_set(HotCorner::BottomRight, &hcf.bottom_right, &mut bindings)?;
 
     let disable_when_fullscreen = hcf.disable_when_fullscreen.unwrap_or(true);
-    let disable_while_dragging  = hcf.disable_while_dragging.unwrap_or(true);
+    let disable_while_dragging = hcf.disable_while_dragging.unwrap_or(true);
 
     Ok(HotCorners {
         bindings,

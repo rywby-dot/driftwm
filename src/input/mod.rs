@@ -27,8 +27,8 @@ use smithay::wayland::compositor::RegionAttributes;
 use crate::decorations::DecorationHit;
 use crate::state::{DriftWm, FocusTarget};
 use driftwm::canvas::{ScreenPos, screen_to_canvas};
-use driftwm::protocols::output_power::OutputPowerHandler;
 use driftwm::config::HotCorner;
+use driftwm::protocols::output_power::OutputPowerHandler;
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of a screen edge, directed away
@@ -131,8 +131,10 @@ impl DriftWm {
         let threshold = cfg.hot_corners.threshold;
 
         let active_corner = [
-            HotCorner::TopLeft, HotCorner::TopRight,
-            HotCorner::BottomLeft, HotCorner::BottomRight,
+            HotCorner::TopLeft,
+            HotCorner::TopRight,
+            HotCorner::BottomLeft,
+            HotCorner::BottomRight,
         ]
         .into_iter()
         .find(|c| c.contains(screen_pos.x, screen_pos.y, out_w, out_h, threshold));
