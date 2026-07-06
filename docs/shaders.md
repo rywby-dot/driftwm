@@ -16,10 +16,10 @@ The result covers the entire output behind all windows.
 
 ### Built-in (provided by smithay)
 
-| Name       | Type    | Description                                       |
-| ---------- | ------- | ------------------------------------------------- |
-| `v_coords` | `vec2`  | Normalized position within the output, 0.0–1.0    |
-| `size`     | `vec2`  | Output dimensions in pixels (e.g. 1920.0, 1080.0) |
+| Name       | Type   | Description                                       |
+| ---------- | ------ | ------------------------------------------------- |
+| `v_coords` | `vec2` | Normalized position within the output, 0.0–1.0    |
+| `size`     | `vec2` | Output dimensions in pixels (e.g. 1920.0, 1080.0) |
 
 ### Custom (provided by driftwm)
 
@@ -130,17 +130,17 @@ texture = "~/Pictures/tile.png"
 ```
 
 Textured shaders are a slightly different contract from the procedural shaders
-above — they're compiled as *texture* shaders, so the input set differs:
+above — they're compiled as _texture_ shaders, so the input set differs:
 
-| Name             | Type        | Provided by | Description                                   |
-| ---------------- | ----------- | ----------- | --------------------------------------------- |
-| `tex`            | `sampler2D` | smithay     | The configured image. Sample with `texture2D` |
-| `v_coords`       | `vec2`      | smithay     | Normalized position within the output, 0.0–1.0 |
-| `u_texture_size` | `vec2`      | driftwm     | Image dimensions in pixels                    |
+| Name             | Type        | Provided by | Description                                     |
+| ---------------- | ----------- | ----------- | ----------------------------------------------- |
+| `tex`            | `sampler2D` | smithay     | The configured image. Sample with `texture2D`   |
+| `v_coords`       | `vec2`      | smithay     | Normalized position within the output, 0.0–1.0  |
+| `u_texture_size` | `vec2`      | driftwm     | Image dimensions in pixels                      |
 | `u_output_size`  | `vec2`      | driftwm     | Viewport dimensions in pixels (= output / zoom) |
-| `u_camera`       | `vec2`      | driftwm     | Canvas→screen offset in canvas pixels         |
-| `u_zoom`         | `float`     | driftwm     | Canvas→screen scale                           |
-| `u_time`         | `float`     | driftwm     | Seconds since compositor start                |
+| `u_camera`       | `vec2`      | driftwm     | Canvas→screen offset in canvas pixels           |
+| `u_zoom`         | `float`     | driftwm     | Canvas→screen scale                             |
+| `u_time`         | `float`     | driftwm     | Seconds since compositor start                  |
 
 Notes that differ from procedural shaders:
 
@@ -173,7 +173,7 @@ void main() {
 ```
 
 For a showcase of what textured mode uniquely enables — a procedural effect
-*on* your image, not just sampling it — see
+_on_ your image, not just sampling it — see
 `extras/wallpapers/textured/ripple.glsl`, which animates a watery distortion
 over the tiled image.
 
@@ -207,16 +207,17 @@ path = "~/Pictures/wallpaper.png"
 type = "none"
 ```
 
-The `wallpaper` mode stretches the image to fill the output. Pick an image
-sized to your monitor for best results.
+The `wallpaper` mode scales the image to cover the output while preserving its
+aspect ratio, centering and cropping any overflow. For
+a crop-free result, match the image's aspect ratio to your monitor.
 
 ## Transparent backgrounds
 
 By default driftwm composites the background as fully opaque — a fast path that
 lets it skip blending and skip redrawing anything beneath it. But the background
-sits *above* any `wlr-layer-shell` **Background**-layer surface, so making it
+sits _above_ any `wlr-layer-shell` **Background**-layer surface, so making it
 see-through lets an external wallpaper engine (e.g. a QuickShell or `swaybg`
-setup) show through *while keeping the built-in background on top* — for a full
+setup) show through _while keeping the built-in background on top_ — for a full
 external wallpaper with no built-in background, use `type = "none"` below. Two
 ways to opt in, depending on background type:
 
