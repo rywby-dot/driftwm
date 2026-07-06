@@ -81,6 +81,10 @@ pub struct Config {
     pub zoom_step: f64,
     /// Touchscreen gesture zoom speed multiplier.
     pub zoom_touch_speed: f64,
+    /// Trackpad pinch-zoom speed multiplier.
+    pub zoom_trackpad_speed: f64,
+    /// Mouse-wheel zoom speed multiplier.
+    pub zoom_mouse_speed: f64,
     /// Padding (viewport/screen pixels) around the bounding box for ZoomToFit.
     /// Screen-space so the gutter is consistent regardless of the resulting zoom.
     pub zoom_fit_padding: f64,
@@ -755,6 +759,16 @@ impl Config {
             zoom_touch_speed: non_negative(
                 raw.zoom.touch_speed.unwrap_or(1.0),
                 "zoom.touch_speed",
+                &mut errors,
+            ),
+            zoom_trackpad_speed: non_negative(
+                raw.zoom.trackpad_speed.unwrap_or(1.0),
+                "zoom.trackpad_speed",
+                &mut errors,
+            ),
+            zoom_mouse_speed: non_negative(
+                raw.zoom.mouse_speed.unwrap_or(1.0),
+                "zoom.mouse_speed",
                 &mut errors,
             ),
             zoom_fit_padding: non_negative(

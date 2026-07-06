@@ -843,7 +843,7 @@ impl DriftWm {
                         .or_else(|| event.amount_v120(Axis::Vertical).map(|v| v * 15.0 / 120.0))
                         .unwrap_or(0.0);
                     if v != 0.0 {
-                        let steps = -v / 30.0;
+                        let steps = -v / 30.0 * self.config.zoom_mouse_speed;
                         let factor = self.config.zoom_step.powf(steps);
                         let cur_zoom = self.zoom();
                         let new_zoom = (cur_zoom * factor).clamp(self.min_zoom(), canvas::MAX_ZOOM);

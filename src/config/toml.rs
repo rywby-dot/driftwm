@@ -152,6 +152,8 @@ pub(super) struct ZoomConfig {
     pub reset_on_new_window: Option<bool>,
     pub reset_on_activation: Option<bool>,
     pub touch_speed: Option<f64>,
+    pub trackpad_speed: Option<f64>,
+    pub mouse_speed: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

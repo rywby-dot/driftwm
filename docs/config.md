@@ -324,6 +324,18 @@ Default: `1.1`
 
 multiplier per keypress (1.1 = 10% per press)
 
+### `trackpad_speed`
+
+Default: `1.0`
+
+trackpad pinch-zoom speed multiplier
+
+### `mouse_speed`
+
+Default: `1.0`
+
+mouse-wheel zoom speed multiplier
+
 ### `touch_speed`
 
 Default: `1.0`

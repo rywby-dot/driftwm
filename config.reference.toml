@@ -120,6 +120,8 @@
 
 [zoom]
 # step = 1.1                  # multiplier per keypress (1.1 = 10% per press)
+# trackpad_speed = 1.0        # trackpad pinch-zoom speed multiplier
+# mouse_speed = 1.0           # mouse-wheel zoom speed multiplier
 # touch_speed = 1.0           # touchscreen gesture zoom speed multiplier
 # fit_padding = 80.0          # viewport px padding for zoom-to-fit (screen space)
 # reset_on_new_window = true  # animate zoom to 1.0 when a new window is mapped
