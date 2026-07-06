@@ -1,7 +1,7 @@
 use smithay::{
     desktop::Window,
     reexports::wayland_server::Resource,
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
     wayland::seat::WaylandFocus,
 };
 
@@ -100,15 +100,39 @@ impl DriftWm {
                 .unwrap_or_else(|| window.geometry().size)
         };
 
-        // Unpin into the fullscreen viewport; exit_fullscreen_on re-pins.
-        let saved_pinned = window
-            .wl_surface()
-            .and_then(|s| self.pinned.remove(&s.id()));
-
         let (saved_camera, saved_zoom) = {
             let os = super::output_state(&output);
             (os.camera, os.zoom)
         };
+
+        // A game that maps straight into fullscreen commits its first buffer at
+        // a throwaway default before it learns it's fullscreen, and that size is
+        // frozen into RestoreSize (X11 clients via xwayland-satellite often map
+        // 1x1 first). Restoring it verbatim on exit would shrink the window to
+        // nothing, so a captured size below the client's min — or a floor, since
+        // many clients declare none — falls back to a half-viewport default.
+        const MIN_RESTORE_FLOOR: i32 = 100;
+        let cons = crate::grabs::SizeConstraints::for_window(window);
+        let (saved_size, saved_location) = if saved_size.w < cons.min.w.max(MIN_RESTORE_FLOOR)
+            || saved_size.h < cons.min.h.max(MIN_RESTORE_FLOOR)
+        {
+            let size = Size::from((
+                (viewport_size.w / 2).max(cons.min.w),
+                (viewport_size.h / 2).max(cons.min.h),
+            ));
+            let loc = Point::from((
+                (saved_camera.x + viewport_size.w as f64 / 2.0 / saved_zoom) as i32 - size.w / 2,
+                (saved_camera.y + viewport_size.h as f64 / 2.0 / saved_zoom) as i32 - size.h / 2,
+            ));
+            (size, loc)
+        } else {
+            (saved_size, saved_location)
+        };
+
+        // Unpin into the fullscreen viewport; exit_fullscreen_on re-pins.
+        let saved_pinned = window
+            .wl_surface()
+            .and_then(|s| self.pinned.remove(&s.id()));
 
         self.fullscreen.insert(
             output.clone(),
