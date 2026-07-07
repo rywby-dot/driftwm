@@ -320,13 +320,18 @@ pub(crate) fn compose_capture_elements(
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
+            // Snap the title-bar band to whole physical pixels and share it across the
+            // bar, border, and shadow. Deriving each from the raw logical bar_height
+            // rounds their common top edge inconsistently at fractional scale
+            // (round(t*s) - round(h*s) != round((t-h)*s)) — a ±1px seam.
+            let bar_h_phys = (bar_height as f64 * scale.y).round();
+            let bar_h_logical = bar_h_phys / scale.y;
 
             // Reuse the buffer the live frame rasterized (no re-`update`): keeps
             // borrows simple, text is microseconds-stale at worst.
             if let Some(deco) = state.decorations.get(&wl_surface.id()) {
-                let bar_loc: Point<f64, Logical> =
-                    Point::from((render_loc.x, render_loc.y - bar_height as f64));
-                let bar_physical: Point<f64, Physical> = bar_loc.to_physical_precise_round(scale);
+                let bar_physical: Point<f64, Physical> =
+                    Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
                     Some(opacity as f32)
                 } else {
@@ -383,8 +388,8 @@ pub(crate) fn compose_capture_elements(
                 && let Some(shader) = state.render.border_shader.clone()
             {
                 let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x, render_loc.y - bar_height as f64).into(),
-                    (geom_size.w as f64, (geom_size.h + bar_height) as f64).into(),
+                    (render_loc.x, render_loc.y - bar_h_logical).into(),
+                    (geom_size.w as f64, geom_size.h as f64 + bar_h_logical).into(),
                 );
                 push_border_element(
                     target,
@@ -405,10 +410,10 @@ pub(crate) fn compose_capture_elements(
             if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
                 let bw = effective_bw as f64;
                 let body_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x - bw, render_loc.y - bar_height as f64 - bw).into(),
+                    (render_loc.x - bw, render_loc.y - bar_h_logical - bw).into(),
                     (
                         geom_size.w as f64 + 2.0 * bw,
-                        (geom_size.h + bar_height) as f64 + 2.0 * bw,
+                        geom_size.h as f64 + bar_h_logical + 2.0 * bw,
                     )
                         .into(),
                 );
@@ -761,6 +766,12 @@ pub fn compose_frame(
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
+            // Snap the title-bar band to whole physical pixels and share it across the
+            // bar, border, and shadow. Deriving each from the raw logical bar_height
+            // rounds their common top edge inconsistently at fractional scale
+            // (round(t*s) - round(h*s) != round((t-h)*s)) — a ±1px seam.
+            let bar_h_phys = (bar_height as f64 * scale.y).round();
+            let bar_h_logical = bar_h_phys / scale.y;
 
             // Title falls back to app_id, then blank.
             let deco_title = window
@@ -779,9 +790,8 @@ pub fn compose_frame(
             }
 
             if let Some(deco) = state.decorations.get(&wl_surface.id()) {
-                let bar_loc: Point<f64, Logical> =
-                    Point::from((render_loc.x, render_loc.y - bar_height as f64));
-                let bar_physical: Point<f64, Physical> = bar_loc.to_physical_precise_round(scale);
+                let bar_physical: Point<f64, Physical> =
+                    Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
                     Some(opacity as f32)
                 } else {
@@ -840,8 +850,8 @@ pub fn compose_frame(
                 && let Some(shader) = state.render.border_shader.clone()
             {
                 let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x, render_loc.y - bar_height as f64).into(),
-                    (geom_size.w as f64, (geom_size.h + bar_height) as f64).into(),
+                    (render_loc.x, render_loc.y - bar_h_logical).into(),
+                    (geom_size.w as f64, geom_size.h as f64 + bar_h_logical).into(),
                 );
                 push_border_element(
                     target,
@@ -866,10 +876,10 @@ pub fn compose_frame(
             if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
                 let bw = effective_bw as f64;
                 let body_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x - bw, render_loc.y - bar_height as f64 - bw).into(),
+                    (render_loc.x - bw, render_loc.y - bar_h_logical - bw).into(),
                     (
                         geom_size.w as f64 + 2.0 * bw,
-                        (geom_size.h + bar_height) as f64 + 2.0 * bw,
+                        geom_size.h as f64 + bar_h_logical + 2.0 * bw,
                     )
                         .into(),
                 );

@@ -33,7 +33,7 @@ enum BgKind {
     Shader(PixelShaderElement),
     /// Image tiled across the canvas (`tile_bg.glsl`), scrolls with the camera.
     Tile(TileShaderElement),
-    /// Single image stretched to the viewport (`wallpaper_bg.glsl`), fixed.
+    /// Single image cover-fit to the viewport (`wallpaper_bg.glsl`), fixed.
     Wallpaper(TileShaderElement),
     /// `type = "shader"` sampling a bound `texture` (`compile_textured_bg_shader`).
     TexturedShader(TileShaderElement),
@@ -47,6 +47,29 @@ fn bg_opaque_regions(
     area: Rectangle<i32, Logical>,
 ) -> Option<Vec<Rectangle<i32, Logical>>> {
     if transparent { None } else { Some(vec![area]) }
+}
+
+/// Texel sub-rect of a `tex_w`×`tex_h` wallpaper to sample so it fills the
+/// output while preserving aspect (GNOME "zoom" / CSS `cover`): the largest
+/// centered crop whose aspect matches the output. Stretching this sub-rect
+/// across the whole output is uniform in both axes, so nothing distorts.
+fn wallpaper_cover_src(
+    tex_w: i32,
+    tex_h: i32,
+    output_size: Size<i32, Logical>,
+) -> Rectangle<f64, smithay::utils::Buffer> {
+    let tw = tex_w.max(1) as f64;
+    let th = tex_h.max(1) as f64;
+    let output_aspect = output_size.w.max(1) as f64 / output_size.h.max(1) as f64;
+    let (sub_w, sub_h) = if tw / th > output_aspect {
+        (th * output_aspect, th) // image relatively wider: crop the sides
+    } else {
+        (tw, tw / output_aspect) // image relatively taller: crop top/bottom
+    };
+    Rectangle::new(
+        Point::from(((tw - sub_w) / 2.0, (th - sub_h) / 2.0)),
+        Size::from((sub_w, sub_h)),
+    )
 }
 
 /// Per-frame viewport inputs for [`BackgroundElement::update`].
@@ -119,8 +142,11 @@ impl BackgroundElement {
                 // push uniforms. A stable CommitCounter across pans/zooms is the
                 // whole point of wallpaper mode being cheaper than tile mode —
                 // blur and elements above don't get damaged for background reasons.
+                // The cover crop (`set_src`) and `resize` both no-op unless the
+                // output actually changes size, so panning/zooming stays free.
                 let output_area = Rectangle::from_size(f.output_size);
                 e.resize(output_area, bg_opaque_regions(transparent, output_area));
+                e.set_src(wallpaper_cover_src(e.tex_w, e.tex_h, f.output_size));
             }
             BgKind::TexturedShader(e) => {
                 // Scrolls/zooms like the plain shader bg. `u_output_size` co-varies
@@ -525,7 +551,8 @@ fn try_init_texture_bg(
                 (initial_size.w as f32, initial_size.h as f32),
             ),
         ],
-        // Wallpaper shader has no camera/zoom/time uniforms — image stretches to v_coords [0,1].
+        // Wallpaper shader has no camera/zoom/time uniforms; aspect-preserving
+        // cover-fit is applied per-frame via `set_src`, not a uniform.
         TextureBgMode::Wallpaper => vec![],
     };
     let transparent = has_transparency;
@@ -827,4 +854,49 @@ fn references_uniform(src: &str, type_: &str, name: &str) -> bool {
     ["", "lowp ", "mediump ", "highp "]
         .iter()
         .any(|prec| src.contains(&format!("uniform {prec}{type_} {name}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn out(w: i32, h: i32) -> Size<i32, Logical> {
+        Size::from((w, h))
+    }
+
+    #[test]
+    fn cover_matching_aspect_samples_whole_texture() {
+        let src = wallpaper_cover_src(1600, 900, out(1920, 1080));
+        assert_eq!(src.loc, Point::from((0.0, 0.0)));
+        assert_eq!(src.size, Size::from((1600.0, 900.0)));
+    }
+
+    #[test]
+    fn cover_wide_image_crops_sides_keeps_full_height() {
+        // 2:1 image on a 16:9 output → crop left/right, keep full height, centered.
+        let src = wallpaper_cover_src(2000, 1000, out(1920, 1080));
+        assert!((src.size.h - 1000.0).abs() < 1e-9);
+        assert!(src.size.w < 2000.0);
+        assert!((src.loc.x - (2000.0 - src.size.w) / 2.0).abs() < 1e-9);
+        assert_eq!(src.loc.y, 0.0);
+    }
+
+    #[test]
+    fn cover_tall_image_crops_top_bottom_keeps_full_width() {
+        // 1:1 image on a 16:9 output → crop top/bottom, keep full width, centered.
+        let src = wallpaper_cover_src(1000, 1000, out(1920, 1080));
+        assert!((src.size.w - 1000.0).abs() < 1e-9);
+        assert!(src.size.h < 1000.0);
+        assert_eq!(src.loc.x, 0.0);
+        assert!((src.loc.y - (1000.0 - src.size.h) / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cover_sampled_rect_matches_output_aspect() {
+        // The sampled sub-rect must share the output's aspect so stretching it
+        // across the full output is distortion-free.
+        let src = wallpaper_cover_src(1234, 5678, out(1920, 1080));
+        let sampled_aspect = src.size.w / src.size.h;
+        assert!((sampled_aspect - 1920.0 / 1080.0).abs() < 1e-6);
+    }
 }
