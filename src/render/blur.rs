@@ -339,6 +339,33 @@ pub(crate) fn process_blur_requests(
         }
     };
 
+    // bg_tex is sampled below through a padded crop that reaches past the captured
+    // backdrop wherever a window sits at an output edge. Mirror-wrap it so the blur
+    // reflects real backdrop back across the edge: plain CLAMP streaks the edge
+    // row/column, default REPEAT wraps in the opposite side. MIRRORED_REPEAT on an
+    // NPOT texture needs GLES 3, so fall back to CLAMP on GLES 2 — streaks, but
+    // never a black/incomplete sample.
+    {
+        use smithay::backend::renderer::gles::ffi;
+        let _ = renderer.with_context(|gl| unsafe {
+            let gles3 = std::ffi::CStr::from_ptr(gl.GetString(ffi::VERSION) as *const _)
+                .to_string_lossy()
+                .strip_prefix("OpenGL ES ")
+                .and_then(|s| s.chars().next())
+                .and_then(|c| c.to_digit(10))
+                .is_some_and(|major| major >= 3);
+            let wrap = if gles3 {
+                ffi::MIRRORED_REPEAT
+            } else {
+                ffi::CLAMP_TO_EDGE
+            } as i32;
+            gl.BindTexture(ffi::TEXTURE_2D, bg_tex.tex_id());
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, wrap);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, wrap);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        });
+    }
+
     let down_shader = state.render.blur_down_shader.clone().unwrap();
     let up_shader = state.render.blur_up_shader.clone().unwrap();
     let blur_passes = state.config.effects.blur_radius as usize;
@@ -466,36 +493,29 @@ pub(crate) fn process_blur_requests(
                 continue;
             };
             let _ = frame.clear(Color32F::TRANSPARENT, &[Rectangle::from_size(pad_size)]);
-            // Clamp the padded source to the output; offset the destination
-            // so the window content stays centred even at screen edges.
+            // Sample the whole padded rect; where it reaches past the output,
+            // bg_tex's mirror wrap (set above) supplies backdrop instead of a
+            // transparent ring the blur would bleed inward.
             let want = Rectangle::<i32, Physical>::new(
                 (req.screen_rect.loc.x - pad, req.screen_rect.loc.y - pad).into(),
                 pad_size,
             );
-            if let Some(clipped) = want.intersection(Rectangle::from_size(output_size))
-                && clipped.size.w > 0
-                && clipped.size.h > 0
-            {
-                let src_rect: Rectangle<f64, smithay::utils::Buffer> = Rectangle::new(
-                    (clipped.loc.x as f64, clipped.loc.y as f64).into(),
-                    (clipped.size.w as f64, clipped.size.h as f64).into(),
-                );
-                let dst = Rectangle::<i32, Physical>::new(
-                    (clipped.loc.x - want.loc.x, clipped.loc.y - want.loc.y).into(),
-                    clipped.size,
-                );
-                let _ = frame.render_texture_from_to(
-                    &bg_src,
-                    src_rect,
-                    dst,
-                    &[dst],
-                    &[],
-                    Transform::Normal,
-                    1.0,
-                    None,
-                    &[],
-                );
-            }
+            let src_rect: Rectangle<f64, smithay::utils::Buffer> = Rectangle::new(
+                (want.loc.x as f64, want.loc.y as f64).into(),
+                (pad_size.w as f64, pad_size.h as f64).into(),
+            );
+            let full = Rectangle::from_size(pad_size);
+            let _ = frame.render_texture_from_to(
+                &bg_src,
+                src_rect,
+                full,
+                &[full],
+                &[],
+                Transform::Normal,
+                1.0,
+                None,
+                &[],
+            );
             let _ = frame.finish();
         }
 
