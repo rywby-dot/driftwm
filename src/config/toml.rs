@@ -22,6 +22,7 @@ pub(super) struct ConfigFile {
     pub keybindings: Option<HashMap<String, String>>,
     pub mouse: MouseFileConfig,
     pub gestures: GestureFileConfig,
+    pub touch: TouchFileConfig,
     pub env: HashMap<String, String>,
     pub xwayland: XwaylandConfig,
     /// Placement mode for newly mapped windows: `"center"` (default) or `"cursor"`.
@@ -293,6 +294,19 @@ pub(super) struct GestureFileConfig {
     pub swipe_threshold: Option<f64>,
     pub pinch_in_threshold: Option<f64>,
     pub pinch_out_threshold: Option<f64>,
+    #[serde(rename = "on-window")]
+    pub on_window: Option<HashMap<String, String>>,
+    #[serde(rename = "on-canvas")]
+    pub on_canvas: Option<HashMap<String, String>>,
+    pub anywhere: Option<HashMap<String, String>>,
+}
+
+/// Touch gesture *bindings* (`[touch]`) — distinct from `[input.touch]` device
+/// settings (`TouchDeviceFileConfig`). Touch has no modifiers, so no threshold
+/// tuning here (it reuses `[gestures]` thresholds); just the three context maps.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TouchFileConfig {
     #[serde(rename = "on-window")]
     pub on_window: Option<HashMap<String, String>>,
     #[serde(rename = "on-canvas")]

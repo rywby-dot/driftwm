@@ -16,7 +16,10 @@ use smithay::{
 };
 
 use driftwm::canvas::{self, CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
-use driftwm::config::Action;
+use driftwm::config::{
+    Action, BindingContext, ContinuousAction, Direction, GestureConfigEntry, GestureTrigger,
+    ThresholdAction,
+};
 
 use crate::input::gestures::direction_from_vector;
 use crate::state::{DriftWm, FocusTarget, output_state};
@@ -154,15 +157,75 @@ fn edge_from_origin(
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    /// 1–2 fingers with at least one on a window — forward to the app.
-    Forward,
-    /// 1–2 fingers on empty canvas, or 3 fingers anywhere — viewport pan and
-    /// pinch-zoom, applied simultaneously (the centroid pans, the spread zooms).
-    PanZoom,
-    /// 4 fingers — global navigation (swipe-nearest, pinch overview/home).
-    Navigate,
+/// The config-resolved behavior for the current finger count and context, looked
+/// up once per finger-count tier from `[touch]`. An all-`None` plan means the
+/// gesture is unbound → forward it to the app.
+#[derive(Clone, Default)]
+struct Plan {
+    /// Translation axis (centroid): `Continuous(PanViewport)` pans; `Threshold`
+    /// accumulates and fires once (one-shot navigate).
+    swipe: Option<GestureConfigEntry>,
+    /// Per-direction swipe overrides (up, down, left, right), checked before the
+    /// base swipe threshold fires.
+    swipe_dirs: [Option<ThresholdAction>; 4],
+    /// Move/resize preemptors on a translation drag: armed (recent tap) and held.
+    doubletap_swipe: Option<ContinuousAction>,
+    hold_swipe: Option<ContinuousAction>,
+    /// Scale axis (spread): continuous zoom, or one-shot pinch-in/out.
+    pinch: Option<ContinuousAction>,
+    pinch_in: Option<ThresholdAction>,
+    pinch_out: Option<ThresholdAction>,
+    tap: Option<ThresholdAction>,
+    doubletap: Option<ThresholdAction>,
+}
+
+impl Plan {
+    fn translation_continuous(&self) -> bool {
+        matches!(self.swipe, Some(GestureConfigEntry::Continuous(_)))
+    }
+
+    fn translation_threshold(&self) -> bool {
+        matches!(self.swipe, Some(GestureConfigEntry::Threshold(_)))
+            || self.swipe_dirs.iter().any(Option::is_some)
+    }
+
+    fn scale_continuous(&self) -> bool {
+        self.pinch.is_some()
+    }
+
+    fn scale_threshold(&self) -> bool {
+        self.pinch_in.is_some() || self.pinch_out.is_some()
+    }
+
+    /// A move/resize preemptor lives in the simultaneous engine's breakthrough, so
+    /// its presence pulls the gesture there even without a continuous pan/zoom.
+    fn has_preemptor(&self) -> bool {
+        self.doubletap_swipe.is_some() || self.hold_swipe.is_some()
+    }
+
+    /// Run the simultaneous pan+zoom engine when translation pans continuously, when
+    /// scale zooms continuously and translation isn't a one-shot swipe, or when a
+    /// move/resize preemptor is bound. A one-shot swipe (threshold) instead claims
+    /// the gesture for the arbitrated engine so it can fire, even if a continuous
+    /// zoom is also bound (mixed — the zoom is dropped for that finger count; see the
+    /// `[touch]` docs).
+    fn simultaneous(&self) -> bool {
+        self.translation_continuous()
+            || (self.scale_continuous() && !self.translation_threshold())
+            || self.has_preemptor()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.swipe.is_none()
+            && self.swipe_dirs.iter().all(Option::is_none)
+            && self.doubletap_swipe.is_none()
+            && self.hold_swipe.is_none()
+            && self.pinch.is_none()
+            && self.pinch_in.is_none()
+            && self.pinch_out.is_none()
+            && self.tap.is_none()
+            && self.doubletap.is_none()
+    }
 }
 
 struct TouchPoint {
@@ -173,18 +236,29 @@ struct TouchPoint {
     focus: Option<(FocusTarget, Point<f64, Logical>)>,
 }
 
-/// Touch grab that owns the whole multi-finger canvas-gesture lifecycle: app
-/// forwarding (1–2 fingers on a window), viewport pan + pinch-zoom (1–2 fingers
-/// on empty canvas or 3 fingers anywhere), 4-finger navigation, and 3-finger
-/// tap / double-tap / double-tap-drag. Set on the first touch-down; tracks all
-/// slots and unsets itself when the last finger lifts. Parallel to `PanGrab`.
+/// Touch grab that owns the whole multi-finger canvas-gesture lifecycle. Which
+/// action each recognized gesture drives comes from the `[touch]` config, resolved
+/// per finger-count tier and context into a [`Plan`]; an unbound gesture forwards
+/// to the app. The default bindings reproduce the classic behavior: app forwarding
+/// (1–2 fingers on a window), simultaneous pan + pinch-zoom (1–2 fingers on empty
+/// canvas or 3 fingers anywhere), one-shot 4-finger navigation, and 3-finger tap /
+/// double-tap / double-tap-drag / hold-drag. Set on the first touch-down; tracks
+/// all slots and unsets itself when the last finger lifts. Parallel to `PanGrab`.
 pub struct TouchGestureGrab {
     start_data: TouchGrabStartData<DriftWm>,
     output: Output,
     points: HashMap<TouchSlot, TouchPoint>,
-    /// A finger landed on a window while still in 1–2 finger territory.
+    /// The first finger landed on a client surface — gates the escalation cancel
+    /// that revokes the app's forwarded touches when a system gesture takes over.
     app_owns: bool,
-    /// High-water mark of simultaneous fingers — decides 3-finger vs 4-finger.
+    /// Binding context for config lookups, fixed from the first finger's focus
+    /// (`OnWindow` if it landed on a surface, else `OnCanvas`). Derived from the
+    /// same `focus` as `app_owns` so the two can't disagree.
+    context: BindingContext,
+    /// Config-resolved behavior for `max_fingers` + `context`, re-looked-up each
+    /// time the finger count grows.
+    plan: Plan,
+    /// High-water mark of simultaneous fingers — the count the plan resolves for.
     max_fingers: usize,
     /// App touch sequence revoked once on escalation to a system gesture.
     system_cancelled: bool,
@@ -223,6 +297,8 @@ impl TouchGestureGrab {
             output,
             points: HashMap::new(),
             app_owns: false,
+            context: BindingContext::OnCanvas,
+            plan: Plan::default(),
             max_fingers: 0,
             system_cancelled: false,
             active: false,
@@ -242,15 +318,61 @@ impl TouchGestureGrab {
         }
     }
 
-    fn mode(&self) -> Mode {
-        if self.max_fingers >= 4 {
-            Mode::Navigate
-        } else if self.max_fingers >= 3 {
-            Mode::PanZoom
-        } else if self.app_owns {
-            Mode::Forward
-        } else {
-            Mode::PanZoom
+    /// Resolve the `[touch]` bindings for the current finger count + context into a
+    /// `Plan`. Re-run whenever `max_fingers` grows (a finger-count tier crossing).
+    fn resolve_plan(&self, data: &DriftWm) -> Plan {
+        // Clamp the lookup tier to the max bindable finger count: a stray 6th+
+        // contact resolves as the 5-finger tier (which navigates by default) rather
+        // than an empty plan that would forward and abort the gesture. The true
+        // `max_fingers` is left intact for tier-crossing and `all_fingers_down`.
+        let n = (self.max_fingers as u32).min(5);
+        let cx = self.context;
+        let continuous = |t: GestureTrigger| match data.config.touch_lookup(&t, cx) {
+            Some(GestureConfigEntry::Continuous(a)) => Some(a.clone()),
+            _ => None,
+        };
+        let threshold = |t: GestureTrigger| match data.config.touch_lookup(&t, cx) {
+            Some(GestureConfigEntry::Threshold(a)) => Some(a.clone()),
+            _ => None,
+        };
+        Plan {
+            swipe: data
+                .config
+                .touch_lookup(&GestureTrigger::Swipe { fingers: n }, cx)
+                .cloned(),
+            swipe_dirs: [
+                threshold(GestureTrigger::SwipeUp { fingers: n }),
+                threshold(GestureTrigger::SwipeDown { fingers: n }),
+                threshold(GestureTrigger::SwipeLeft { fingers: n }),
+                threshold(GestureTrigger::SwipeRight { fingers: n }),
+            ],
+            doubletap_swipe: continuous(GestureTrigger::DoubletapSwipe { fingers: n }),
+            hold_swipe: continuous(GestureTrigger::HoldSwipe { fingers: n }),
+            pinch: continuous(GestureTrigger::Pinch { fingers: n }),
+            pinch_in: threshold(GestureTrigger::PinchIn { fingers: n }),
+            pinch_out: threshold(GestureTrigger::PinchOut { fingers: n }),
+            tap: threshold(GestureTrigger::Tap { fingers: n }),
+            doubletap: threshold(GestureTrigger::Doubletap { fingers: n }),
+        }
+    }
+
+    /// Hand a translation drag to a window move/resize grab per the resolved
+    /// continuous action. `cluster` extends a move to the focused window's
+    /// snap-cluster. Returns false (keep panning) if it isn't a window-grab action
+    /// or there's no canvas window under the finger.
+    fn start_window_grab(
+        &mut self,
+        action: ContinuousAction,
+        data: &mut DriftWm,
+        handle: &mut TouchInnerHandle<'_, DriftWm>,
+        event: &MotionEvent,
+        seq: Serial,
+        cluster: bool,
+    ) -> bool {
+        match action {
+            ContinuousAction::MoveWindow => self.try_start_move(data, handle, event, seq, cluster),
+            ContinuousAction::ResizeWindow => self.try_start_resize(data, handle, event, seq),
+            _ => false,
         }
     }
 
@@ -408,16 +530,54 @@ impl TouchGestureGrab {
         // contracts slowly while the hand drifts the centroid, so otherwise the
         // small swipe threshold steals it before the pinch completes.
         if effective_pinch >= 1.0 && effective_pinch >= swipe_progress {
-            self.nav_fired_pinch = true;
-            if scale < 1.0 {
-                data.execute_action(&Action::ZoomToFit);
+            let action = if scale < 1.0 {
+                self.plan.pinch_in.clone()
             } else {
-                data.execute_action(&Action::HomeToggle);
+                self.plan.pinch_out.clone()
+            };
+            if let Some(a) = action {
+                self.nav_fired_pinch = true;
+                self.execute_threshold(data, a);
             }
         } else if swipe_progress >= 1.0 && effective_pinch < SWIPE_BLOCK_PINCH {
-            self.nav_fired_swipe = true;
             let dir = direction_from_vector(self.nav_cumulative);
-            data.execute_action(&Action::CenterNearest(dir));
+            if let Some(a) = self.swipe_threshold_for(dir) {
+                self.nav_fired_swipe = true;
+                self.execute_threshold(data, a);
+            }
+        }
+    }
+
+    /// Fire a resolved threshold action. `CenterNearest` derives its direction from
+    /// the accumulated swipe vector; a `Fixed` action ignores it.
+    fn execute_threshold(&self, data: &mut DriftWm, action: ThresholdAction) {
+        match action {
+            ThresholdAction::CenterNearest => {
+                let dir = direction_from_vector(self.nav_cumulative);
+                data.execute_action(&Action::CenterNearest(dir));
+            }
+            ThresholdAction::Fixed(a) => data.execute_action(&a),
+        }
+    }
+
+    /// The threshold action for a fired swipe: a per-direction override for the
+    /// four cardinals if bound, else the base swipe binding.
+    fn swipe_threshold_for(&self, dir: Direction) -> Option<ThresholdAction> {
+        let cardinal = match dir {
+            Direction::Up => Some(0),
+            Direction::Down => Some(1),
+            Direction::Left => Some(2),
+            Direction::Right => Some(3),
+            _ => None,
+        };
+        if let Some(i) = cardinal
+            && let Some(a) = &self.plan.swipe_dirs[i]
+        {
+            return Some(a.clone());
+        }
+        match &self.plan.swipe {
+            Some(GestureConfigEntry::Threshold(a)) => Some(a.clone()),
+            _ => None,
         }
     }
 
@@ -515,14 +675,12 @@ impl TouchGestureGrab {
         true
     }
 
-    /// On last-finger-up, fire center (single) / fit (double) for a clean
-    /// 3-finger tap. A tap is short, never passed the dead zone, and never
-    /// belonged to an app.
+    /// On last-finger-up, fire the resolved tap (single) / doubletap (double)
+    /// action for a clean tap. A tap is short, never passed the dead zone, and (via
+    /// the escalation cancel) no longer belongs to an app, so it acts on the tapped
+    /// window regardless of what's under it.
     fn detect_tap(&mut self, data: &mut DriftWm, time: u32) {
-        // A 3-finger tap is a system gesture regardless of what's under it — the
-        // escalation already cancelled any app touches, so center/fit the tapped
-        // window even when the first finger happened to land on one.
-        if self.ever_active || self.max_fingers != 3 {
+        if self.ever_active || (self.plan.tap.is_none() && self.plan.doubletap.is_none()) {
             return;
         }
         if time.saturating_sub(self.tap_start_time) > TAP_MAX_MS {
@@ -541,16 +699,28 @@ impl TouchGestureGrab {
             .is_some_and(|t| time.saturating_sub(t) < DOUBLE_TAP_MS);
         if double {
             data.touch_state.last_three_finger_tap = None;
-            data.execute_action(&Action::FitWindow);
+            if let Some(action) = self.plan.doubletap.clone() {
+                self.execute_threshold(data, action);
+            }
         } else {
             data.touch_state.last_three_finger_tap = Some(time);
-            // Defer the center so a follow-up double-tap (fit) or double-tap-drag
-            // (move) doesn't flash a center first; a fresh interaction cancels it.
-            let target = under
-                .filter(|w| data.is_canvas_window(w))
-                .or_else(|| data.focused_window().filter(|w| data.is_canvas_window(w)));
-            if let Some(window) = target {
-                data.schedule_pending_center(window, Duration::from_millis(DOUBLE_TAP_MS as u64));
+            match self.plan.tap.clone() {
+                // A deferred center avoids flashing a center before a follow-up
+                // double-tap (fit) or double-tap-drag (move); a fresh interaction
+                // cancels it. Specific to center — other tap actions fire now.
+                Some(ThresholdAction::Fixed(Action::CenterWindow)) => {
+                    let target = under
+                        .filter(|w| data.is_canvas_window(w))
+                        .or_else(|| data.focused_window().filter(|w| data.is_canvas_window(w)));
+                    if let Some(window) = target {
+                        data.schedule_pending_center(
+                            window,
+                            Duration::from_millis(DOUBLE_TAP_MS as u64),
+                        );
+                    }
+                }
+                Some(action) => self.execute_threshold(data, action),
+                None => {}
             }
         }
     }
@@ -577,90 +747,97 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         );
         self.max_fingers = self.max_fingers.max(self.points.len());
 
-        // The first finger sets the gesture's nature — on a window → app content
-        // (forward), on empty canvas → viewport gesture — and a recent 3-finger
-        // tap arms this touch for a double-tap-drag move. Later fingers don't
-        // flip either, so a stray contact can't strand an in-progress pan.
+        // The first finger fixes the gesture's binding context from its focus: on a
+        // surface → app content (`OnWindow`, forwarded unless a system gesture is
+        // bound), on empty canvas → viewport gesture (`OnCanvas`). `app_owns` comes
+        // from the same `focus` so they can't disagree. A recent tap arms this touch
+        // for a double-tap-drag move. Later fingers don't flip either, so a stray
+        // contact can't strand an in-progress gesture.
         if self.points.len() == 1 {
-            if focus.is_some() {
-                self.app_owns = true;
-            }
+            self.app_owns = focus.is_some();
+            self.context = if focus.is_some() {
+                BindingContext::OnWindow
+            } else {
+                BindingContext::OnCanvas
+            };
             self.armed_for_move = data
                 .touch_state
                 .last_three_finger_tap
                 .is_some_and(|t| event.time.saturating_sub(t) < DOUBLE_TAP_MS);
         }
 
-        match self.mode() {
-            Mode::Forward => {
-                handle.down(data, focus, event, seq);
-            }
-            Mode::PanZoom | Mode::Navigate => {
-                // Escalation from app-forwarding to a system gesture: revoke the
-                // app's in-flight touch sequence so it sees no dangling points.
-                // smithay's touch cancel skips any slot already framed
-                // (current >= pending) — i.e. every finger that landed in an
-                // earlier frame, the common case for a 3-finger gesture. Replay a
-                // no-op motion on those slots first to bump pending past current,
-                // so the cancel that follows actually revokes them.
-                if self.app_owns && !self.system_cancelled {
-                    let replays: Vec<(TouchSlot, Point<f64, Logical>)> = self
-                        .points
-                        .iter()
-                        .filter(|(slot, p)| **slot != event.slot && p.focus.is_some())
-                        .map(|(slot, p)| {
-                            (
-                                *slot,
-                                screen_to_canvas(ScreenPos(p.last_screen), camera, zoom).0,
-                            )
-                        })
-                        .collect();
-                    for (slot, location) in replays {
-                        handle.motion(
-                            data,
-                            None,
-                            &MotionEvent {
-                                slot,
-                                location,
-                                time: event.time,
-                            },
-                            seq,
-                        );
-                    }
-                    handle.cancel(data, seq);
-                    self.system_cancelled = true;
-                }
-                handle.down(data, None, event, seq);
+        // Re-resolve the config plan whenever the finger count grows into a new tier.
+        if self.max_fingers != prev_max {
+            self.plan = self.resolve_plan(data);
+        }
 
-                // Re-arm the gesture at start and at each finger-count tier
-                // crossing (into 3-finger system gestures, into 4-finger
-                // navigation), so a clean tap stays distinguishable from a drag
-                // and the navigation recognizer measures from a fresh baseline.
-                let crossed_system = prev_max < 3 && self.max_fingers >= 3;
-                let crossed_nav = prev_max < 4 && self.max_fingers >= 4;
-                // Exit fullscreen before a 3+ finger system gesture so the pan/zoom
-                // acts on the restored canvas instead of sliding the parked fullscreen
-                // window off its camera origin. Stash the exited window so a 4-finger
-                // nav firing right after can still anchor to it. Uses the touch output,
-                // which may differ from the active/pointer output.
-                if crossed_system && let Some(window) = data.fullscreen_window_on(&self.output) {
-                    data.gesture_exited_fullscreen = Some(window);
-                    data.exit_fullscreen_on(&self.output);
+        if self.plan.is_empty() {
+            // No touch binding matches this gesture → forward it to the app.
+            handle.down(data, focus, event, seq);
+        } else {
+            // Escalation from app-forwarding to a system gesture: revoke the app's
+            // in-flight touch sequence so it sees no dangling points. smithay's touch
+            // cancel skips any slot already framed (current >= pending) — i.e. every
+            // finger that landed in an earlier frame, the common case for a 3-finger
+            // gesture. Replay a no-op motion on those slots first to bump pending past
+            // current, so the cancel that follows actually revokes them.
+            if self.app_owns && !self.system_cancelled {
+                let replays: Vec<(TouchSlot, Point<f64, Logical>)> = self
+                    .points
+                    .iter()
+                    .filter(|(slot, p)| **slot != event.slot && p.focus.is_some())
+                    .map(|(slot, p)| {
+                        (
+                            *slot,
+                            screen_to_canvas(ScreenPos(p.last_screen), camera, zoom).0,
+                        )
+                    })
+                    .collect();
+                for (slot, location) in replays {
+                    handle.motion(
+                        data,
+                        None,
+                        &MotionEvent {
+                            slot,
+                            location,
+                            time: event.time,
+                        },
+                        seq,
+                    );
                 }
-                if self.points.len() == 1 || crossed_system || crossed_nav {
-                    self.active = false;
-                    self.zoom_engaged = false;
-                    self.tap_start_time = event.time;
-                    let c = self.centroid();
-                    self.start_centroid = c;
-                    self.start_spread = self.spread(c);
-                    self.nav_cumulative = Point::from((0.0, 0.0));
-                    self.nav_fired_swipe = false;
-                    self.nav_fired_pinch = false;
-                    self.pinch_streak = 0;
-                }
-                self.rebaseline();
+                handle.cancel(data, seq);
+                self.system_cancelled = true;
             }
+            handle.down(data, None, event, seq);
+
+            // Re-arm the gesture at start and at each finger-count tier crossing (into
+            // 3-finger system gestures, into 4-finger navigation), so a clean tap stays
+            // distinguishable from a drag and the navigation recognizer measures from a
+            // fresh baseline.
+            let crossed_system = prev_max < 3 && self.max_fingers >= 3;
+            let crossed_nav = prev_max < 4 && self.max_fingers >= 4;
+            // Exit fullscreen before a 3+ finger system gesture so the pan/zoom acts on
+            // the restored canvas instead of sliding the parked fullscreen window off
+            // its camera origin. Stash the exited window so a 4-finger nav firing right
+            // after can still anchor to it. Uses the touch output, which may differ from
+            // the active/pointer output.
+            if crossed_system && let Some(window) = data.fullscreen_window_on(&self.output) {
+                data.gesture_exited_fullscreen = Some(window);
+                data.exit_fullscreen_on(&self.output);
+            }
+            if self.points.len() == 1 || crossed_system || crossed_nav {
+                self.active = false;
+                self.zoom_engaged = false;
+                self.tap_start_time = event.time;
+                let c = self.centroid();
+                self.start_centroid = c;
+                self.start_spread = self.spread(c);
+                self.nav_cumulative = Point::from((0.0, 0.0));
+                self.nav_fired_swipe = false;
+                self.nav_fired_pinch = false;
+                self.pinch_streak = 0;
+            }
+            self.rebaseline();
         }
     }
 
@@ -671,17 +848,22 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         event: &UpEvent,
         seq: Serial,
     ) {
-        let mode = self.mode();
         let was_present = self.points.contains_key(&event.slot);
         handle.up(data, event, seq);
         self.points.remove(&event.slot);
 
         if self.points.is_empty() {
-            // Only PanZoom accumulates pan velocity; Navigate fires discrete
-            // actions, so there's nothing to coast. A pinch must not fling the
-            // canvas either — pan runs through a zoom in the simultaneous model,
-            // so skip the coast for any gesture that engaged zoom.
-            if was_present && mode == Mode::PanZoom && self.ever_active && !self.zoom_engaged {
+            // Only a continuous pan accumulates velocity to coast. A one-shot
+            // navigate fires discrete actions (nothing to coast), and a pinch must
+            // not fling the canvas — pan runs through a zoom in the simultaneous
+            // model, so skip the coast for any gesture that engaged zoom.
+            let panned = matches!(
+                self.plan.swipe,
+                Some(GestureConfigEntry::Continuous(
+                    ContinuousAction::PanViewport
+                ))
+            );
+            if was_present && panned && self.ever_active && !self.zoom_engaged {
                 data.launch_momentum_on(&self.output);
             }
             if was_present {
@@ -701,7 +883,6 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         event: &MotionEvent,
         seq: Serial,
     ) {
-        let mode = self.mode();
         let (camera, zoom) = self.camera_zoom();
         let screen = canvas_to_screen(CanvasPos(event.location), camera, zoom).0;
         let stored_focus = match self.points.get_mut(&event.slot) {
@@ -715,7 +896,8 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             }
         };
 
-        if mode == Mode::Forward {
+        // Unbound gesture → forward to the app.
+        if self.plan.is_empty() {
             handle.motion(data, stored_focus, event, seq);
             return;
         }
@@ -723,18 +905,21 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
 
         let centroid = self.centroid();
 
-        // 4-finger navigation is a one-shot recognizer measured from the
-        // gesture's rest baseline — swipe vs pinch, fire the dominant one. No
-        // pan/zoom dead zone sits in front of it (that double threshold made a
-        // deliberate pinch barely register).
-        if mode == Mode::Navigate {
-            self.ever_active = true;
-            self.apply_navigate(data, centroid);
+        // Arbitrated one-shot engine: a threshold swipe and/or pinch-in/out measured
+        // from the gesture's rest baseline — fire the dominant one. No dead zone sits
+        // in front of it (that double threshold made a deliberate pinch barely
+        // register). A tap/doubletap-only plan tracks nothing here; it fires on up.
+        if !self.plan.simultaneous() {
+            if self.plan.translation_threshold() || self.plan.scale_threshold() {
+                self.ever_active = true;
+                self.apply_navigate(data, centroid);
+            }
             return;
         }
 
-        // PanZoom: pan and zoom run simultaneously. The centroid pans, the finger
-        // spread zooms; neither excludes the other.
+        // Simultaneous engine: continuous pan and/or zoom (whichever is bound) plus
+        // the move/resize preemptors. The centroid pans, the finger spread zooms;
+        // neither excludes the other.
         if !self.active {
             let dx = centroid.x - self.start_centroid.x;
             let dy = centroid.y - self.start_centroid.y;
@@ -743,8 +928,8 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             // gathers the fingers without moving the centroid, so the spread must
             // break the dead zone on its own — but on a small panel jitter crosses
             // the ratio at a tiny absolute change, so the mm floor stops a pan
-            // wobbling into zoom. (Needs >= 2 fingers and a non-trivial baseline.)
-            let has_two = self.points.len() >= 2;
+            // wobbling into zoom. Only considered when a continuous zoom is bound.
+            let has_two = self.plan.scale_continuous() && self.points.len() >= 2;
             let cur_spread = if has_two { self.spread(centroid) } else { 0.0 };
             let span_ratio = if has_two && self.last_spread > MIN_SPREAD_MM * self.px_per_mm {
                 (cur_spread / self.last_spread - 1.0).abs()
@@ -771,25 +956,37 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             self.last_centroid = centroid;
             self.last_spread = self.spread(centroid);
 
-            // Hold variants belong to a translation gesture only: a held 3-finger
-            // pan drag selects move (armed) / cluster-move (armed + held) / resize
-            // (held). A pinch is a zoom, never a resize. A failed move/resize (no
+            // Hold variants belong to a translation gesture only: a held drag selects
+            // move (armed doubletap-swipe) / cluster-move (armed + held) / resize
+            // (held hold-swipe). A pinch is a zoom, never a grab. A failed grab (no
             // window) falls through to pan.
-            if self.max_fingers == 3 && !self.zoom_engaged {
+            if !self.zoom_engaged {
                 let held = event.time.saturating_sub(self.tap_start_time) >= HOLD_MS;
-                if self.armed_for_move {
-                    if self.try_start_move(data, handle, event, seq, held) {
-                        return;
-                    }
-                } else if held && self.try_start_resize(data, handle, event, seq) {
+                let preempt = if self.armed_for_move {
+                    self.plan.doubletap_swipe.clone()
+                } else if held {
+                    self.plan.hold_swipe.clone()
+                } else {
+                    None
+                };
+                if let Some(action) = preempt
+                    && self.start_window_grab(action, data, handle, event, seq, held)
+                {
                     return;
                 }
             }
             return;
         }
 
-        self.apply_pan(data, centroid, event.time);
-        if self.points.len() >= 2 {
+        if matches!(
+            self.plan.swipe,
+            Some(GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport
+            ))
+        ) {
+            self.apply_pan(data, centroid, event.time);
+        }
+        if self.plan.scale_continuous() && self.points.len() >= 2 {
             let cur_spread = self.spread(centroid);
             // Engage zoom once the spread clears both the ratio slop and the mm
             // floor for a couple of frames (so a pan's lone jitter spike can't

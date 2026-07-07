@@ -461,6 +461,58 @@
 # "4-finger-hold" = "center-window"         # fires on release
 # "mod+3-finger-hold" = "center-window"
 
+[touch]
+# # Touchscreen gesture BINDINGS. Distinct from [input.touch], which holds the
+# # touch *device* settings (enable, map_to_output) — put those there, not here
+# # (same split as [gestures] bindings vs [input.trackpad] device settings).
+# #
+# # Bindings: "N-finger-<type>" = "action"  (touch has no keyboard modifiers)
+# # Context-aware: on-window, on-canvas, anywhere.
+# # Unbound gestures are forwarded to the focused app.
+# # "none" removes a binding in its context (under [touch.anywhere] it also drops
+# # the anywhere fallback). A fully unbound gesture forwards to the app.
+# #
+# # Touch gesture types (1–5 fingers):
+# #   N-finger-swipe            — continuous OR threshold (action determines behavior)
+# #   N-finger-swipe-up/down/left/right — threshold only, checked before swipe fallback
+# #   N-finger-pinch            — continuous only (use pinch-in/out for discrete)
+# #   N-finger-pinch-in/out     — threshold only
+# #   N-finger-tap              — threshold only (quick touch, no movement)
+# #   N-finger-doubletap        — threshold only (two quick taps)
+# #   N-finger-doubletap-swipe  — continuous only (tap then drag)
+# #   N-finger-hold-swipe       — continuous only (dwell then drag)
+# #
+# # Continuous actions: pan-viewport (swipe), zoom (pinch), move-window / resize-window
+# # (doubletap-swipe / hold-swipe). A held move-window extends to the snap-cluster.
+# # Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, exec <cmd>, etc.
+# #
+# # Note: within one physical gesture, a continuous translation (pan) and a
+# # threshold pinch on the same finger count don't combine — either bind both axes
+# # continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
+
+[touch.on-window]
+# # Empty by default: 1–2 fingers starting on a window forward to the app, and the
+# # 3+ finger gestures below are bound "anywhere" so they apply over windows too.
+# # Bind here to override an "anywhere" gesture only when it starts on a window.
+
+[touch.on-canvas]
+# "1-finger-swipe" = "pan-viewport"
+# "2-finger-swipe" = "pan-viewport"
+# "2-finger-pinch" = "zoom"
+
+[touch.anywhere]
+# "3-finger-swipe" = "pan-viewport"           # continuous
+# "3-finger-pinch" = "zoom"                    # continuous
+# "4-finger-swipe" = "center-nearest"         # threshold (direction from drag)
+# "4-finger-pinch-in" = "zoom-to-fit"         # threshold
+# "4-finger-pinch-out" = "home-toggle"        # threshold
+# # 5-finger navigation mirrors 4-finger by default, so a stray 5th contact
+# # doesn't abort a navigation gesture.
+# "3-finger-tap" = "center-window"
+# "3-finger-doubletap" = "fit-window"
+# "3-finger-doubletap-swipe" = "move-window"  # continuous (hold to move the cluster)
+# "3-finger-hold-swipe" = "resize-window"     # continuous (dwell then drag)
+
 [xwayland]
 # # X11 support via xwayland-satellite. driftwm spawns satellite eagerly at
 # # startup, exports DISPLAY=:N, and X11 apps connect transparently. If the

@@ -464,5 +464,113 @@ pub fn parse_gesture_config_entry(
                 Err(format!("unknown gesture action: '{action_str}'"))
             }
         }
+        GestureTrigger::Tap { .. }
+        | GestureTrigger::Doubletap { .. }
+        | GestureTrigger::HoldSwipe { .. } => {
+            Err("tap/doubletap/hold-swipe are touch-only triggers".to_string())
+        }
+    }
+}
+
+/// Parse a touch trigger string like "1-finger-swipe", "3-finger-tap", or
+/// "3-finger-hold-swipe". Touch has no modifiers (the whole string is the trigger)
+/// and 1-finger gestures are valid, unlike the trackpad's 2-finger floor.
+pub fn parse_touch_trigger(s: &str) -> Result<GestureTrigger, String> {
+    let s = s.trim().to_lowercase();
+    let s = &s;
+
+    let Some((fingers_str, gesture_type)) = s.split_once("-finger-") else {
+        return Err(format!(
+            "invalid touch trigger '{s}' (expected N-finger-<type>)"
+        ));
+    };
+
+    let fingers: u32 = fingers_str
+        .parse()
+        .map_err(|_| format!("invalid finger count: '{fingers_str}'"))?;
+    if !(1..=5).contains(&fingers) {
+        return Err(format!("finger count must be 1-5, got {fingers}"));
+    }
+
+    match gesture_type {
+        "swipe" => Ok(GestureTrigger::Swipe { fingers }),
+        "swipe-up" => Ok(GestureTrigger::SwipeUp { fingers }),
+        "swipe-down" => Ok(GestureTrigger::SwipeDown { fingers }),
+        "swipe-left" => Ok(GestureTrigger::SwipeLeft { fingers }),
+        "swipe-right" => Ok(GestureTrigger::SwipeRight { fingers }),
+        "doubletap-swipe" => Ok(GestureTrigger::DoubletapSwipe { fingers }),
+        "hold-swipe" => Ok(GestureTrigger::HoldSwipe { fingers }),
+        "pinch" => Ok(GestureTrigger::Pinch { fingers }),
+        "pinch-in" => Ok(GestureTrigger::PinchIn { fingers }),
+        "pinch-out" => Ok(GestureTrigger::PinchOut { fingers }),
+        "tap" => Ok(GestureTrigger::Tap { fingers }),
+        "doubletap" => Ok(GestureTrigger::Doubletap { fingers }),
+        other => Err(format!("unknown touch gesture type: '{other}'")),
+    }
+}
+
+/// Validate a touch trigger + action combination.
+///
+/// Touch differs from the trackpad in a few ways, so this doesn't blindly delegate:
+/// a plain `swipe` is pan-or-threshold only (continuous window grabs belong on
+/// `doubletap-swipe`/`hold-swipe`, which carry explicit grab intent); and the touch
+/// window-grab path is single-window, so `resize-window-snapped` isn't offered.
+/// The remaining triggers reuse the shared gesture validation table.
+pub fn parse_touch_config_entry(
+    trigger: &GestureTrigger,
+    action_str: &str,
+) -> Result<GestureConfigEntry, String> {
+    let action_str = action_str.trim();
+    match trigger {
+        GestureTrigger::Tap { .. } | GestureTrigger::Doubletap { .. } => {
+            if parse_continuous_action(action_str).is_some() {
+                return Err(format!(
+                    "tap/doubletap triggers only accept threshold actions, not '{action_str}'"
+                ));
+            }
+            match parse_threshold_action(action_str)? {
+                Some(ThresholdAction::CenterNearest) => Err(
+                    "center-nearest requires a swipe trigger (needs direction from input)"
+                        .to_string(),
+                ),
+                Some(ta) => Ok(GestureConfigEntry::Threshold(ta)),
+                None => Err(format!("unknown touch action: '{action_str}'")),
+            }
+        }
+        GestureTrigger::Swipe { .. } => match parse_continuous_action(action_str) {
+            Some(ContinuousAction::PanViewport) => Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport,
+            )),
+            Some(_) => Err(
+                "touch swipe accepts pan-viewport (continuous) or threshold actions; \
+                 use doubletap-swipe/hold-swipe for move/resize"
+                    .to_string(),
+            ),
+            None => match parse_threshold_action(action_str)? {
+                Some(ta) => Ok(GestureConfigEntry::Threshold(ta)),
+                None => Err(format!("unknown touch action: '{action_str}'")),
+            },
+        },
+        GestureTrigger::DoubletapSwipe { .. } | GestureTrigger::HoldSwipe { .. } => {
+            match parse_continuous_action(action_str) {
+                Some(ca @ (ContinuousAction::MoveWindow | ContinuousAction::ResizeWindow)) => {
+                    Ok(GestureConfigEntry::Continuous(ca))
+                }
+                _ => Err(
+                    "doubletap-swipe/hold-swipe only support move-window and resize-window"
+                        .to_string(),
+                ),
+            }
+        }
+        GestureTrigger::Pinch { .. } => match parse_continuous_action(action_str) {
+            Some(ContinuousAction::Zoom) => {
+                Ok(GestureConfigEntry::Continuous(ContinuousAction::Zoom))
+            }
+            _ => Err(
+                "touch pinch only supports zoom; use pinch-in/pinch-out for discrete actions"
+                    .to_string(),
+            ),
+        },
+        _ => parse_gesture_config_entry(trigger, action_str),
     }
 }

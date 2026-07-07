@@ -742,3 +742,88 @@ pub(super) fn default_gesture_bindings(
         anywhere,
     }
 }
+
+/// Default touch bindings, keyed by bare trigger (touch has no modifiers). These
+/// reproduce the previously hardcoded recognizer behavior exactly: 1–2 fingers on
+/// the canvas pan (2 fingers also pinch-zoom), while on a window they forward to the
+/// app (no `on_window` bindings); 3-finger pan/zoom + tap/doubletap/move/resize and
+/// 4-finger navigate all bind `anywhere`. `on_window` is empty on purpose — `lookup`
+/// falls back from a specific context to `anywhere`, never the reverse.
+pub(super) fn default_touch_bindings() -> ContextBindings<GestureTrigger, GestureConfigEntry> {
+    let on_window = HashMap::new();
+
+    let on_canvas = HashMap::from([
+        (
+            GestureTrigger::Swipe { fingers: 1 },
+            GestureConfigEntry::Continuous(ContinuousAction::PanViewport),
+        ),
+        (
+            GestureTrigger::Swipe { fingers: 2 },
+            GestureConfigEntry::Continuous(ContinuousAction::PanViewport),
+        ),
+        (
+            GestureTrigger::Pinch { fingers: 2 },
+            GestureConfigEntry::Continuous(ContinuousAction::Zoom),
+        ),
+    ]);
+
+    let anywhere = HashMap::from([
+        (
+            GestureTrigger::Swipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::PanViewport),
+        ),
+        (
+            GestureTrigger::Pinch { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::Zoom),
+        ),
+        (
+            GestureTrigger::Swipe { fingers: 4 },
+            GestureConfigEntry::Threshold(ThresholdAction::CenterNearest),
+        ),
+        (
+            GestureTrigger::PinchIn { fingers: 4 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::ZoomToFit)),
+        ),
+        (
+            GestureTrigger::PinchOut { fingers: 4 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::HomeToggle)),
+        ),
+        // 5-finger navigation mirrors 4-finger: the old recognizer navigated on
+        // `>= 4` fingers, so a stray 5th contact must keep navigating (not abort the
+        // gesture by hitting an unbound tier).
+        (
+            GestureTrigger::Swipe { fingers: 5 },
+            GestureConfigEntry::Threshold(ThresholdAction::CenterNearest),
+        ),
+        (
+            GestureTrigger::PinchIn { fingers: 5 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::ZoomToFit)),
+        ),
+        (
+            GestureTrigger::PinchOut { fingers: 5 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::HomeToggle)),
+        ),
+        (
+            GestureTrigger::Tap { fingers: 3 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::CenterWindow)),
+        ),
+        (
+            GestureTrigger::Doubletap { fingers: 3 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::FitWindow)),
+        ),
+        (
+            GestureTrigger::DoubletapSwipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::MoveWindow),
+        ),
+        (
+            GestureTrigger::HoldSwipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::ResizeWindow),
+        ),
+    ]);
+
+    ContextBindings {
+        on_window,
+        on_canvas,
+        anywhere,
+    }
+}

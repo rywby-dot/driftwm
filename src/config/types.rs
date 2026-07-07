@@ -268,6 +268,10 @@ pub enum GestureTrigger {
     PinchIn { fingers: u32 },
     PinchOut { fingers: u32 },
     Hold { fingers: u32 },
+    // Touch-only triggers (never produced by the trackpad gesture parser).
+    Tap { fingers: u32 },
+    Doubletap { fingers: u32 },
+    HoldSwipe { fingers: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
