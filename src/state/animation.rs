@@ -456,7 +456,7 @@ impl DriftWm {
             // A fullscreen output's camera is locked (set_camera_on refuses to
             // move it). Drop any pending pan/zoom target so it can't fire the
             // moment fullscreen exits; the ticks then no-op on the None targets.
-            if self.fullscreen.contains_key(output) {
+            if self.is_output_fullscreen(output) {
                 let mut os = output_state(output);
                 os.camera_target = None;
                 os.zoom_target = None;

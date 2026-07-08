@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, FocusTarget, FullscreenState};
+use super::{DriftWm, FocusTarget};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
@@ -81,7 +81,7 @@ impl DriftWm {
         // A different window is taking over this output's fullscreen: exit first.
         // Must target `output`, not the active output — they can differ when
         // fullscreen is requested on a specific monitor.
-        if self.fullscreen.contains_key(&output) {
+        if self.is_output_fullscreen(&output) {
             self.exit_fullscreen_on(&output);
         }
 
@@ -135,14 +135,11 @@ impl DriftWm {
 
         self.stage
             .set_fullscreen(&output.name(), window.clone(), saved_location, saved_size);
-        self.fullscreen.insert(
-            output.clone(),
-            FullscreenState {
-                saved_camera,
-                saved_zoom,
-                saved_pinned,
-            },
-        );
+        super::output_state(&output).fullscreen_return = Some(super::FullscreenReturn {
+            camera: saved_camera,
+            zoom: saved_zoom,
+            pinned: saved_pinned,
+        });
 
         window.enter_fullscreen_configure(viewport_size);
 
@@ -162,7 +159,7 @@ impl DriftWm {
         // Snap camera to integer for pixel-perfect alignment. Write the
         // output's state directly: `set_camera` refuses to move a fullscreen
         // output (the window is pinned to its camera-origin), and this output's
-        // FullscreenState is already inserted above.
+        // stage fullscreen entry is already set above.
         let camera_i32 = super::output_state(&output).camera.to_i32_round();
         super::output_state(&output).camera =
             Point::from((camera_i32.x as f64, camera_i32.y as f64));
@@ -234,15 +231,15 @@ impl DriftWm {
     pub fn exit_fullscreen_on(&mut self, output: &smithay::output::Output) {
         // Take both halves unconditionally before bailing — a one-sided take
         // would strand the other half if they ever diverged.
-        let fs = self.fullscreen.remove(output);
+        let ret = super::output_state(output).fullscreen_return.take();
         let entry = self.stage.take_fullscreen(&output.name());
         debug_assert_eq!(
-            fs.is_some(),
+            ret.is_some(),
             entry.is_some(),
             "fullscreen halves diverged for {}",
             output.name()
         );
-        let (Some(fs), Some(entry)) = (fs, entry) else {
+        let (Some(ret), Some(entry)) = (ret, entry) else {
             return;
         };
 
@@ -252,8 +249,8 @@ impl DriftWm {
         self.map_window(entry.window.clone(), entry.saved_location, false);
         {
             let mut os = super::output_state(output);
-            os.camera = fs.saved_camera;
-            os.zoom = fs.saved_zoom;
+            os.camera = ret.camera;
+            os.zoom = ret.zoom;
             // Match the enter path's clean slate: drop any animation targets
             // that were set while the camera was locked (e.g. an activation
             // aimed at this output). The per-tick fullscreen clear handles the
@@ -266,10 +263,8 @@ impl DriftWm {
         // Re-pin if it was pinned before fullscreen, then snap its Space loc
         // back to screen_pos (update_output_from_camera's sync only fires on a
         // camera change, which restoring the saved camera may not be).
-        let was_pinned = fs.saved_pinned.is_some();
-        if let (Some(pinned), Some(id)) =
-            (fs.saved_pinned, entry.window.wl_surface().map(|s| s.id()))
-        {
+        let was_pinned = ret.pinned.is_some();
+        if let (Some(pinned), Some(id)) = (ret.pinned, entry.window.wl_surface().map(|s| s.id())) {
             self.pinned.insert(id, pinned);
         }
         self.update_output_from_camera();

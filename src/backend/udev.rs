@@ -1409,7 +1409,7 @@ fn teardown_output(data: &mut DriftWm, surface: SurfaceData, is_last: bool) {
             data.reassign_orphaned_pinned(&target);
         }
         data.recompute_decoration_scale();
-        data.fullscreen.remove(&output);
+        crate::state::output_state(&output).fullscreen_return = None;
         data.stage.take_fullscreen(&output.name());
         data.dpms_off_outputs.remove(&output);
         data.pending_dpms.remove(&output);

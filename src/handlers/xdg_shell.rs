@@ -259,9 +259,9 @@ impl XdgShellHandler for DriftWm {
                 .and_then(|name| self.output_by_name(&name));
             if let Some(ref output) = fs_output {
                 self.stage.take_fullscreen(&output.name());
-                if let Some(fs) = self.fullscreen.remove(output) {
-                    output_state(output).camera = fs.saved_camera;
-                    output_state(output).zoom = fs.saved_zoom;
+                if let Some(ret) = output_state(output).fullscreen_return.take() {
+                    output_state(output).camera = ret.camera;
+                    output_state(output).zoom = ret.zoom;
                     self.update_output_from_camera();
                 }
             }

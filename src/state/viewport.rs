@@ -29,9 +29,9 @@ impl DriftWm {
     /// Invariant: a fullscreen window is parked at its output's camera-origin at
     /// zoom 1, so the camera must not move or it slides off (0,0) and re-exposes
     /// black to that output (and other cameras). (`enter_fullscreen` seeds the
-    /// origin by writing output_state directly, before its state is inserted.)
+    /// origin by writing output_state directly, bypassing this guard.)
     pub fn set_camera_on(&mut self, output: &Output, val: Point<f64, Logical>) {
-        if self.fullscreen.contains_key(output) {
+        if self.is_output_fullscreen(output) {
             return;
         }
         output_state(output).camera = val;

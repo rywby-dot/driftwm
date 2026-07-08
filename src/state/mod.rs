@@ -174,17 +174,19 @@ pub struct HomeReturn {
     pub fullscreen_window: Option<Window>,
 }
 
-/// The viewport half of fullscreen state, restored on exit. The membership
-/// and geometry half (window, saved location/size) lives on the stage —
-/// cameras are not stage domain, so the two are split along that line and
-/// always inserted/removed together.
-pub struct FullscreenState {
-    pub saved_camera: Point<f64, Logical>,
-    pub saved_zoom: f64,
+/// Pre-fullscreen viewport, restored on exit — the third saved-viewport slot
+/// on [`OutputState`] alongside `home_return` and `overview_return`. The
+/// membership and geometry half (window, saved location/size) lives on the
+/// stage, which is the sole authority for "what is fullscreen where"; this is
+/// only the restore payload.
+#[derive(Clone)]
+pub struct FullscreenReturn {
+    pub camera: Point<f64, Logical>,
+    pub zoom: f64,
     /// If the window was screen-pinned when it entered fullscreen, its pin
     /// state, re-inserted on exit so fullscreen is a transparent round-trip
     /// (pinned → fullscreen → pinned) rather than a permanent unpin.
-    pub saved_pinned: Option<PinnedState>,
+    pub pinned: Option<PinnedState>,
 }
 
 pub struct PendingRecenter {
@@ -246,6 +248,7 @@ pub struct OutputState {
     /// from config for multi-monitor.
     pub layout_position: Point<i32, Logical>,
     pub home_return: Option<HomeReturn>,
+    pub fullscreen_return: Option<FullscreenReturn>,
 }
 
 pub fn init_output_state(
@@ -275,6 +278,7 @@ pub fn init_output_state(
             last_frame_instant: Instant::now(),
             layout_position,
             home_return: None,
+            fullscreen_return: None,
         })
     });
 }
@@ -337,6 +341,7 @@ pub fn output_viewport_rect(output: &Output) -> Rectangle<i32, Logical> {
 /// `space` for focus/decorations/popups; rendering, hit-testing, and capture
 /// route through this instead of the camera transform. Source of truth for
 /// "is this window pinned" — `DriftWm::is_pinned`.
+#[derive(Clone)]
 pub struct PinnedState {
     pub output: Output,
     /// Output-relative top-left, Y-down (internal convention), pre-zoom.
@@ -531,8 +536,6 @@ pub struct DriftWm {
     /// without press" — games / Discord / state-tracking apps break, and
     /// launchers leak the trigger key into the previously focused window.
     pub suppressed_keys: HashSet<u32>,
-
-    pub fullscreen: HashMap<Output, FullscreenState>,
 
     pub gesture_state: Option<GestureState>,
     pub pending_middle_click: Option<PendingMiddleClick>,
@@ -1274,11 +1277,11 @@ impl DriftWm {
 
     pub fn is_fullscreen(&self) -> bool {
         self.active_output()
-            .is_some_and(|o| self.fullscreen.contains_key(&o))
+            .is_some_and(|o| self.is_output_fullscreen(&o))
     }
 
     pub fn is_output_fullscreen(&self, output: &Output) -> bool {
-        self.fullscreen.contains_key(output)
+        self.stage.fullscreen_on(&output.name()).is_some()
     }
 
     /// Output whose viewport contains the window's center, or the active
@@ -1371,7 +1374,7 @@ impl DriftWm {
         // camera origin, so another monitor's camera would otherwise pan over
         // it. On its own output it falls through to the canvas branch below,
         // which yields (0,0) at zoom 1 thanks to the camera-park.
-        if !self.fullscreen.is_empty()
+        if self.stage.has_fullscreen()
             && let Some(fs_output) = window
                 .wl_surface()
                 .and_then(|s| self.find_fullscreen_output_for_surface(&s))
@@ -1767,15 +1770,20 @@ impl DriftWm {
             );
         }
 
-        let mut stage_fs: Vec<&str> = self
-            .stage
-            .fullscreen_entries()
-            .map(|(o, _)| o.as_str())
-            .collect();
-        let mut wm_fs: Vec<String> = self.fullscreen.keys().map(|o| o.name()).collect();
-        stage_fs.sort_unstable();
-        wm_fs.sort_unstable();
-        assert_eq!(stage_fs, wm_fs, "stage/DriftWm fullscreen output mismatch");
+        for output in self.space.outputs() {
+            assert_eq!(
+                self.stage.fullscreen_on(&output.name()).is_some(),
+                output_state(output).fullscreen_return.is_some(),
+                "fullscreen membership and viewport-return presence diverged on {}",
+                output.name()
+            );
+        }
+        for (name, _) in self.stage.fullscreen_entries() {
+            assert!(
+                self.output_by_name(name).is_some(),
+                "stage fullscreen entry for {name} outlived its output"
+            );
+        }
 
         for id in self.decorations.keys() {
             assert!(
@@ -1814,6 +1822,7 @@ mod tests {
             last_frame_instant: Instant::now(),
             layout_position: Point::from(layout_position),
             home_return: None,
+            fullscreen_return: None,
         }
     }
 

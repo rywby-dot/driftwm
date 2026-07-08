@@ -196,7 +196,7 @@ impl DriftWm {
             })
             .or_else(|| {
                 let out = self.active_output()?;
-                self.fullscreen.contains_key(&out).then_some(out)
+                self.is_output_fullscreen(&out).then_some(out)
             })?;
         let fs = self.stage.fullscreen_on(&output.name())?;
 
