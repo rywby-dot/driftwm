@@ -256,7 +256,7 @@ impl XdgShellHandler for DriftWm {
                 .stage
                 .fullscreen_output_of(window)
                 .map(str::to_owned)
-                .and_then(|name| self.space.outputs().find(|o| o.name() == name).cloned());
+                .and_then(|name| self.output_by_name(&name));
             if let Some(ref output) = fs_output {
                 self.stage.take_fullscreen(&output.name());
                 if let Some(fs) = self.fullscreen.remove(output) {
@@ -359,8 +359,6 @@ impl XdgShellHandler for DriftWm {
                     }
                 }
             }
-            // Unmap from stage and space; the stage side also drops the window
-            // from the focus history, clamping any active cycle index.
             self.unmap_window(window);
             // The window may have sat under the cursor; re-target pointer focus
             // now that it's gone so clicks don't fall into the destroyed surface.

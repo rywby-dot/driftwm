@@ -128,8 +128,8 @@ fn cycle_backward_wraps_to_oldest() {
     for w in &windows {
         stage.push_focus(w);
     }
-    // History: [2, 1, 0]; first backward step: (0 - 1) mod 3 → wait, first
-    // step with no cycle state is always index 1 regardless of direction.
+    // History: [2, 1, 0]; the first step with no cycle state is always
+    // index 1, regardless of direction.
     let target = stage.cycle_step(true).unwrap();
     assert_eq!(target.label(), 1);
     let target = stage.cycle_step(true).unwrap();
@@ -584,8 +584,9 @@ mod harness {
             let order = self.stage.raise_with_children(w);
             self.stage.enforce_stacking();
 
-            // The #153 guard: within the raised subtree, every child sits above
-            // its own parent (fullscreen/widget re-stacking exempted).
+            // The modal-dialog stacking guard: within the raised subtree, every
+            // child sits above its own parent (fullscreen/widget re-stacking
+            // exempted).
             let z: Vec<TestWindow> = self.stage.windows().cloned().collect();
             let idx_of = |x: &TestWindow| z.iter().position(|y| y == x);
             for child in &order {
@@ -782,6 +783,10 @@ mod harness {
                 }
                 Op::ToggleFit { idx } => {
                     let Some(w) = self.pick(*idx) else { return };
+                    // Models the keybinding path, which filters fullscreen
+                    // windows out. The client-initiated maximize path has no
+                    // such guard — a quirk this harness deliberately does
+                    // not cover.
                     if w.is_widget() || self.stage.is_fullscreen(&w) || !self.stage.contains(&w) {
                         return;
                     }

@@ -232,10 +232,17 @@ impl DriftWm {
 
     /// Exit fullscreen on a specific output.
     pub fn exit_fullscreen_on(&mut self, output: &smithay::output::Output) {
-        let Some(fs) = self.fullscreen.remove(output) else {
-            return;
-        };
-        let Some(entry) = self.stage.take_fullscreen(&output.name()) else {
+        // Take both halves unconditionally before bailing — a one-sided take
+        // would strand the other half if they ever diverged.
+        let fs = self.fullscreen.remove(output);
+        let entry = self.stage.take_fullscreen(&output.name());
+        debug_assert_eq!(
+            fs.is_some(),
+            entry.is_some(),
+            "fullscreen halves diverged for {}",
+            output.name()
+        );
+        let (Some(fs), Some(entry)) = (fs, entry) else {
             return;
         };
 
@@ -296,7 +303,7 @@ impl DriftWm {
             .fullscreen_entries()
             .find(|(_, fs)| fs.window.wl_surface().as_deref() == Some(wl_surface))
             .map(|(name, _)| name.clone())?;
-        self.space.outputs().find(|o| o.name() == name).cloned()
+        self.output_by_name(&name)
     }
 
     /// Exit fullscreen and remap the pointer to maintain its screen position

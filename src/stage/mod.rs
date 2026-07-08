@@ -112,7 +112,7 @@ impl<W: StageElement> Stage<W> {
     }
 
     /// Remove a window everywhere: z-order, focus history (clamping any active
-    /// cycle), and fullscreen. After this the window appears nowhere.
+    /// cycle), and fullscreen.
     pub fn remove(&mut self, window: &W) {
         self.entries.retain(|e| &e.window != window);
         self.focus_history.retain(|w| w != window);
@@ -194,9 +194,7 @@ impl<W: StageElement> Stage<W> {
 
     /// Remove `window` from the focus history, clamping any active cycle.
     /// Used by paths that exclude a still-live window from the cycle
-    /// (pinning, widget rules). The pre-stage code skipped the clamp here and
-    /// left a stale index that readers tolerated via `.get()`; the invariant
-    /// demands in-bounds, so this clamps like every other removal.
+    /// (pinning, widget rules).
     pub fn drop_from_focus_history(&mut self, window: &W) {
         self.focus_history.retain(|w| w != window);
         self.clamp_cycle();
@@ -370,7 +368,7 @@ impl<W: StageElement> Stage<W> {
     /// Assert structural invariants. Panics on violation — fix the stage bug,
     /// never lower the invariant. Membership checks are scoped to live
     /// windows: a dead window may linger in the focus history until its
-    /// destroy handler runs, mirroring the pre-stage behavior.
+    /// destroy handler runs.
     pub fn verify_invariants(&self) {
         for (i, e) in self.entries.iter().enumerate() {
             assert!(

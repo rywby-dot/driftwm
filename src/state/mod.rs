@@ -691,11 +691,19 @@ impl DriftWm {
     }
 
     /// Remove `window` from stage and space. The stage side also purges it
-    /// from the focus history (clamping any active cycle) and from fullscreen
-    /// membership, so a closed window appears nowhere.
+    /// from the focus history (clamping any active cycle) and from the
+    /// stage's fullscreen membership. The `fullscreen` viewport half (camera
+    /// restore) is NOT handled here — a caller unmapping a fullscreen window
+    /// must tear that down first, as `toplevel_destroyed` does.
     pub fn unmap_window(&mut self, window: &Window) {
         self.stage.remove(window);
         self.space.unmap_elem(window);
+    }
+
+    /// Resolve an output name (the stage's fullscreen key) back to the live
+    /// `Output`. `None` if the output was disconnected in the meantime.
+    pub fn output_by_name(&self, name: &str) -> Option<Output> {
+        self.space.outputs().find(|o| o.name() == name).cloned()
     }
 
     /// Drop every per-surface map/cache entry keyed by `surface`. Shared by the

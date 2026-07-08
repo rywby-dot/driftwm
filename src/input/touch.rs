@@ -130,10 +130,6 @@ impl DriftWm {
         first
     }
 
-    fn output_by_name(&self, name: &str) -> Option<Output> {
-        self.space.outputs().find(|o| o.name() == name).cloned()
-    }
-
     /// Schedule a deferred single-tap center for `window` after `delay`. Any
     /// prior pending center is cancelled first.
     pub(crate) fn schedule_pending_center(&mut self, window: Window, delay: Duration) {

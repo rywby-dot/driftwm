@@ -191,8 +191,8 @@ impl DriftWm {
         let output = anchor
             .as_ref()
             .and_then(|a| {
-                let name = self.stage.fullscreen_output_of(a)?;
-                self.space.outputs().find(|o| o.name() == name).cloned()
+                let name = self.stage.fullscreen_output_of(a).map(str::to_owned)?;
+                self.output_by_name(&name)
             })
             .or_else(|| {
                 let out = self.active_output()?;

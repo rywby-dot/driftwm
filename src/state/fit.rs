@@ -85,8 +85,6 @@ impl DriftWm {
             .restore_size(window)
             .unwrap_or_else(|| window.geometry().size);
 
-        self.stage.set_fit(window, current_size);
-
         let FitGeometry {
             new_loc,
             target_size,
@@ -96,6 +94,9 @@ impl DriftWm {
 
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
+        // After the map — set_fit needs the window's stage entry, which the
+        // map guarantees even for a window that wasn't staged before.
+        self.stage.set_fit(window, current_size);
         // Don't refresh `stable_snap_rects` here — the fit canvas position
         // snap-touches nothing, so close-time `cluster_of` would degrade to
         // `{self}`. The pre-fit rect is the window's cluster identity.
