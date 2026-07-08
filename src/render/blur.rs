@@ -142,6 +142,19 @@ impl BlurCache {
     }
 }
 
+/// Per-output shared blurred-background state for `animate_blur`: ping-pong
+/// pair plus its refresh throttle. Keyed per output in `RenderCache` —
+/// outputs differ in size and render on their own vblanks, so one global
+/// entry would thrash (recreate + full re-blur on every size mismatch) the
+/// moment a second output exists.
+pub struct SharedBlur {
+    pub tex_a: GlesTexture,
+    pub tex_b: GlesTexture,
+    pub size: Size<i32, Physical>,
+    pub refreshed_at: Option<std::time::Instant>,
+    pub camera_generation: u64,
+}
+
 /// Padding around the blur crop so the Kawase reach never touches a texture
 /// edge: window-edge samples must see real backdrop, not clamped border
 /// pixels. Sized to the blur's worst-case reach at the deepest mip.
@@ -317,6 +330,7 @@ pub(crate) fn process_blur_requests(
     pinned_prefix: usize,
     normal_prefix: usize,
     widget_prefix: usize,
+    background_start: usize,
 ) {
     use smithay::backend::renderer::Color32F;
     use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -339,17 +353,124 @@ pub(crate) fn process_blur_requests(
         }
     };
 
+    // bg_tex is sampled below through a padded crop that reaches past the captured
+    // backdrop wherever a window sits at an output edge. Mirror-wrap it so the blur
+    // reflects real backdrop back across the edge: plain CLAMP streaks the edge
+    // row/column, default REPEAT wraps in the opposite side. MIRRORED_REPEAT on an
+    // NPOT texture needs GLES 3, so fall back to CLAMP on GLES 2 — streaks, but
+    // never a black/incomplete sample.
+    {
+        use smithay::backend::renderer::gles::ffi;
+        let _ = renderer.with_context(|gl| unsafe {
+            let gles3 = std::ffi::CStr::from_ptr(gl.GetString(ffi::VERSION) as *const _)
+                .to_string_lossy()
+                .strip_prefix("OpenGL ES ")
+                .and_then(|s| s.chars().next())
+                .and_then(|c| c.to_digit(10))
+                .is_some_and(|major| major >= 3);
+            let wrap = if gles3 {
+                ffi::MIRRORED_REPEAT
+            } else {
+                ffi::CLAMP_TO_EDGE
+            } as i32;
+            gl.BindTexture(ffi::TEXTURE_2D, bg_tex.tex_id());
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, wrap);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, wrap);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        });
+    }
+
     let down_shader = state.render.blur_down_shader.clone().unwrap();
     let up_shader = state.render.blur_up_shader.clone().unwrap();
     let blur_passes = state.config.effects.blur_radius as usize;
     let blur_strength = state.config.effects.blur_strength as f32;
     let context_id = renderer.context_id();
+    let output_name = output.name();
     let geom_gen = state.render.blur_geometry_generation;
-    let camera_gen = state.render.blur_camera_generation;
+    let camera_gen = state
+        .render
+        .blur_camera_generation
+        .get(&output_name)
+        .copied()
+        .unwrap_or(0);
     // Animated background shaders update per frame but the element Id is stable,
-    // so the bg_hash optimisation can't detect the change. Re-blurring every frame
-    // is expensive, so it's opt-in via [effects].animate_blur.
-    let animated_bg = state.render.background_is_animated && state.config.effects.animate_blur;
+    // so the bg_hash optimisation can't detect the change. Re-blurring per
+    // window per frame re-renders the whole scene each time and scales with
+    // window count; instead the background is blurred ONCE into a shared
+    // full-output texture (throttled to [effects].animate_blur_fps, forced on
+    // camera moves) and each window slices its rect out of it. Trade-off: a
+    // window overlapping another window frosts only the background beneath.
+    // animate_blur_fps == 0 disables the live refresh: the frost is captured
+    // once and only recomputed on camera/geometry change, so it freezes over an
+    // animated wallpaper instead of re-sampling it every 1/fps (also avoids the
+    // 1.0/fps division below).
+    let animated_bg =
+        state.render.background_is_animated && state.config.effects.animate_blur_fps > 0;
+    let mut shared_refreshed = false;
+    if animated_bg {
+        let min_interval =
+            std::time::Duration::from_secs_f64(1.0 / state.config.effects.animate_blur_fps as f64);
+        let size_ok = state
+            .render
+            .shared_blur
+            .get(&output_name)
+            .is_some_and(|s| s.size == output_size);
+        if !size_ok {
+            let a =
+                Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, out_buf_size);
+            let b =
+                Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, out_buf_size);
+            if let (Ok(a), Ok(b)) = (a, b) {
+                state.render.shared_blur.insert(
+                    output_name.clone(),
+                    SharedBlur {
+                        tex_a: a,
+                        tex_b: b,
+                        size: output_size,
+                        refreshed_at: None,
+                        camera_generation: 0,
+                    },
+                );
+            }
+        }
+        if let Some(mut shared) = state.render.shared_blur.remove(&output_name) {
+            let camera_moved = shared.camera_generation != camera_gen;
+            let due = shared
+                .refreshed_at
+                .is_none_or(|at| at.elapsed() >= min_interval);
+            if due || camera_moved {
+                let mut rendered = false;
+                if let Ok(mut target) = renderer.bind(&mut shared.tex_a) {
+                    let mut dt =
+                        OutputDamageTracker::new(output_size, output_scale, Transform::Normal);
+                    rendered = dt
+                        .render_output(
+                            renderer,
+                            &mut target,
+                            0,
+                            &all_elements[background_start.min(all_elements.len())..],
+                            [0.0f32, 0.0, 0.0, 1.0],
+                        )
+                        .is_ok();
+                }
+                if rendered {
+                    let _ = render_blur(
+                        renderer,
+                        &down_shader,
+                        &up_shader,
+                        &mut shared.tex_a,
+                        &mut shared.tex_b,
+                        blur_strength * output_scale as f32,
+                        blur_passes,
+                    );
+                    shared.refreshed_at = Some(std::time::Instant::now());
+                    shared.camera_generation = camera_gen;
+                    shared_refreshed = true;
+                }
+            }
+            state.render.shared_blur.insert(output_name.clone(), shared);
+        }
+    }
 
     // Precompute per-request behind depth (index into all_elements where "below this window" begins)
     let behind_starts: Vec<usize> = blur_requests
@@ -377,15 +498,16 @@ pub(crate) fn process_blur_requests(
         }
         let pad_size: Size<i32, Physical> = (win_size.w + 2 * pad, win_size.h + 2 * pad).into();
 
-        if !state.render.blur_cache.contains_key(&req.surface_id) {
+        let key = (output_name.clone(), req.surface_id.clone());
+        if !state.render.blur_cache.contains_key(&key) {
             if let Some(c) = BlurCache::new(renderer, win_size, pad_size) {
-                state.render.blur_cache.insert(req.surface_id.clone(), c);
+                state.render.blur_cache.insert(key.clone(), c);
             } else {
                 needs_recompute.push(false);
                 continue;
             }
         }
-        let cache = state.render.blur_cache.get_mut(&req.surface_id).unwrap();
+        let cache = state.render.blur_cache.get_mut(&key).unwrap();
         if cache.size != win_size || cache.pad_size != pad_size {
             cache.resize(renderer, win_size, pad_size);
         }
@@ -404,7 +526,7 @@ pub(crate) fn process_blur_requests(
             BlurLayer::Overlay | BlurLayer::Top | BlurLayer::Pinned
         ) && cache.last_camera_generation != camera_gen;
 
-        if background_changed || geom_changed || camera_dirty || animated_bg {
+        if background_changed || geom_changed || camera_dirty || (animated_bg && shared_refreshed) {
             cache.dirty = true;
         }
         if cache.force_dirty_frames > 0 {
@@ -432,9 +554,51 @@ pub(crate) fn process_blur_requests(
         if win_size.w <= 0 || win_size.h <= 0 {
             continue;
         }
-        let Some(cache) = state.render.blur_cache.get_mut(&req.surface_id) else {
+        let key = (output_name.clone(), req.surface_id.clone());
+        let Some(cache) = state.render.blur_cache.get_mut(&key) else {
             continue;
         };
+
+        // The shared slice is only exact when nothing but scene background
+        // lies beneath this window; a window stacked over other windows
+        // falls through to the per-window path (throttled by the same
+        // shared_refreshed cadence), so lower windows show in its frost.
+        // Missing shared textures (GL alloc failure) also fall through —
+        // skipping would insert this window's never-rendered texture as an
+        // invisible blur.
+        if animated_bg
+            && behind_starts[i] >= background_start
+            && let Some(shared) = state.render.shared_blur.get(&output_name)
+        {
+            // Slice this window's rect out of the shared blurred background.
+            // Already blurred full-screen, so edges see real neighbours and
+            // no padding is needed.
+            let shared_src = shared.tex_a.clone();
+            let Ok(mut target) = renderer.bind(&mut cache.texture) else {
+                continue;
+            };
+            let Ok(mut frame) = renderer.render(&mut target, win_size, Transform::Normal) else {
+                continue;
+            };
+            let _ = frame.clear(Color32F::TRANSPARENT, &[Rectangle::from_size(win_size)]);
+            let src_rect: Rectangle<f64, smithay::utils::Buffer> = Rectangle::new(
+                (req.screen_rect.loc.x as f64, req.screen_rect.loc.y as f64).into(),
+                (win_size.w as f64, win_size.h as f64).into(),
+            );
+            let _ = frame.render_texture_from_to(
+                &shared_src,
+                src_rect,
+                Rectangle::from_size(win_size),
+                &[Rectangle::from_size(win_size)],
+                &[],
+                Transform::Normal,
+                1.0,
+                None,
+                &[],
+            );
+            let _ = frame.finish();
+            continue;
+        }
 
         let behind = behind_starts[i];
         if last_bg_depth != Some(behind) {
@@ -466,36 +630,29 @@ pub(crate) fn process_blur_requests(
                 continue;
             };
             let _ = frame.clear(Color32F::TRANSPARENT, &[Rectangle::from_size(pad_size)]);
-            // Clamp the padded source to the output; offset the destination
-            // so the window content stays centred even at screen edges.
+            // Sample the whole padded rect; where it reaches past the output,
+            // bg_tex's mirror wrap (set above) supplies backdrop instead of a
+            // transparent ring the blur would bleed inward.
             let want = Rectangle::<i32, Physical>::new(
                 (req.screen_rect.loc.x - pad, req.screen_rect.loc.y - pad).into(),
                 pad_size,
             );
-            if let Some(clipped) = want.intersection(Rectangle::from_size(output_size))
-                && clipped.size.w > 0
-                && clipped.size.h > 0
-            {
-                let src_rect: Rectangle<f64, smithay::utils::Buffer> = Rectangle::new(
-                    (clipped.loc.x as f64, clipped.loc.y as f64).into(),
-                    (clipped.size.w as f64, clipped.size.h as f64).into(),
-                );
-                let dst = Rectangle::<i32, Physical>::new(
-                    (clipped.loc.x - want.loc.x, clipped.loc.y - want.loc.y).into(),
-                    clipped.size,
-                );
-                let _ = frame.render_texture_from_to(
-                    &bg_src,
-                    src_rect,
-                    dst,
-                    &[dst],
-                    &[],
-                    Transform::Normal,
-                    1.0,
-                    None,
-                    &[],
-                );
-            }
+            let src_rect: Rectangle<f64, smithay::utils::Buffer> = Rectangle::new(
+                (want.loc.x as f64, want.loc.y as f64).into(),
+                (pad_size.w as f64, pad_size.h as f64).into(),
+            );
+            let full = Rectangle::from_size(pad_size);
+            let _ = frame.render_texture_from_to(
+                &bg_src,
+                src_rect,
+                full,
+                &[full],
+                &[],
+                Transform::Normal,
+                1.0,
+                None,
+                &[],
+            );
             let _ = frame.finish();
         }
 
@@ -577,7 +734,8 @@ pub(crate) fn process_blur_requests(
             );
         }
 
-        let Some(cache) = state.render.blur_cache.get_mut(&req.surface_id) else {
+        let key = (output_name.clone(), req.surface_id.clone());
+        let Some(cache) = state.render.blur_cache.get_mut(&key) else {
             continue;
         };
 
@@ -666,7 +824,8 @@ pub(crate) fn process_blur_requests(
         if win_size.w <= 0 || win_size.h <= 0 {
             continue;
         }
-        let Some(cache) = state.render.blur_cache.get(&req.surface_id) else {
+        let key = (output_name.clone(), req.surface_id.clone());
+        let Some(cache) = state.render.blur_cache.get(&key) else {
             continue;
         };
 

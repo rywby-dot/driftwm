@@ -221,6 +221,11 @@ pub enum MouseTrigger {
     Button(u32),
     TrackpadScroll,
     WheelScroll,
+    /// One discrete wheel notch away from the user. Unlike WheelScroll
+    /// (continuous pan/zoom), notch triggers can run any Action.
+    WheelUp,
+    /// One discrete wheel notch toward the user.
+    WheelDown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -769,7 +774,11 @@ pub struct BackendConfig {
 pub struct EffectsConfig {
     pub blur_radius: u32,
     pub blur_strength: f64,
-    pub animate_blur: bool,
+    /// Refresh rate of the shared animated-background blur; `0` disables the
+    /// live refresh (the frost freezes over an animated wallpaper). Animated
+    /// wallpapers evolve slowly; re-blurring at a fraction of the output
+    /// rate looks continuous through frosted glass at a fraction of the cost.
+    pub animate_blur_fps: u32,
 }
 
 impl Default for EffectsConfig {
@@ -777,7 +786,7 @@ impl Default for EffectsConfig {
         Self {
             blur_radius: 2,
             blur_strength: 1.1,
-            animate_blur: false,
+            animate_blur_fps: 20,
         }
     }
 }

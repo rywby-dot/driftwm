@@ -879,6 +879,19 @@ impl DriftWm {
             driftwm::canvas::canvas_to_screen(driftwm::canvas::CanvasPos(canvas_pos), camera, zoom)
                 .0;
 
+        let map = layer_map_for_output(&output);
+        // Floating bars/docks may reserve no exclusive zone, so there's nothing
+        // to measure against -- hit-test directly instead, or hovering the bar
+        // to click it also pans and fights the click with pointer warps.
+        // Only Top/Overlay: Background/Bottom usually hold a full-output
+        // wallpaper surface, which would match everywhere and kill cursor-pan.
+        let over_layer_surface = [WlrLayer::Top, WlrLayer::Overlay]
+            .iter()
+            .any(|&layer| map.layer_under(layer, screen_pos).is_some());
+        if over_layer_surface {
+            crate::state::output_state(&output).edge_pan_velocity = None;
+            return;
+        }
         let size = crate::state::output_logical_size(&output);
         let velocity = cursor_edge_pan_velocity(
             screen_pos,

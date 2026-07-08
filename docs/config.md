@@ -502,11 +502,11 @@ Default: `1.1`
 
 per-pass texel spread (default: 1.1)
 
-### `animate_blur`
+### `animate_blur_fps`
 
-Default: `false`
+Default: `20`
 
-re-blur every frame when the wallpaper is animated (expensive; default: false — blur is captured once and only refreshed when geometry/camera/static bg change)
+refresh rate of blur under an animated wallpaper (0-144, default 20; 0 = off, freezing the frost so it stops re-sampling the wallpaper). The background is blurred once into a shared full-output texture and each window slices its rect from it, so cost stays flat as windows are added; a window stacked over other windows falls back to an exact per-window blur at the same cadence. Animated wallpapers evolve slowly, so well below the output rate still looks continuous through frosted glass. Camera moves force a refresh.
 
 ## `[background]`
 
@@ -713,7 +713,7 @@ Default: `false`
 
 When true, maximize/unmaximize initiated via window decoration (CSD maximize button, SSD title-bar double-click, or xdg/foreign-toplevel set_maximized) propagates to every window connected via snap adjacency. Keybinding/gesture fit is unaffected — bind `fit-window-snapped` explicitly if you want cluster-aware fit there too.
 
-Mouse bindings: "Modifier+...+Trigger" = "action" Context-aware: on-window, on-canvas, anywhere. Specific context checked first, then "anywhere" as fallback. Click-to-focus and SSD decoration clicks are always hardcoded. Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll Merges with defaults. Use "none" to unbind.
+Mouse bindings: "Modifier+...+Trigger" = "action" Context-aware: on-window, on-canvas, anywhere. Specific context checked first, then "anywhere" as fallback. Click-to-focus and SSD decoration clicks are always hardcoded. Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll, wheel-up, wheel-down. The wheel-up/wheel-down triggers fire once per discrete wheel notch and can run any action, e.g. volume on mod+shift+scroll. Merges with defaults. Use "none" to unbind.
 
 Mouse actions: move-window, move-snapped-windows, resize-window, resize-window-snapped, pan-viewport, zoom, center-nearest Any keyboard action also works for button triggers: exec, close-window, toggle-fullscreen, etc.
 
