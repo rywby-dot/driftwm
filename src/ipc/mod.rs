@@ -258,8 +258,8 @@ fn cmd_focus(arg: Option<String>, state: &mut DriftWm) -> Reply {
         Some(target) => {
             let target = target.to_lowercase();
             let found = state
-                .space
-                .elements()
+                .stage
+                .windows()
                 .find(|w| {
                     !w.is_widget()
                         && w.app_id_or_class()

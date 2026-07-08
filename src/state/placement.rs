@@ -289,8 +289,8 @@ impl DriftWm {
             let dominated = self.stage.windows().any(|w| {
                 w != skip
                     && self
-                        .space
-                        .element_location(w)
+                        .stage
+                        .position_of(w)
                         .is_some_and(|loc| (loc.x - pos.0).abs() <= 2 && (loc.y - pos.1).abs() <= 2)
             });
             if !dominated {

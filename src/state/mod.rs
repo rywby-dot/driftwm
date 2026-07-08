@@ -358,10 +358,14 @@ pub struct DriftWm {
 
     /// Source of truth for the window list, z-order, positions, focus
     /// history / MRU cycle, fullscreen membership, and fit state. `space`
-    /// mirrors it for rendering — mutate both together through
-    /// [`Self::map_window`] / [`Self::raise_window`] / [`Self::unmap_window`]
-    /// and the stage-backed methods.
+    /// mirrors it — mutate both together through [`Self::map_window`] /
+    /// [`Self::raise_window`] / [`Self::unmap_window`] and the stage-backed
+    /// methods.
     pub stage: driftwm::stage::Stage<Window>,
+    /// Mirror of the stage with two remaining jobs: the output registry
+    /// (`map_output` / `outputs` / `output_geometry`) and `Space::refresh`,
+    /// which sends clients `wl_surface.enter`/`leave` from element positions.
+    /// Never read window state from it — a clippy lint enforces this.
     pub space: Space<Window>,
     pub popups: PopupManager,
 
@@ -733,8 +737,8 @@ impl DriftWm {
     }
 
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(surface))
             .cloned()
     }
@@ -745,8 +749,8 @@ impl DriftWm {
     pub fn topmost_modal_child(&self, window: &Window) -> Option<Window> {
         let parent_surface = window.wl_surface()?;
         let child = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .rfind(|w| w.parent_surface().as_ref() == Some(&*parent_surface) && w.is_modal())
             .cloned()?;
         self.topmost_modal_child_inner(&child, 9).or(Some(child))
@@ -758,8 +762,8 @@ impl DriftWm {
         }
         let parent_surface = window.wl_surface()?;
         let child = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .rfind(|w| w.parent_surface().as_ref() == Some(&*parent_surface) && w.is_modal())
             .cloned()?;
         self.topmost_modal_child_inner(&child, depth - 1)
@@ -1639,8 +1643,8 @@ impl DriftWm {
     pub fn focused_window(&self) -> Option<Window> {
         let keyboard = self.seat.get_keyboard()?;
         let focus = keyboard.current_focus()?;
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&focus.0))
             .cloned()
     }
@@ -1728,6 +1732,7 @@ impl DriftWm {
     /// entry must belong to a live window. Any mismatch is a routing bug —
     /// some mutation bypassed the stage wrappers.
     #[cfg(debug_assertions)]
+    #[allow(clippy::disallowed_methods)] // comparing the two stores IS this function
     pub fn verify_stage_parity(&self) {
         self.stage.verify_invariants();
 

@@ -94,8 +94,8 @@ fn window_origin_for_surface(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<Point<f64, smithay::utils::Logical>> {
     let window = state
-        .space
-        .elements()
+        .stage
+        .windows()
         .find(|w| w.wl_surface().as_deref() == Some(surface))?;
     Some(state.stage.position_of(window)?.to_f64())
 }

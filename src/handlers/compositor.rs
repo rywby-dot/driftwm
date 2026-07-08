@@ -217,8 +217,8 @@ impl CompositorHandler for DriftWm {
                 root = parent;
             }
             let window = self
-                .space
-                .elements()
+                .stage
+                .windows()
                 .find(|w| w.wl_surface().as_deref() == Some(&root))
                 .cloned();
             if let Some(window) = window {
@@ -638,8 +638,8 @@ fn ensure_initial_configure(
     state: &DriftWm,
 ) {
     if let Some(window) = state
-        .space
-        .elements()
+        .stage
+        .windows()
         .find(|w| w.wl_surface().as_deref() == Some(surface))
     {
         let Some(toplevel) = window.toplevel() else {
@@ -920,8 +920,8 @@ impl DriftWm {
 
         let gap = self.config.snap_gap;
         let others: Vec<(smithay::desktop::Window, driftwm::layout::snap::SnapRect)> = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .filter(|w| *w != window)
             .filter_map(|w| self.snap_rect_for(w).map(|r| (w.clone(), r)))
             .collect();

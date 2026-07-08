@@ -232,8 +232,8 @@ impl DriftWm {
     /// Every non-widget window with its `SnapRect`. Feeds `cluster_of` at
     /// drag start; BFS needs `Window` identity, not surface.
     pub fn all_windows_with_snap_rects(&self) -> Vec<(Window, driftwm::layout::snap::SnapRect)> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .filter_map(|w| self.snap_rect_for(w).map(|rect| (w.clone(), rect)))
             .collect()
     }

@@ -180,8 +180,8 @@ impl XdgShellHandler for DriftWm {
             return;
         }
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -204,8 +204,8 @@ impl XdgShellHandler for DriftWm {
             return;
         }
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -217,8 +217,8 @@ impl XdgShellHandler for DriftWm {
         let wl_surface = surface.wl_surface().clone();
         self.pending_fit.remove(&wl_surface);
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -242,8 +242,8 @@ impl XdgShellHandler for DriftWm {
         let wl_surface = surface.wl_surface().clone();
         // Collect first to avoid holding an immutable borrow on space
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         // Restore the per-output camera/zoom first if the destroyed window
@@ -377,8 +377,8 @@ impl XdgShellHandler for DriftWm {
             return;
         }
         let Some(window) = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned()
         else {
@@ -469,8 +469,8 @@ impl XdgShellHandler for DriftWm {
             return;
         }
         let Some(window) = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned()
         else {
@@ -612,8 +612,8 @@ impl DriftWm {
         }
 
         let is_window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .any(|w| w.wl_surface().as_deref() == Some(root));
         if !is_window {
             return true;
@@ -639,8 +639,8 @@ impl DriftWm {
         // the output bounds relative to the popup's toplevel.
         let active_output = self.active_output();
         let target = if let Some(window) = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&root))
         {
             // Parent is an xdg window — target is the *visible canvas area* in

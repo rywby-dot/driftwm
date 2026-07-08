@@ -117,8 +117,8 @@ impl DriftWm {
                 } else {
                     let center = self.viewport_center_canvas();
                     let closest = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| self.is_canvas_window(w))
                         .min_by(|a, b| {
                             let dist = |w: &smithay::desktop::Window| {
@@ -181,8 +181,8 @@ impl DriftWm {
                 };
 
                 let windows = self
-                    .space
-                    .elements()
+                    .stage
+                    .windows()
                     .filter(|w| self.is_canvas_window(w))
                     .map(|w| {
                         let loc = self.stage.position_of(w).unwrap_or_default();
@@ -321,8 +321,8 @@ impl DriftWm {
                     // toggled back
                 } else {
                     let windows = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| self.is_canvas_window(w))
                         .map(|w| {
                             let loc = self.stage.position_of(w).unwrap_or_default();
@@ -355,8 +355,8 @@ impl DriftWm {
                         self.config.snap_gap,
                     );
                     let members = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| cluster.contains(w))
                         .map(|w| {
                             let loc = self.stage.position_of(w).unwrap_or_default();

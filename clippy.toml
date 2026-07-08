@@ -6,4 +6,11 @@ disallowed-methods = [
     { path = "smithay::desktop::space::Space::lower_element", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
     { path = "smithay::desktop::space::Space::relocate_element", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
     { path = "smithay::desktop::space::Space::unmap_elem", reason = "mutate through DriftWm::unmap_window so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::elements", reason = "read window state from the stage (stage.windows) — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::elements_for_output", reason = "read window state from the stage — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::element_location", reason = "read window state from the stage (stage.position_of) — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::element_bbox", reason = "read window state from the stage (DriftWm::window_bbox) — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::element_geometry", reason = "read window state from the stage — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::element_under", reason = "hit-test through DriftWm::element_under / element_under_raw — Space is a render mirror, see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::outputs_for_element", reason = "derive visibility from stage positions and visible_canvas_rect (zoom-aware) — see DriftWm::mark_dirty_for_surface" },
 ]

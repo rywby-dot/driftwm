@@ -273,8 +273,8 @@ impl XdgActivationHandler for DriftWm {
             return;
         }
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&surface))
             .cloned();
         if let Some(window) = window {
@@ -344,8 +344,8 @@ impl PointerConstraintsHandler for DriftWm {
         // delivered during the gap reach the surface with stale surface-local
         // coordinates and the game snaps the camera back.
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(surface))
             .cloned();
         if let Some(window) = window
@@ -433,8 +433,8 @@ impl InputMethodHandler for DriftWm {
     fn popup_repositioned(&mut self, _surface: PopupSurface) {}
 
     fn parent_geometry(&self, parent: &WlSurface) -> smithay::utils::Rectangle<i32, Logical> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .find_map(|window| {
                 (window.wl_surface().as_deref() == Some(parent)).then(|| window.geometry())
             })
@@ -564,8 +564,8 @@ impl XdgDecorationHandler for DriftWm {
         if create_titlebar {
             self.pending_ssd.insert(wl_surface.id());
             let window = self
-                .space
-                .elements()
+                .stage
+                .windows()
                 .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
                 .cloned();
             if let Some(window) = window {
@@ -614,8 +614,8 @@ impl ForeignToplevelHandler for DriftWm {
 
     fn activate(&mut self, wl_surface: WlSurface) {
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -625,8 +625,8 @@ impl ForeignToplevelHandler for DriftWm {
 
     fn close(&mut self, wl_surface: WlSurface) {
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -641,8 +641,8 @@ impl ForeignToplevelHandler for DriftWm {
             return;
         }
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -664,8 +664,8 @@ impl ForeignToplevelHandler for DriftWm {
             return;
         }
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -676,8 +676,8 @@ impl ForeignToplevelHandler for DriftWm {
     fn unset_maximized(&mut self, wl_surface: WlSurface) {
         self.pending_fit.remove(&wl_surface);
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
         if let Some(window) = window {
@@ -798,8 +798,8 @@ impl ToplevelCaptureSourceHandler for DriftWm {
         let kind = match driftwm::protocols::foreign_toplevel::surface_for_ext_handle(&toplevel) {
             Some(surface) => {
                 let initial_size = self
-                    .space
-                    .elements()
+                    .stage
+                    .windows()
                     .find(|w| w.wl_surface().as_deref() == Some(&surface))
                     .map(|w| {
                         let geo = w.geometry().size;

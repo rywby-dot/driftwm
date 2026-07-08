@@ -639,8 +639,8 @@ pub fn render_toplevel_captures(state: &mut crate::state::DriftWm, renderer: &mu
 
         // Locate the window. If it's gone or has zero geometry, fail the frame.
         let window = state
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(surface))
             .cloned();
         let Some(window) = window else {

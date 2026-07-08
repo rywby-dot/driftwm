@@ -197,11 +197,7 @@ impl DriftWm {
                 );
             }
             let canvas_pos = pointer.current_location();
-            let origin = self
-                .space
-                .element_location(window)
-                .unwrap_or_default()
-                .to_f64();
+            let origin = self.stage.position_of(window).unwrap_or_default().to_f64();
             pointer.motion(
                 self,
                 Some((FocusTarget(wl_surface.into_owned()), origin)),

@@ -104,8 +104,8 @@ impl DriftWm {
     pub fn min_zoom(&self) -> f64 {
         let viewport = self.get_usable_area().size;
         driftwm::canvas::dynamic_min_zoom(
-            self.space
-                .elements()
+            self.stage
+                .windows()
                 .filter(|w| self.is_canvas_window(w))
                 .map(|w| {
                     let loc = self.stage.position_of(w).unwrap_or_default();
@@ -122,8 +122,8 @@ impl DriftWm {
     /// Skips windows with `skip_taskbar` rule.
     pub fn update_focus_history(&mut self, surface: &WlSurface) {
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| focus_belongs_to_window(surface, w))
             .cloned();
         if let Some(window) = window {
@@ -213,8 +213,8 @@ impl DriftWm {
         output: &Output,
         exclude: &Window,
     ) -> Option<Window> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .filter(|w| *w != exclude && self.window_intersects_viewport_on(w, output))
             .min_by(|a, b| {
                 let dist = |w: &Window| {

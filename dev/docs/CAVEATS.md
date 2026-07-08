@@ -2,9 +2,11 @@
 
 Things to keep in mind as the codebase grows.
 
-## Never write `Space` directly — go through the stage wrappers
+## Never touch `Space` directly — go through the stage
 
-The stage (`src/stage/`) is the source of truth for the window list, z-order, positions, focus history, fullscreen membership, pin-to-screen membership, and fit state; `smithay::desktop::Space` is a write-through mirror kept for rendering. Every mutation must go through `DriftWm::map_window` / `raise_window` / `unmap_window` (or a paired stage+space write, as in `ClusterResizeSnapshot::apply_member_shifts`). A direct `space.map_element` silently desyncs the two stores: policy decisions (focus-after-close, MRU cycling, cluster math, fullscreen restore) then run on stale data. A clippy `disallowed-methods` lint (see `clippy.toml`) rejects direct calls, and debug builds assert stage/space parity every frame in `post_render` — a panic there means a mutation bypassed the wrappers. This dual-store phase ends when the read-model callsites move to the stage and `Space` is demoted to a pure render mirror.
+The stage (`src/stage/`) is the source of truth for the window list, z-order, positions, focus history, fullscreen membership, pin-to-screen membership, and fit state. Read window state from it (`stage.windows()`, `stage.position_of`, `DriftWm::element_under` / `window_bbox`); mutate through `DriftWm::map_window` / `raise_window` / `unmap_window` (or a paired stage+space write, as in `ClusterResizeSnapshot::apply_member_shifts`). A clippy `disallowed-methods` lint (see `clippy.toml`) rejects both direct `Space` writes and direct `Space` element reads, and debug builds assert stage/space parity every frame in `post_render` — a panic there means a mutation bypassed the wrappers.
+
+`Space` survives as a mirror with two jobs: the output registry (`map_output` / `outputs` / `output_geometry`) and `Space::refresh`, which sends clients `wl_surface.enter`/`leave` from element positions — protocol-visible behavior, which is why the mirror writes and the parity assert stay. Both disappear only when per-window output membership moves onto the stage (the fullscreen membership-isolation follow-up in `stage-refactor-plan.md`).
 
 ## Never block the event loop
 

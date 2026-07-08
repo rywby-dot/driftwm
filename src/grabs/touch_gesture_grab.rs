@@ -433,8 +433,7 @@ impl TouchGestureGrab {
         cluster: bool,
     ) -> bool {
         let Some((window, loc)) = data
-            .space
-            .element_under(event.location)
+            .element_under_raw(event.location)
             .map(|(w, l)| (w.clone(), l))
         else {
             return false;
@@ -487,11 +486,7 @@ impl TouchGestureGrab {
         // the landing point, so the 3×3 cell is unchanged.
         let (camera, zoom) = self.camera_zoom();
         let origin = screen_to_canvas(ScreenPos(self.centroid()), camera, zoom).0;
-        let Some((window, _)) = data
-            .space
-            .element_under(origin)
-            .map(|(w, l)| (w.clone(), l))
-        else {
+        let Some((window, _)) = data.element_under_raw(origin).map(|(w, l)| (w.clone(), l)) else {
             return false;
         };
         if !data.is_canvas_window(&window) {
