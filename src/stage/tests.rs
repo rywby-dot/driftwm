@@ -646,12 +646,16 @@ mod harness {
                     self.fit_expect.remove(&w.label());
                 }
                 Op::CrashWindow { idx } => {
-                    // Crash path: CompositorHandler::destroyed purges the
-                    // history; Space::refresh (mirrored by retain_alive) drops
-                    // the window from the z-order.
+                    // Crash path: the destroy handlers purge the history and
+                    // reap any fullscreen entry the dead window left behind;
+                    // Space::refresh (mirrored by retain_alive) drops the
+                    // window from the z-order.
                     let Some(w) = self.pick(*idx) else { return };
                     w.kill();
                     self.stage.remove_from_history_matching(|x| x == &w);
+                    if let Some(out) = self.stage.fullscreen_output_of(&w).map(str::to_owned) {
+                        self.stage.take_fullscreen(&out);
+                    }
                     self.stage.retain_alive();
                 }
                 Op::SetParent { child, parent } => {

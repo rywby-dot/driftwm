@@ -51,6 +51,7 @@ impl CompositorHandler for DriftWm {
             .retain(|_, ls| ls.wl_surface() != surface);
         self.stage
             .remove_from_history_matching(|w| w.wl_surface().as_deref() == Some(surface));
+        self.reap_dead_fullscreen();
     }
 
     fn new_surface(

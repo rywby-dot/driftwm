@@ -246,26 +246,27 @@ impl XdgShellHandler for DriftWm {
             .elements()
             .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
             .cloned();
-        if let Some(ref window) = window {
-            // Restore the per-output camera/zoom first if the destroyed
-            // window was fullscreen — the focus chooser below evaluates
-            // visibility against the home output's current camera, which is
-            // still parked at the fullscreen window's position until this
-            // runs.
-            let fs_output = self
-                .stage
-                .fullscreen_output_of(window)
-                .map(str::to_owned)
-                .and_then(|name| self.output_by_name(&name));
-            if let Some(ref output) = fs_output {
-                self.stage.take_fullscreen(&output.name());
-                if let Some(ret) = output_state(output).fullscreen_return.take() {
-                    output_state(output).camera = ret.camera;
-                    output_state(output).zoom = ret.zoom;
-                    self.update_output_from_camera();
-                }
+        // Restore the per-output camera/zoom first if the destroyed window
+        // was fullscreen. Keyed by surface, not the window lookup above: on
+        // the crash path `Space::refresh` may already have dropped the dead
+        // window, and skipping this would leak the fullscreen entry and leave
+        // the camera parked forever. (The focus chooser below also evaluates
+        // visibility against the home output's camera, which stays parked
+        // until this runs.)
+        let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
+        if let Some(ref output) = fs_output {
+            self.stage.take_fullscreen(&output.name());
+            if let Some(ret) = output_state(output).fullscreen_return.take() {
+                output_state(output).camera = ret.camera;
+                output_state(output).zoom = ret.zoom;
+                self.update_output_from_camera();
             }
+        }
+        // Belt and suspenders: a dead window whose surface no longer resolves
+        // can't match above; sweep any fullscreen entry it left behind.
+        self.reap_dead_fullscreen();
 
+        if let Some(ref window) = window {
             // Pick a window to follow when the destroyed one was focused.
             // Priority: explicit parent (xdg_toplevel.set_parent), then the
             // MRU history entry that's spatially related (cluster member or

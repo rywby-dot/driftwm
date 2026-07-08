@@ -273,6 +273,37 @@ impl DriftWm {
         }
     }
 
+    /// Tear down any fullscreen entry whose window is dead, restoring that
+    /// output's camera/zoom. The exit paths handle live windows; this covers
+    /// a client that crashed while fullscreen, whose entry would otherwise
+    /// keep the camera parked forever.
+    pub fn reap_dead_fullscreen(&mut self) {
+        use smithay::utils::IsAlive;
+        let dead: Vec<String> = self
+            .stage
+            .fullscreen_entries()
+            .filter(|(_, fs)| !fs.window.alive())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &dead {
+            self.stage.take_fullscreen(name);
+            let Some(output) = self.output_by_name(name) else {
+                continue;
+            };
+            // Two statements, not a let-chain: a chain scrutinee's MutexGuard
+            // lives to the end of the whole `if`, deadlocking the re-lock.
+            let ret = super::output_state(&output).fullscreen_return.take();
+            if let Some(ret) = ret {
+                let mut os = super::output_state(&output);
+                os.camera = ret.camera;
+                os.zoom = ret.zoom;
+            }
+        }
+        if !dead.is_empty() {
+            self.update_output_from_camera();
+        }
+    }
+
     /// Re-configure the fullscreen window (if any) on this output to the new
     /// viewport size after a mode change. Without this, a fullscreen game
     /// keeps rendering at the old resolution and leaves a stale strip until
