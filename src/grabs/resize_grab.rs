@@ -84,7 +84,8 @@ pub enum ResizeState {
         initial_window_location: Point<i32, Logical>,
         initial_window_size: Size<i32, Logical>,
         /// `Some` ⟹ pinned window: top/left-edge repositioning adjusts
-        /// `PinnedState.screen_pos` (output-relative) instead of the canvas loc.
+        /// the pin site's `screen_pos` (output-relative) instead of the
+        /// canvas loc.
         initial_screen_pos: Option<Point<i32, Logical>>,
     },
     WaitingForLastCommit {

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use crate::grabs::{ResizeState, has_left, has_top};
 use crate::handlers::layer_shell::LayerDestroyedMarker;
-use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter, PinnedState};
+use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter};
 use driftwm::window_ext::WindowExt;
 use smithay::desktop::layer_map_for_output;
 use smithay::utils::{Logical, Point, Rectangle};
@@ -366,9 +366,14 @@ impl CompositorHandler for DriftWm {
                         .0
                         .to_i32_round();
                         let activate = applied.as_ref().is_none_or(|a| !a.widget);
-                        self.pinned
-                            .insert(root.id(), PinnedState { output, screen_pos });
                         self.map_window(window.clone(), canvas, activate);
+                        self.stage.set_pin(
+                            &window,
+                            driftwm::stage::PinnedSite {
+                                output: output.name(),
+                                screen_pos,
+                            },
+                        );
                     } else if has_size && !is_fullscreen && !self.stage.is_fit(&window) {
                         // Fullscreen / fit windows already sit at their final
                         // location — skip positioning so bar-shifted
@@ -542,7 +547,7 @@ impl CompositorHandler for DriftWm {
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
-                            && !self.pinned.contains_key(&root.id())
+                            && !self.stage.is_pinned(&window)
                         {
                             let reset = self.config.zoom_reset_on_new_window;
                             // Cursor mode is "stay put" by default; only
@@ -813,23 +818,32 @@ impl DriftWm {
             if has_left(edges) {
                 new_sp.x = initial_screen_pos.x + (initial_window_size.w - current_geo.size.w);
             }
-            let output = self.pinned.get_mut(&surface.id()).map(|p| {
-                p.screen_pos = new_sp;
-                p.output.clone()
-            });
-            if let Some(output) = output {
-                let (camera, zoom) = {
-                    let os = crate::state::output_state(&output);
-                    (os.camera, os.zoom)
-                };
-                let canvas = driftwm::canvas::screen_to_canvas(
-                    driftwm::canvas::ScreenPos(new_sp.to_f64()),
-                    camera,
-                    zoom,
-                )
-                .0
-                .to_i32_round();
-                self.map_window(window.clone(), canvas, false);
+            let output_name = self.stage.pin_of(window).map(|site| site.output.clone());
+            if let Some(name) = output_name {
+                self.stage.set_pin(
+                    window,
+                    driftwm::stage::PinnedSite {
+                        output: name.clone(),
+                        screen_pos: new_sp,
+                    },
+                );
+                // Output gone: keep the screen_pos update, skip only the
+                // loc re-anchor — the tail below must still run to reset
+                // ResizeState.
+                if let Some(output) = self.output_by_name(&name) {
+                    let (camera, zoom) = {
+                        let os = crate::state::output_state(&output);
+                        (os.camera, os.zoom)
+                    };
+                    let canvas = driftwm::canvas::screen_to_canvas(
+                        driftwm::canvas::ScreenPos(new_sp.to_f64()),
+                        camera,
+                        zoom,
+                    )
+                    .0
+                    .to_i32_round();
+                    self.map_window(window.clone(), canvas, false);
+                }
             }
         } else {
             let mut new_loc = initial_window_location;

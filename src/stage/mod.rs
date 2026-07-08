@@ -1,8 +1,9 @@
 //! Smithay-free source of truth for window state: the window list, z-order,
 //! per-window canvas position, focus history / MRU cycle, fullscreen
-//! membership, and fit state. `smithay::desktop::Space` mirrors this for
-//! rendering; `DriftWm` wrapper methods keep the two in sync (write-through)
-//! and a debug end-of-tick check asserts parity.
+//! membership, pin-to-screen membership, and fit state.
+//! `smithay::desktop::Space` mirrors this for rendering; `DriftWm` wrapper
+//! methods keep the two in sync (write-through) and a debug end-of-tick check
+//! asserts parity.
 //!
 //! The stage never touches protocol state (configures, buffers, damage). It
 //! answers queries and records decisions; the compositor applies the effects
@@ -25,12 +26,22 @@ use std::collections::BTreeMap;
 pub struct ElementId(pub u64);
 
 /// Fullscreen membership plus the pre-fullscreen geometry restored on exit.
-/// The viewport half of fullscreen state (saved camera/zoom, pin state) stays
-/// on `DriftWm` — cameras are not stage domain.
+/// The viewport half of fullscreen state (saved camera/zoom) stays on
+/// `DriftWm`'s per-output state — cameras are not stage domain.
 pub struct FullscreenEntry<W> {
     pub window: W,
     pub saved_location: Point<i32, Logical>,
     pub saved_size: Size<i32, Logical>,
+}
+
+/// Screen-space pin site for a window pinned to one output (the
+/// `pinned_to_screen` rule or the pin toggle): output by name, plus the
+/// output-relative top-left (Y-down, pre-zoom). Rendering, hit-testing, and
+/// capture route through this instead of the camera transform.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedSite {
+    pub output: String,
+    pub screen_pos: Point<i32, Logical>,
 }
 
 struct Entry<W> {
@@ -43,6 +54,8 @@ struct Entry<W> {
     /// geometry because some clients (Chromium) shrink their reported
     /// geometry after each sized configure.
     restore_size: Option<Size<i32, Logical>>,
+    /// `Some` while the window is pinned to an output's screen space.
+    pinned: Option<PinnedSite>,
 }
 
 pub struct Stage<W: StageElement> {
@@ -98,6 +111,7 @@ impl<W: StageElement> Stage<W> {
                 position,
                 fit_saved_size: None,
                 restore_size: None,
+                pinned: None,
             });
         }
     }
@@ -365,6 +379,35 @@ impl<W: StageElement> Stage<W> {
         }
     }
 
+    pub fn set_pin(&mut self, window: &W, site: PinnedSite) {
+        if let Some(e) = self.entry_mut(window) {
+            e.pinned = Some(site);
+        }
+    }
+
+    pub fn take_pin(&mut self, window: &W) -> Option<PinnedSite> {
+        self.entry_mut(window).and_then(|e| e.pinned.take())
+    }
+
+    pub fn pin_of(&self, window: &W) -> Option<&PinnedSite> {
+        self.entry(window).and_then(|e| e.pinned.as_ref())
+    }
+
+    pub fn is_pinned(&self, window: &W) -> bool {
+        self.entry(window).is_some_and(|e| e.pinned.is_some())
+    }
+
+    pub fn has_pinned(&self) -> bool {
+        self.entries.iter().any(|e| e.pinned.is_some())
+    }
+
+    /// Pinned windows with their sites, in z-order bottom → top.
+    pub fn pinned_windows(&self) -> impl Iterator<Item = (&W, &PinnedSite)> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.pinned.as_ref().map(|site| (&e.window, site)))
+    }
+
     /// Assert structural invariants. Panics on violation — fix the stage bug,
     /// never lower the invariant. Membership checks are scoped to live
     /// windows: a dead window may linger in the focus history until its
@@ -422,6 +465,16 @@ impl<W: StageElement> Stage<W> {
                 assert!(
                     saved.w > 0 && saved.h > 0,
                     "fit window has empty saved size"
+                );
+            }
+            if e.pinned.is_some() {
+                assert!(
+                    !self.focus_history.contains(&e.window),
+                    "pinned window in focus history"
+                );
+                assert!(
+                    !seen_fullscreen.contains(&&e.window),
+                    "window both pinned and fullscreen"
                 );
             }
         }

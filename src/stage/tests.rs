@@ -385,7 +385,7 @@ mod harness {
     use crate::layout::cluster::{self, ResizeClassification, Side};
     use crate::layout::snap::SnapRect;
     use crate::stage::mock::{SentConfigure, TestWindow};
-    use crate::stage::{Stage, StageElement};
+    use crate::stage::{PinnedSite, Stage, StageElement};
     use crate::window_ext::WindowExt;
 
     const OUTPUTS: [&str; 3] = ["OUT-0", "OUT-1", "OUT-2"];
@@ -442,6 +442,10 @@ mod harness {
         ExitFullscreen {
             output: usize,
         },
+        TogglePin {
+            idx: usize,
+            output: usize,
+        },
         ToggleFit {
             idx: usize,
         },
@@ -483,6 +487,8 @@ mod harness {
             2 => (idx.clone(), 0..3usize)
                 .prop_map(|(idx, output)| Op::EnterFullscreen { idx, output }),
             2 => (0..3usize).prop_map(|output| Op::ExitFullscreen { output }),
+            2 => (idx.clone(), 0..3usize)
+                .prop_map(|(idx, output)| Op::TogglePin { idx, output }),
             2 => idx.clone().prop_map(|idx| Op::ToggleFit { idx }),
             1 => (idx.clone(), 50..500i32, 50..500i32)
                 .prop_map(|(idx, w, h)| Op::ResizeGrabEnd { idx, w, h }),
@@ -499,12 +505,15 @@ mod harness {
         windows: Vec<TestWindow>,
         /// Expected pre-fit size per window label, for the restore assertion.
         fit_expect: HashMap<u64, Size<i32, Logical>>,
+        /// Pin site saved when a pinned window fullscreens, restored on exit —
+        /// the model of `FullscreenReturn::pinned`.
+        pin_return: HashMap<String, PinnedSite>,
         next_label: u64,
     }
 
     /// Plain window footprint (no SSD bar / border in the model).
     fn rect_of(stage: &Stage<TestWindow>, w: &TestWindow) -> Option<SnapRect> {
-        if w.is_widget() || stage.is_fullscreen(w) {
+        if w.is_widget() || stage.is_fullscreen(w) || stage.is_pinned(w) {
             return None;
         }
         let pos = stage.position_of(w)?;
@@ -571,6 +580,7 @@ mod harness {
                 stage: Stage::new(),
                 windows: Vec::new(),
                 fit_expect: HashMap::new(),
+                pin_return: HashMap::new(),
                 next_label: 0,
             }
         }
@@ -605,16 +615,45 @@ mod harness {
             }
 
             let focused = topmost_modal_child(&self.stage, w).unwrap_or_else(|| w.clone());
-            if self.stage.cycle_state().is_none() && !focused.is_widget() && !focused.is_modal() {
+            if self.stage.cycle_state().is_none()
+                && !focused.is_widget()
+                && !focused.is_modal()
+                && !self.stage.is_pinned(&focused)
+            {
                 self.stage.push_focus(&focused);
             }
         }
 
-        /// Mirrors `DriftWm::exit_fullscreen_on`'s stage half.
+        /// Mirrors `DriftWm::exit_fullscreen_on`'s stage half, including the
+        /// pin restore and the pinned-loc sync (which re-maps every pinned
+        /// window, raising it) that follows.
         fn exit_fullscreen(&mut self, output: &str) {
             if let Some(entry) = self.stage.take_fullscreen(output) {
                 entry.window.exit_fullscreen_configure(entry.saved_size);
                 self.stage.map(entry.window.clone(), entry.saved_location);
+                if let Some(site) = self.pin_return.remove(output) {
+                    // The window may have entered the MRU while fullscreen;
+                    // re-pinning takes it back out (as the exit path does).
+                    self.stage.drop_from_focus_history(&entry.window);
+                    self.stage.set_pin(&entry.window, site);
+                    self.sync_pinned();
+                }
+            }
+        }
+
+        /// Mirrors `sync_pinned_locs`: re-map every pinned window in z-order
+        /// (each map raises, so relative pinned stacking is preserved).
+        fn sync_pinned(&mut self) {
+            let pinned: Vec<TestWindow> = self
+                .stage
+                .pinned_windows()
+                .map(|(w, _)| w.clone())
+                .collect();
+            for w in pinned {
+                let Some(pos) = self.stage.position_of(&w) else {
+                    continue;
+                };
+                self.stage.map(w, pos);
             }
         }
 
@@ -637,9 +676,12 @@ mod harness {
                 }
                 Op::CloseWindow { idx } => {
                     let Some(w) = self.pick(*idx) else { return };
-                    // toplevel_destroyed: fullscreen teardown first, then unmap.
+                    // toplevel_destroyed: fullscreen teardown first, then
+                    // unmap. The whole return payload is consumed — including
+                    // a saved pin site, which dies with the window.
                     if let Some(out) = self.stage.fullscreen_output_of(&w).map(str::to_owned) {
                         self.stage.take_fullscreen(&out);
+                        self.pin_return.remove(&out);
                     }
                     w.kill();
                     self.stage.remove(&w);
@@ -655,6 +697,7 @@ mod harness {
                     self.stage.remove_from_history_matching(|x| x == &w);
                     if let Some(out) = self.stage.fullscreen_output_of(&w).map(str::to_owned) {
                         self.stage.take_fullscreen(&out);
+                        self.pin_return.remove(&out);
                     }
                     self.stage.retain_alive();
                 }
@@ -688,7 +731,7 @@ mod harness {
                 Op::MoveWindow { idx, dx, dy } => {
                     // NudgeWindow: canvas windows only.
                     let Some(w) = self.pick(*idx) else { return };
-                    if w.is_widget() || self.stage.is_fullscreen(&w) {
+                    if w.is_widget() || self.stage.is_fullscreen(&w) || self.stage.is_pinned(&w) {
                         return;
                     }
                     let Some(pos) = self.stage.position_of(&w) else {
@@ -706,7 +749,11 @@ mod harness {
                     let (Some(w), Some(a)) = (self.pick(*idx), self.pick(*anchor)) else {
                         return;
                     };
-                    if w == a || w.is_widget() || self.stage.is_fullscreen(&w) {
+                    if w == a
+                        || w.is_widget()
+                        || self.stage.is_fullscreen(&w)
+                        || self.stage.is_pinned(&w)
+                    {
                         return;
                     }
                     let Some(anchor_rect) = rect_of(&self.stage, &a) else {
@@ -775,6 +822,10 @@ mod harness {
                             .unwrap_or_else(|| StageElement::size(&w))
                     };
                     let saved_location = self.stage.position_of(&w).unwrap_or_default();
+                    // Unpin into fullscreen; the exit restores the site.
+                    if let Some(site) = self.stage.take_pin(&w) {
+                        self.pin_return.insert(key.to_string(), site);
+                    }
                     self.stage
                         .set_fullscreen(key, w.clone(), saved_location, saved_size);
                     w.enter_fullscreen_configure(Size::from((1920, 1080)));
@@ -791,7 +842,11 @@ mod harness {
                     // windows out. The client-initiated maximize path has no
                     // such guard — a quirk this harness deliberately does
                     // not cover.
-                    if w.is_widget() || self.stage.is_fullscreen(&w) || !self.stage.contains(&w) {
+                    if w.is_widget()
+                        || self.stage.is_fullscreen(&w)
+                        || self.stage.is_pinned(&w)
+                        || !self.stage.contains(&w)
+                    {
                         return;
                     }
                     let Some(pos) = self.stage.position_of(&w) else {
@@ -832,9 +887,31 @@ mod harness {
                     w.set_size(Size::from((*nw, *nh)));
                     self.stage.set_restore_size(&w, Size::from((*nw, *nh)));
                 }
+                Op::TogglePin { idx, output } => {
+                    // Mirrors toggle_pin_to_screen: unpin remaps at the
+                    // derived canvas spot (raising); pin drops the window from
+                    // the MRU history first.
+                    let Some(w) = self.pick(*idx) else { return };
+                    if !self.stage.contains(&w) || self.stage.is_fullscreen(&w) {
+                        return;
+                    }
+                    if self.stage.take_pin(&w).is_some() {
+                        let pos = self.stage.position_of(&w).unwrap_or_default();
+                        self.stage.map(w, pos);
+                    } else {
+                        self.stage.drop_from_focus_history(&w);
+                        self.stage.set_pin(
+                            &w,
+                            PinnedSite {
+                                output: OUTPUTS[output % OUTPUTS.len()].to_string(),
+                                screen_pos: Point::from((10, 10)),
+                            },
+                        );
+                    }
+                }
                 Op::MoveCluster { idx, dx, dy } => {
                     let Some(w) = self.pick(*idx) else { return };
-                    if w.is_widget() || self.stage.is_fullscreen(&w) {
+                    if w.is_widget() || self.stage.is_fullscreen(&w) || self.stage.is_pinned(&w) {
                         return;
                     }
                     let Some(primary_pos) = self.stage.position_of(&w) else {
@@ -889,7 +966,7 @@ mod harness {
         #[allow(clippy::mutable_key_type)]
         fn resize_cluster(&mut self, idx: usize, side_sel: usize, delta: i32) {
             let Some(w) = self.pick(idx) else { return };
-            if w.is_widget() || self.stage.is_fullscreen(&w) {
+            if w.is_widget() || self.stage.is_fullscreen(&w) || self.stage.is_pinned(&w) {
                 return;
             }
             let Some(primary_rect) = rect_of(&self.stage, &w) else {

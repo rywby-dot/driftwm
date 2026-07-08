@@ -1,6 +1,5 @@
 use smithay::{
     input::{keyboard::Layout, pointer::MotionEvent},
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, SERIAL_COUNTER, Size},
     wayland::seat::WaylandFocus,
 };
@@ -508,28 +507,27 @@ impl DriftWm {
 
     /// Toggle screen-pinning of the focused window. Pin/unpin keeps the window
     /// in the same on-screen position (no visual jump) and survives reload
-    /// (state lives in `self.pinned`, not the rules).
+    /// (state lives on the stage, not the rules).
     fn toggle_pin_to_screen(&mut self) {
-        let Some(window) = self.focused_window() else {
+        // Focus can linger on another output's fullscreen window (the guard in
+        // execute_action only exits the active output's); pinning it would mix
+        // two screen-space modes on one window.
+        let Some(window) = self
+            .focused_window()
+            .filter(|w| !self.is_window_fullscreen(w))
+        else {
             return;
         };
-        let Some(id) = window.wl_surface().map(|s| s.id()) else {
-            return;
-        };
-        if self.is_pinned(&window) {
+        if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
             // location at the current camera/zoom — no visual jump.
-            if let Some((output, screen_pos)) = self
-                .pinned
-                .get(&id)
-                .map(|p| (p.output.clone(), p.screen_pos))
-            {
+            if let Some(output) = self.output_by_name(&site.output) {
                 let (camera, zoom) = {
                     let os = crate::state::output_state(&output);
                     (os.camera, os.zoom)
                 };
                 let canvas = driftwm::canvas::screen_to_canvas(
-                    driftwm::canvas::ScreenPos(screen_pos.to_f64()),
+                    driftwm::canvas::ScreenPos(site.screen_pos.to_f64()),
                     camera,
                     zoom,
                 )
@@ -537,7 +535,6 @@ impl DriftWm {
                 .to_i32_round();
                 self.map_window(window.clone(), canvas, true);
             }
-            self.pinned.remove(&id);
         } else {
             // Pin at the window's current on-screen position on its output.
             let Some(output) = self.output_for_window(&window) else {
@@ -559,8 +556,13 @@ impl DriftWm {
             let screen_pos = Point::from((screen.x.round() as i32, screen.y.round() as i32));
             // Pinned windows are out of the focus cycle.
             self.stage.drop_from_focus_history(&window);
-            self.pinned
-                .insert(id, crate::state::PinnedState { output, screen_pos });
+            self.stage.set_pin(
+                &window,
+                driftwm::stage::PinnedSite {
+                    output: output.name(),
+                    screen_pos,
+                },
+            );
         }
         // The hit-test path changed (pinned vs canvas); recompute pointer focus.
         self.refresh_pointer_focus();

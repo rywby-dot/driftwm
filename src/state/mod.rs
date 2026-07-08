@@ -184,9 +184,9 @@ pub struct FullscreenReturn {
     pub camera: Point<f64, Logical>,
     pub zoom: f64,
     /// If the window was screen-pinned when it entered fullscreen, its pin
-    /// state, re-inserted on exit so fullscreen is a transparent round-trip
+    /// site, re-inserted on exit so fullscreen is a transparent round-trip
     /// (pinned → fullscreen → pinned) rather than a permanent unpin.
-    pub pinned: Option<PinnedState>,
+    pub pinned: Option<driftwm::stage::PinnedSite>,
 }
 
 pub struct PendingRecenter {
@@ -336,18 +336,6 @@ pub fn output_viewport_rect(output: &Output) -> Rectangle<i32, Logical> {
     )
 }
 
-/// Runtime state for a window pinned to one output's screen space (the
-/// `pinned_to_screen` rule or the `pin-to-screen` toggle). The window stays in
-/// `space` for focus/decorations/popups; rendering, hit-testing, and capture
-/// route through this instead of the camera transform. Source of truth for
-/// "is this window pinned" — `DriftWm::is_pinned`.
-#[derive(Clone)]
-pub struct PinnedState {
-    pub output: Output,
-    /// Output-relative top-left, Y-down (internal convention), pre-zoom.
-    pub screen_pos: Point<i32, Logical>,
-}
-
 /// An active xdg-popup grab and the toplevel/layer surface it is rooted on.
 /// Kept so focus changes can tear the grab down explicitly: smithay leaves the
 /// grab attached to the keyboard after the popup is gone, so without this the
@@ -399,9 +387,6 @@ pub struct DriftWm {
         crate::decorations::WindowDecoration,
     >,
     pub pending_ssd: HashSet<smithay::reexports::wayland_server::backend::ObjectId>,
-    /// Windows pinned to an output's screen space. Same lifetime as
-    /// `decorations` (keyed by surface `ObjectId`, cleaned on destroy).
-    pub pinned: HashMap<smithay::reexports::wayland_server::backend::ObjectId, PinnedState>,
     /// Supersample factor for SSD decoration buffers: `ceil` of the largest
     /// output scale. One buffer rendered at this density serves every output
     /// (downscaling stays crisp; only upscaling blurs).
@@ -721,7 +706,6 @@ impl DriftWm {
     pub fn cleanup_surface_state(&mut self, surface: &WlSurface) {
         let id = surface.id();
         self.decorations.remove(&id);
-        self.pinned.remove(&id);
         self.pending_ssd.remove(&id);
         self.pending_recenter.remove(&id);
         self.stable_snap_rects.remove(&id);
@@ -1288,8 +1272,8 @@ impl DriftWm {
     /// output if the window isn't visible on any.
     pub fn output_for_window(&self, window: &smithay::desktop::Window) -> Option<Output> {
         // A pinned window is fixed to one output regardless of canvas geometry.
-        if let Some(p) = window.wl_surface().and_then(|s| self.pinned.get(&s.id())) {
-            return Some(p.output.clone());
+        if let Some(site) = self.stage.pin_of(window) {
+            return self.output_by_name(&site.output);
         }
         let loc = self.space.element_location(window)?;
         let geo = window.geometry();
@@ -1314,9 +1298,7 @@ impl DriftWm {
 
     /// True if `window` is pinned to an output's screen space.
     pub fn is_pinned(&self, window: &Window) -> bool {
-        window
-            .wl_surface()
-            .is_some_and(|s| self.pinned.contains_key(&s.id()))
+        self.stage.is_pinned(window)
     }
 
     /// True if `window` is currently fullscreen on some output.
@@ -1382,17 +1364,12 @@ impl DriftWm {
         {
             return None;
         }
-        let pinned = window.wl_surface().and_then(|s| {
-            self.pinned
-                .get(&s.id())
-                .map(|p| (p.output.clone(), p.screen_pos))
-        });
-        match pinned {
-            Some((pin_output, screen_pos)) => match output {
-                Some(o) if *o == pin_output => Some((
+        match self.stage.pin_of(window) {
+            Some(site) => match output {
+                Some(o) if o.name() == site.output => Some((
                     Point::from((
-                        screen_pos.x as f64 - geom_loc.x as f64,
-                        screen_pos.y as f64 - geom_loc.y as f64,
+                        site.screen_pos.x as f64 - geom_loc.x as f64,
+                        site.screen_pos.y as f64 - geom_loc.y as f64,
                     )),
                     1.0,
                 )),
@@ -1544,29 +1521,24 @@ impl DriftWm {
     /// stacking and focus-raise intact. Only the canvas loc is touched —
     /// rendering and hit-testing still read `screen_pos`.
     fn sync_pinned_locs(&mut self) {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return;
         }
-        let pinned_windows: Vec<Window> = self
-            .space
-            .elements()
-            .filter(|w| self.is_pinned(w))
-            .cloned()
+        let pinned: Vec<(Window, driftwm::stage::PinnedSite)> = self
+            .stage
+            .pinned_windows()
+            .map(|(w, site)| (w.clone(), site.clone()))
             .collect();
-        for window in pinned_windows {
-            let Some(id) = window.wl_surface().map(|s| s.id()) else {
+        for (window, site) in pinned {
+            let Some(output) = self.output_by_name(&site.output) else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&id) else {
-                continue;
-            };
-            let screen_pos = p.screen_pos;
             let (camera, zoom) = {
-                let os = output_state(&p.output);
+                let os = output_state(&output);
                 (os.camera, os.zoom)
             };
             let canvas = driftwm::canvas::screen_to_canvas(
-                driftwm::canvas::ScreenPos(screen_pos.to_f64()),
+                driftwm::canvas::ScreenPos(site.screen_pos.to_f64()),
                 camera,
                 zoom,
             )
@@ -1582,34 +1554,26 @@ impl DriftWm {
     /// unmapped) and the last-output reconnection (virtual placeholder swapped
     /// for the new monitor).
     pub fn reassign_orphaned_pinned(&mut self, to: &Output) {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return;
         }
-        // Few outputs; a Vec + linear scan avoids the mutable-key-type lint
-        // (Output wraps an Arc with interior mutability).
-        let live: Vec<Output> = self.space.outputs().cloned().collect();
+        let live: Vec<String> = self.space.outputs().map(|o| o.name()).collect();
         let to_size = output_logical_size(to);
-        let ids: Vec<_> = self
-            .pinned
-            .iter()
-            .filter(|(_, p)| !live.contains(&p.output))
-            .map(|(id, _)| id.clone())
+        let orphans: Vec<(Window, driftwm::stage::PinnedSite)> = self
+            .stage
+            .pinned_windows()
+            .filter(|(_, site)| !live.contains(&site.output))
+            .map(|(w, site)| (w.clone(), site.clone()))
             .collect();
-        if ids.is_empty() {
+        if orphans.is_empty() {
             return;
         }
-        for id in ids {
-            let win_size = self
-                .space
-                .elements()
-                .find(|w| w.wl_surface().is_some_and(|s| s.id() == id))
-                .map(|w| w.geometry().size)
-                .unwrap_or_default();
-            if let Some(p) = self.pinned.get_mut(&id) {
-                p.output = to.clone();
-                p.screen_pos.x = p.screen_pos.x.clamp(0, (to_size.w - win_size.w).max(0));
-                p.screen_pos.y = p.screen_pos.y.clamp(0, (to_size.h - win_size.h).max(0));
-            }
+        for (window, mut site) in orphans {
+            let win_size = window.geometry().size;
+            site.output = to.name();
+            site.screen_pos.x = site.screen_pos.x.clamp(0, (to_size.w - win_size.w).max(0));
+            site.screen_pos.y = site.screen_pos.y.clamp(0, (to_size.h - win_size.h).max(0));
+            self.stage.set_pin(&window, site);
         }
         // Re-anchor the Space loc to the new output now — `sync_pinned_locs`
         // only fires on camera changes, which a hotplug doesn't guarantee, so

@@ -480,7 +480,7 @@ impl DriftWm {
         mods: smithay::input::keyboard::ModifiersState,
         time: u32,
     ) -> bool {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return false;
         }
         let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
@@ -541,9 +541,10 @@ impl DriftWm {
                 MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped => {
                     self.raise_and_focus(window, serial);
                     // Infer the edge in screen space against the pinned rect.
-                    let edge = window
-                        .wl_surface()
-                        .and_then(|s| self.pinned.get(&s.id()).map(|p| p.screen_pos))
+                    let edge = self
+                        .stage
+                        .pin_of(window)
+                        .map(|site| site.screen_pos)
                         .map(|sp| edges_from_position(screen_pos, sp, window.geometry().size));
                     self.start_compositor_resize_with_edge(
                         pointer, window, pos, button, serial, edge, false,
@@ -587,16 +588,13 @@ impl DriftWm {
         button: u32,
         serial: smithay::utils::Serial,
     ) {
-        let Some(id) = window.wl_surface().map(|s| s.id()) else {
+        let Some(site) = self.stage.pin_of(window).cloned() else {
             return;
         };
-        let Some((output, screen_pos)) = self
-            .pinned
-            .get(&id)
-            .map(|p| (p.output.clone(), p.screen_pos))
-        else {
+        let Some(output) = self.output_by_name(&site.output) else {
             return;
         };
+        let screen_pos = site.screen_pos;
         let (camera, zoom) = {
             let os = crate::state::output_state(&output);
             (os.camera, os.zoom)
@@ -660,10 +658,9 @@ impl DriftWm {
             // screen rect, since the canvas-space inference is wrong at zoom != 1.
             // (Pinned dispatch already passes an explicit edge; this keeps the
             // function correct for any future inferred-edge caller.)
-            if let Some((sp, output)) = window.wl_surface().and_then(|s| {
-                self.pinned
-                    .get(&s.id())
-                    .map(|p| (p.screen_pos, p.output.clone()))
+            if let Some((sp, output)) = self.stage.pin_of(window).and_then(|site| {
+                self.output_by_name(&site.output)
+                    .map(|o| (site.screen_pos, o))
             }) {
                 let (camera, zoom) = {
                     let os = crate::state::output_state(&output);
@@ -687,8 +684,11 @@ impl DriftWm {
         // Pinned windows resize in screen space; capture their `screen_pos` and
         // fixed output so the grab and the commit-time reposition use the right
         // anchor. `None` for normal canvas windows.
-        let pinned_initial_screen_pos = self.pinned.get(&wl_surface.id()).map(|p| p.screen_pos);
-        let pinned_output = self.pinned.get(&wl_surface.id()).map(|p| p.output.clone());
+        let pinned_site = self.stage.pin_of(window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let pinned_output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output));
 
         with_states(&wl_surface, |states| {
             states

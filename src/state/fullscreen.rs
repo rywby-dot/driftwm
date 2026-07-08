@@ -1,6 +1,5 @@
 use smithay::{
     desktop::Window,
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, Size},
     wayland::seat::WaylandFocus,
 };
@@ -129,9 +128,7 @@ impl DriftWm {
         };
 
         // Unpin into the fullscreen viewport; exit_fullscreen_on re-pins.
-        let saved_pinned = window
-            .wl_surface()
-            .and_then(|s| self.pinned.remove(&s.id()));
+        let saved_pinned = self.stage.take_pin(window);
 
         self.stage
             .set_fullscreen(&output.name(), window.clone(), saved_location, saved_size);
@@ -264,8 +261,11 @@ impl DriftWm {
         // back to screen_pos (update_output_from_camera's sync only fires on a
         // camera change, which restoring the saved camera may not be).
         let was_pinned = ret.pinned.is_some();
-        if let (Some(pinned), Some(id)) = (ret.pinned, entry.window.wl_surface().map(|s| s.id())) {
-            self.pinned.insert(id, pinned);
+        if let Some(site) = ret.pinned {
+            // The window may have entered the MRU history while fullscreen
+            // (it wasn't pinned then); re-pinning takes it back out.
+            self.stage.drop_from_focus_history(&entry.window);
+            self.stage.set_pin(&entry.window, site);
         }
         self.update_output_from_camera();
         if was_pinned {

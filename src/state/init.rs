@@ -268,7 +268,6 @@ impl DriftWm {
             backend: None,
             ipc_server: None,
             decorations: HashMap::new(),
-            pinned: HashMap::new(),
             pending_ssd: HashSet::new(),
             decoration_scale: 1,
             render: RenderCache::new(),

@@ -1009,7 +1009,7 @@ impl DriftWm {
         screen_pos: Point<f64, smithay::utils::Logical>,
         canvas_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return None;
         }
         let output = self.active_output()?;
@@ -1017,6 +1017,7 @@ impl DriftWm {
         if self.is_output_fullscreen(&output) {
             return None;
         }
+        let output_name = output.name();
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
@@ -1024,10 +1025,10 @@ impl DriftWm {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&wl_surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
-            if p.output != output {
+            if p.output != output_name {
                 continue;
             }
             // Surface-tree (buffer) origin in output-relative screen coords.
@@ -1095,7 +1096,7 @@ impl DriftWm {
         screen_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(Window, crate::decorations::DecorationHit)> {
         use crate::decorations::DecorationHit;
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return None;
         }
         let output = self.active_output()?;
@@ -1103,6 +1104,7 @@ impl DriftWm {
         if self.is_output_fullscreen(&output) {
             return None;
         }
+        let output_name = output.name();
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
@@ -1110,10 +1112,10 @@ impl DriftWm {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&wl_surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
-            if p.output != output {
+            if p.output != output_name {
                 continue;
             }
             let loc = p.screen_pos;

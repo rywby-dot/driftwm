@@ -11,7 +11,7 @@ use smithay::{
         },
     },
     output::Output,
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{IsAlive, Logical, Point, Serial},
     wayland::seat::WaylandFocus,
 };
@@ -333,11 +333,16 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             let new_screen_pos =
                 Point::from((new_screen.x.round() as i32, new_screen.y.round() as i32));
             self.output = output.clone();
-            if let Some(id) = self.window.wl_surface().map(|s| s.id())
-                && let Some(p) = data.pinned.get_mut(&id)
-            {
-                p.output = output.clone();
-                p.screen_pos = new_screen_pos;
+            // Guarded: the pin may have been toggled off mid-drag, and an
+            // unconditional set_pin would silently re-pin.
+            if data.stage.is_pinned(&self.window) {
+                data.stage.set_pin(
+                    &self.window,
+                    driftwm::stage::PinnedSite {
+                        output: output.name(),
+                        screen_pos: new_screen_pos,
+                    },
+                );
             }
             let canvas = screen_to_canvas(ScreenPos(new_screen_pos.to_f64()), camera, zoom)
                 .0

@@ -393,7 +393,7 @@ impl XdgShellHandler for DriftWm {
             // Pinned windows move in screen space. A canvas grab would only
             // shuffle the loc-synced canvas position while the window keeps
             // rendering at its fixed `screen_pos` — i.e. the drag would do nothing.
-            if self.pinned.contains_key(&wl_surface.id()) {
+            if self.stage.is_pinned(&window) {
                 self.start_pinned_move(
                     &pointer,
                     &window,
@@ -428,7 +428,7 @@ impl XdgShellHandler for DriftWm {
             && let Some(touch_start) = check_touch_grab(&touch, &wl_surface)
         {
             // Pinned touch move isn't supported (matches the SSD touch path).
-            if self.pinned.contains_key(&wl_surface.id()) {
+            if self.stage.is_pinned(&window) {
                 return;
             }
             let Some(initial_window_location) = self.space.element_location(&window) else {
@@ -498,8 +498,11 @@ impl XdgShellHandler for DriftWm {
         self.stage.clear_fit(&window);
 
         // Pinned windows resize in screen space (see start_compositor_resize_with_edge).
-        let pinned_initial_screen_pos = self.pinned.get(&wl_surface.id()).map(|p| p.screen_pos);
-        let pinned_output = self.pinned.get(&wl_surface.id()).map(|p| p.output.clone());
+        let pinned_site = self.stage.pin_of(&window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let pinned_output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output));
 
         // Store resize state in the surface data map for commit() repositioning
         with_states(&wl_surface, |states| {

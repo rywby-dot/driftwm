@@ -16,7 +16,6 @@
 //! screen pixels, Y-down).
 
 use serde::Serialize;
-use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::seat::WaylandFocus;
 use std::collections::HashMap;
@@ -148,7 +147,7 @@ impl DriftWm {
             let Some(surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
             let (app_id, title) = window_app_id_title(&surface);
@@ -157,7 +156,7 @@ impl DriftWm {
             }
             let size = window.geometry().size;
             pinned.push(OutputPinned {
-                output: p.output.name(),
+                output: p.output.clone(),
                 app_id,
                 title,
                 position: [p.screen_pos.x, p.screen_pos.y],
@@ -203,7 +202,7 @@ impl DriftWm {
             let Some(surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
             let (app_id, title) = window_app_id_title(&surface);
@@ -212,7 +211,7 @@ impl DriftWm {
             }
             let size = window.geometry().size;
             pinned_by_output
-                .entry(p.output.name())
+                .entry(p.output.clone())
                 .or_default()
                 .push(PinnedInfo {
                     app_id,
