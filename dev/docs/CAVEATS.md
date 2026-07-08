@@ -2,6 +2,10 @@
 
 Things to keep in mind as the codebase grows.
 
+## Never write `Space` directly — go through the stage wrappers
+
+The stage (`src/stage/`) is the source of truth for the window list, z-order, positions, focus history, fullscreen membership, and fit state; `smithay::desktop::Space` is a write-through mirror kept for rendering. Every mutation must go through `DriftWm::map_window` / `raise_window` / `unmap_window` (or a paired stage+space write, as in `ClusterResizeSnapshot::apply_member_shifts`). A direct `space.map_element` silently desyncs the two stores: policy decisions (focus-after-close, MRU cycling, cluster math, fullscreen restore) then run on stale data. A clippy `disallowed-methods` lint (see `clippy.toml`) rejects direct calls, and debug builds assert stage/space parity every frame in `post_render` — a panic there means a mutation bypassed the wrappers. This dual-store phase ends when the read-model callsites move to the stage and `Space` is demoted to a pure render mirror.
+
 ## Never block the event loop
 
 calloop is single-threaded. A 50ms DNS lookup, a slow file read, a stuck subprocess — anything that blocks the main thread freezes the entire compositor. All I/O must be async or offloaded.
@@ -33,7 +37,7 @@ driftwm sets all four `xdg_toplevel` Tiled states on every CSD window, even thou
 This is a deliberate semantic misuse of the protocol. The debt it incurs:
 
 - Some clients (Zed, anything using `gpui`) also drop their own resize edge handles on seeing Tiled, reasoning that a tiled window has compositor-managed size. We compensate with a compositor-side invisible resize margin around every CSD window (`input/mod.rs::surface_under` / `decoration_under`), mirroring what Mutter and KWin do for CSD apps.
-- SCTK-based toolkits (Alacritty) interpret `Tiled + size=None` as "stay at current tile size," not "pick preferred." So fit/fullscreen exit paths must always send an explicit size (`window_ext.rs::exit_fit_configure`, `exit_fullscreen_configure`), which in turn requires tracking a `RestoreSize` separately from `window.geometry().size` because some clients (Chromium) shrink their reported geometry on each round-trip.
+- SCTK-based toolkits (Alacritty) interpret `Tiled + size=None` as "stay at current tile size," not "pick preferred." So fit/fullscreen exit paths must always send an explicit size (`window_ext.rs::exit_fit_configure`, `exit_fullscreen_configure`), which in turn requires tracking a restore size (on the stage) separately from `window.geometry().size` because some clients (Chromium) shrink their reported geometry on each round-trip.
 - Every new "this client behaves weirdly under Tiled" issue traces back here.
 
 cosmic-comp makes the exact same bet (`clip_floating_windows` default-on in `AppearanceConfig`, `src/shell/element/window.rs:204`) and has carried the same complexity for years. This is a settled hack in Wayland-land, not a novel misstep — but it's still a hack. If a future protocol extension exposes "suppress client chrome" as a first-class signal, migrate to it and delete all of the above.

@@ -1,0 +1,9 @@
+disallowed-methods = [
+    { path = "smithay::desktop::space::Space::map_element", reason = "mutate through DriftWm::map_window (or a paired stage+space write) so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::map_element_above", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::raise_element", reason = "mutate through DriftWm::raise_window so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::raise_element_above", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::lower_element", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::relocate_element", reason = "mutate through DriftWm wrappers so the stage stays in sync — see dev/docs/CAVEATS.md" },
+    { path = "smithay::desktop::space::Space::unmap_elem", reason = "mutate through DriftWm::unmap_window so the stage stays in sync — see dev/docs/CAVEATS.md" },
+]

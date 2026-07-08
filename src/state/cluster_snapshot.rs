@@ -79,6 +79,7 @@ impl ClusterResizeSnapshot {
     /// contract, inlined here because the grab owns this snapshot, not
     /// `DriftWm`).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::disallowed_methods)]
     pub fn apply_member_shifts(
         &mut self,
         stage: &mut driftwm::stage::Stage<Window>,

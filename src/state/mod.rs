@@ -661,6 +661,7 @@ impl DriftWm {
 
     /// Push any `below` windows to the bottom of the z-order.
     /// Called after every `raise_element()` to maintain stacking.
+    #[allow(clippy::disallowed_methods)]
     pub fn enforce_below_windows(&mut self) {
         self.render.blur_geometry_generation += 1;
         for w in self.stage.enforce_stacking() {
@@ -671,6 +672,7 @@ impl DriftWm {
     /// Raise `window`, then its child windows, so a child/modal dialog stays
     /// directly above its own parent without jumping over unrelated windows
     /// that sit higher in the stack.
+    #[allow(clippy::disallowed_methods)]
     pub fn raise_with_children(&mut self, window: &Window) {
         for w in self.stage.raise_with_children(window) {
             self.space.raise_element(&w, true);
@@ -680,11 +682,13 @@ impl DriftWm {
     /// Map (or move) `window` at `pos` in stage and space together. `activate`
     /// keeps `Space::map_element` semantics: set the xdg Activated state on
     /// this window and clear it on every other.
+    #[allow(clippy::disallowed_methods)]
     pub fn map_window(&mut self, window: Window, pos: Point<i32, Logical>, activate: bool) {
         self.stage.map(window.clone(), pos);
         self.space.map_element(window, pos, activate);
     }
 
+    #[allow(clippy::disallowed_methods)]
     pub fn raise_window(&mut self, window: &Window, activate: bool) {
         self.stage.raise(window);
         self.space.raise_element(window, activate);
@@ -695,6 +699,7 @@ impl DriftWm {
     /// stage's fullscreen membership. The `fullscreen` viewport half (camera
     /// restore) is NOT handled here — a caller unmapping a fullscreen window
     /// must tear that down first, as `toplevel_destroyed` does.
+    #[allow(clippy::disallowed_methods)]
     pub fn unmap_window(&mut self, window: &Window) {
         self.stage.remove(window);
         self.space.unmap_elem(window);
