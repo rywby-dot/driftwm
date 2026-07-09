@@ -297,6 +297,7 @@ fn parse_continuous_action(s: &str) -> Option<ContinuousAction> {
         "pan-viewport" => Some(ContinuousAction::PanViewport),
         "zoom" => Some(ContinuousAction::Zoom),
         "move-window" => Some(ContinuousAction::MoveWindow),
+        "move-snapped-windows" => Some(ContinuousAction::MoveSnappedWindows),
         "resize-window" => Some(ContinuousAction::ResizeWindow),
         "resize-window-snapped" => Some(ContinuousAction::ResizeWindowSnapped),
         _ => None,
@@ -364,36 +365,23 @@ pub fn parse_gesture_config_entry(
                 Err(format!("unknown gesture action: '{action_str}'"))
             }
         }
-        GestureTrigger::DoubletapSwipe { .. } => {
-            match is_continuous {
-                Some(ContinuousAction::MoveWindow) => {
-                    return Ok(GestureConfigEntry::Continuous(ContinuousAction::MoveWindow));
-                }
-                Some(ContinuousAction::ResizeWindow) => {
-                    return Ok(GestureConfigEntry::Continuous(
-                        ContinuousAction::ResizeWindow,
-                    ));
-                }
-                Some(ContinuousAction::ResizeWindowSnapped) => {
-                    return Ok(GestureConfigEntry::Continuous(
-                        ContinuousAction::ResizeWindowSnapped,
-                    ));
-                }
-                Some(_) => {
-                    return Err(
-                        "doubletap-swipe only supports move-window, resize-window, and resize-window-snapped"
-                            .to_string(),
-                    );
-                }
-                None => {}
-            }
-            if is_threshold.is_some() {
-                Err(
-                    "doubletap-swipe only supports move-window, resize-window, and resize-window-snapped"
+        GestureTrigger::DoubletapSwipe { .. } | GestureTrigger::HoldSwipe { .. } => {
+            match (is_continuous, is_threshold) {
+                (
+                    Some(
+                        ca @ (ContinuousAction::MoveWindow
+                        | ContinuousAction::MoveSnappedWindows
+                        | ContinuousAction::ResizeWindow
+                        | ContinuousAction::ResizeWindowSnapped),
+                    ),
+                    _,
+                ) => Ok(GestureConfigEntry::Continuous(ca)),
+                (Some(_), _) | (None, Some(_)) => Err(
+                    "doubletap-swipe/hold-swipe only support the window-grab actions: \
+                     move-window, move-snapped-windows, resize-window, resize-window-snapped"
                         .to_string(),
-                )
-            } else {
-                Err(format!("unknown gesture action: '{action_str}'"))
+                ),
+                (None, None) => Err(format!("unknown gesture action: '{action_str}'")),
             }
         }
         GestureTrigger::SwipeUp { .. }
@@ -464,10 +452,8 @@ pub fn parse_gesture_config_entry(
                 Err(format!("unknown gesture action: '{action_str}'"))
             }
         }
-        GestureTrigger::Tap { .. }
-        | GestureTrigger::Doubletap { .. }
-        | GestureTrigger::HoldSwipe { .. } => {
-            Err("tap/doubletap/hold-swipe are touch-only triggers".to_string())
+        GestureTrigger::Tap { .. } | GestureTrigger::Doubletap { .. } => {
+            Err("tap/doubletap are touch-only triggers".to_string())
         }
     }
 }
@@ -511,11 +497,9 @@ pub fn parse_touch_trigger(s: &str) -> Result<GestureTrigger, String> {
 
 /// Validate a touch trigger + action combination.
 ///
-/// Touch differs from the trackpad in a few ways, so this doesn't blindly delegate:
-/// a plain `swipe` is pan-or-threshold only (continuous window grabs belong on
-/// `doubletap-swipe`/`hold-swipe`, which carry explicit grab intent); and the touch
-/// window-grab path is single-window, so `resize-window-snapped` isn't offered.
-/// The remaining triggers reuse the shared gesture validation table.
+/// Touch has no modifiers to signal grab intent, so a plain `swipe` is
+/// pan-or-threshold only — continuous window grabs belong on
+/// `doubletap-swipe`/`hold-swipe`.
 pub fn parse_touch_config_entry(
     trigger: &GestureTrigger,
     action_str: &str,
@@ -551,17 +535,6 @@ pub fn parse_touch_config_entry(
                 None => Err(format!("unknown touch action: '{action_str}'")),
             },
         },
-        GestureTrigger::DoubletapSwipe { .. } | GestureTrigger::HoldSwipe { .. } => {
-            match parse_continuous_action(action_str) {
-                Some(ca @ (ContinuousAction::MoveWindow | ContinuousAction::ResizeWindow)) => {
-                    Ok(GestureConfigEntry::Continuous(ca))
-                }
-                _ => Err(
-                    "doubletap-swipe/hold-swipe only support move-window and resize-window"
-                        .to_string(),
-                ),
-            }
-        }
         GestureTrigger::Pinch { .. } => match parse_continuous_action(action_str) {
             Some(ContinuousAction::Zoom) => {
                 Ok(GestureConfigEntry::Continuous(ContinuousAction::Zoom))

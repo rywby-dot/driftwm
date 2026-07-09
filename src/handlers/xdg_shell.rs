@@ -406,8 +406,17 @@ impl XdgShellHandler for DriftWm {
         if let Some(touch) = self.seat.get_touch()
             && let Some(touch_start) = check_touch_grab(&touch, &wl_surface)
         {
-            // Pinned touch move isn't supported (matches the SSD touch path).
+            // Stop any camera coast before building the grab — the offset
+            // converts the down-time canvas point with the live camera, so a
+            // coast between down and this request would skew it.
             if self.stage.is_pinned(&window) {
+                self.cancel_animations();
+                let Some(grab) = self.build_touch_pinned_move_grab(&window, touch_start, 1) else {
+                    return;
+                };
+                // Revoke the client's in-flight touch sequence (see the canvas branch below).
+                touch.cancel(self);
+                touch.set_grab(self, grab, serial);
                 return;
             }
             let Some(initial_window_location) = self.stage.position_of(&window) else {

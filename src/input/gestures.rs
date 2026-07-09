@@ -67,7 +67,7 @@ impl DriftWm {
         }
     }
 
-    pub(super) fn cancel_animations(&mut self) {
+    pub(crate) fn cancel_animations(&mut self) {
         self.with_output_state(|os| {
             os.camera_target = None;
             os.zoom_target = None;

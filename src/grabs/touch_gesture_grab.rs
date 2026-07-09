@@ -21,7 +21,10 @@ use driftwm::config::{
     ThresholdAction,
 };
 
+use driftwm::window_ext::WindowExt;
+
 use crate::input::gestures::direction_from_vector;
+use crate::input::touch::HeldTouchEvent;
 use crate::state::{DriftWm, FocusTarget, output_state};
 
 use super::MoveSurfaceGrab;
@@ -262,6 +265,18 @@ pub struct TouchGestureGrab {
     max_fingers: usize,
     /// App touch sequence revoked once on escalation to a system gesture.
     system_cancelled: bool,
+    /// A finger lifted while the sequence still belonged to the app (unbound
+    /// tier). A real multi-finger gesture plants every finger before lifting
+    /// any, so this marks the sequence typing-like: no tier may claim it
+    /// anymore, and nothing is withheld — every event forwards.
+    claims_blocked: bool,
+    /// Some higher finger-count tier binds something, so a forming gesture
+    /// could still claim this app-owned sequence — gates the holdback.
+    /// Re-resolved with the plan at each tier crossing.
+    higher_tier_bound: bool,
+    /// Time of the sequence's first touch-down, for stagger logging. Unlike
+    /// `tap_start_time` it is never re-armed at tier crossings.
+    first_down_time: u32,
     /// Past the dead zone: viewport changes / navigation accumulation are live.
     active: bool,
     /// Ever passed the dead zone — disqualifies the gesture from being a tap.
@@ -301,6 +316,9 @@ impl TouchGestureGrab {
             plan: Plan::default(),
             max_fingers: 0,
             system_cancelled: false,
+            claims_blocked: false,
+            higher_tier_bound: false,
+            first_down_time: 0,
             active: false,
             ever_active: false,
             armed_for_move: false,
@@ -325,7 +343,18 @@ impl TouchGestureGrab {
         // contact resolves as the 5-finger tier (which navigates by default) rather
         // than an empty plan that would forward and abort the gesture. The true
         // `max_fingers` is left intact for tier-crossing and `all_fingers_down`.
-        let n = (self.max_fingers as u32).min(5);
+        self.resolve_plan_at(data, (self.max_fingers as u32).min(5))
+    }
+
+    /// Whether a forming gesture at a higher finger-count tier could still
+    /// claim this app-owned sequence; when nothing above can claim, events
+    /// forward with zero holdback latency.
+    fn any_higher_tier_bound(&self, data: &DriftWm) -> bool {
+        let cur = (self.max_fingers as u32).min(5);
+        ((cur + 1)..=5).any(|n| !self.resolve_plan_at(data, n).is_empty())
+    }
+
+    fn resolve_plan_at(&self, data: &DriftWm, n: u32) -> Plan {
         let cx = self.context;
         let continuous = |t: GestureTrigger| match data.config.touch_lookup(&t, cx) {
             Some(GestureConfigEntry::Continuous(a)) => Some(a.clone()),
@@ -371,7 +400,15 @@ impl TouchGestureGrab {
     ) -> bool {
         match action {
             ContinuousAction::MoveWindow => self.try_start_move(data, handle, event, seq, cluster),
-            ContinuousAction::ResizeWindow => self.try_start_resize(data, handle, event, seq),
+            ContinuousAction::MoveSnappedWindows => {
+                self.try_start_move(data, handle, event, seq, true)
+            }
+            ContinuousAction::ResizeWindow => {
+                self.try_start_resize(data, handle, event, seq, false)
+            }
+            ContinuousAction::ResizeWindowSnapped => {
+                self.try_start_resize(data, handle, event, seq, true)
+            }
             _ => false,
         }
     }
@@ -592,6 +629,30 @@ impl TouchGestureGrab {
         seq: Serial,
         cluster: bool,
     ) -> bool {
+        // Pinned windows sit above canvas content and drag in screen space;
+        // cluster doesn't apply (they don't participate in snap), and widgets
+        // stay grab-proof like on the canvas.
+        let (camera, zoom) = self.camera_zoom();
+        let finger_screen = canvas_to_screen(CanvasPos(event.location), camera, zoom).0;
+        if let Some(window) = data.pinned_element_under(finger_screen) {
+            if window.is_widget() {
+                return false;
+            }
+            let start = TouchGrabStartData {
+                focus: None,
+                slot: event.slot,
+                location: event.location,
+            };
+            let Some(grab) = data.build_touch_pinned_move_grab(&window, start, self.points.len())
+            else {
+                return false;
+            };
+            let serial = SERIAL_COUNTER.next_serial();
+            data.raise_and_focus(&window, serial);
+            handle.set_grab(self, data, seq, grab);
+            return true;
+        }
+
         let Some((window, loc)) = data
             .element_under_raw(event.location)
             .map(|(w, l)| (w.clone(), l))
@@ -631,21 +692,57 @@ impl TouchGestureGrab {
     }
 
     /// Hold-then-drag resize: pick the edge from where the fingers landed (a 3×3
-    /// grid over the window) and hand off to a touch resize grab. Returns false
-    /// (and keeps panning) if there's no canvas window under the landing point.
+    /// grid over the window) and hand off to a touch resize grab. `snapped`
+    /// extends the resize to the window's snap-cluster. Returns false (and keeps
+    /// panning) if there's no canvas window under the landing point.
     fn try_start_resize(
         &mut self,
         data: &mut DriftWm,
         handle: &mut TouchInnerHandle<'_, DriftWm>,
         event: &MotionEvent,
         seq: Serial,
+        snapped: bool,
     ) -> bool {
         // Use the live finger centroid with the live camera (not the landing
         // `start_centroid`, which is screen-space and goes stale if a momentum
         // coast moves the camera during the hold). It's within the dead zone of
         // the landing point, so the 3×3 cell is unchanged.
         let (camera, zoom) = self.camera_zoom();
-        let origin = screen_to_canvas(ScreenPos(self.centroid()), camera, zoom).0;
+        let screen_centroid = self.centroid();
+
+        // Pinned windows resize in screen space; `build_touch_resize_grab`
+        // resolves the pinned anchor itself (snapped is moot — no cluster).
+        if let Some(window) = data.pinned_element_under(screen_centroid) {
+            if window.is_widget() {
+                return false;
+            }
+            let Some(site) = data.stage.pin_of(&window).cloned() else {
+                return false;
+            };
+            let edges = edge_from_origin(screen_centroid, site.screen_pos, window.geometry().size);
+            let start = TouchGrabStartData {
+                focus: None,
+                slot: event.slot,
+                location: event.location,
+            };
+            let slots = self.points.len();
+            let Some(grab) = data.build_touch_resize_grab(
+                &window,
+                edges,
+                start,
+                self.output.clone(),
+                slots,
+                false,
+            ) else {
+                return false;
+            };
+            let serial = SERIAL_COUNTER.next_serial();
+            data.raise_and_focus(&window, serial);
+            handle.set_grab(self, data, seq, grab);
+            return true;
+        }
+
+        let origin = screen_to_canvas(ScreenPos(screen_centroid), camera, zoom).0;
         let Some((window, _)) = data.element_under_raw(origin).map(|(w, l)| (w.clone(), l)) else {
             return false;
         };
@@ -664,15 +761,85 @@ impl TouchGestureGrab {
         let slots = self.points.len();
         // Build before raising/focusing so a failed build leaves no stray focus
         // change (it falls through to pan).
-        let Some(grab) =
-            data.build_touch_resize_grab(&window, edges, start, self.output.clone(), slots)
-        else {
+        let Some(grab) = data.build_touch_resize_grab(
+            &window,
+            edges,
+            start,
+            self.output.clone(),
+            slots,
+            snapped,
+        ) else {
             return false;
         };
         let serial = SERIAL_COUNTER.next_serial();
         data.raise_and_focus(&window, serial);
         handle.set_grab(self, data, seq, grab);
         true
+    }
+
+    /// Deliver the withheld events in order through the inner handle — inside
+    /// grab dispatch the public `TouchHandle` would re-enter the grab and
+    /// panic, and the inner handle forwards without re-processing.
+    fn flush_holdback_inner(
+        &self,
+        data: &mut DriftWm,
+        handle: &mut TouchInnerHandle<'_, DriftWm>,
+        seq: Serial,
+    ) {
+        let Some(buffer) = data.touch_state.holdback.take() else {
+            return;
+        };
+        if let Some(token) = buffer.timer {
+            data.loop_handle.remove(token);
+        }
+        tracing::debug!(
+            "touch holdback: flushing {} events (lift)",
+            buffer.events.len()
+        );
+        for ev in buffer.events {
+            match ev {
+                HeldTouchEvent::Down {
+                    slot,
+                    focus,
+                    location,
+                    time,
+                } => handle.down(
+                    data,
+                    focus,
+                    &DownEvent {
+                        slot,
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                    seq,
+                ),
+                HeldTouchEvent::Motion {
+                    slot,
+                    location,
+                    time,
+                } => handle.motion(
+                    data,
+                    None,
+                    &MotionEvent {
+                        slot,
+                        location,
+                        time,
+                    },
+                    seq,
+                ),
+                HeldTouchEvent::Up { slot, time } => handle.up(
+                    data,
+                    &UpEvent {
+                        slot,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                    seq,
+                ),
+            }
+        }
+        handle.frame(data, seq);
     }
 
     /// On last-finger-up, fire the resolved tap (single) / doubletap (double)
@@ -735,6 +902,10 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         event: &DownEvent,
         seq: Serial,
     ) {
+        if data.touch_state.replaying_holdback {
+            handle.down(data, focus, event, seq);
+            return;
+        }
         let (camera, zoom) = self.camera_zoom();
         let screen = canvas_to_screen(CanvasPos(event.location), camera, zoom).0;
         let prev_max = self.max_fingers;
@@ -754,6 +925,7 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         // for a double-tap-drag move. Later fingers don't flip either, so a stray
         // contact can't strand an in-progress gesture.
         if self.points.len() == 1 {
+            self.first_down_time = event.time;
             self.app_owns = focus.is_some();
             self.context = if focus.is_some() {
                 BindingContext::OnWindow
@@ -764,17 +936,45 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
                 .touch_state
                 .last_three_finger_tap
                 .is_some_and(|t| event.time.saturating_sub(t) < DOUBLE_TAP_MS);
+        } else {
+            // Landing stagger, for tuning `HOLDBACK_MS` against real hardware.
+            tracing::debug!(
+                "touch stagger: finger {} at +{}ms",
+                self.points.len(),
+                event.time.saturating_sub(self.first_down_time)
+            );
         }
 
         // Re-resolve the config plan whenever the finger count grows into a new tier.
         if self.max_fingers != prev_max {
             self.plan = self.resolve_plan(data);
+            self.higher_tier_bound = self.any_higher_tier_bound(data);
+        }
+
+        // An early lift pinned the sequence to the app, whatever tier the
+        // finger count reaches.
+        if self.claims_blocked {
+            handle.down(data, focus, event, seq);
+            return;
         }
 
         if self.plan.is_empty() {
-            // No touch binding matches this gesture → forward it to the app.
-            handle.down(data, focus, event, seq);
+            // Unbound → the app's, but withhold events while a higher tier
+            // could still claim the sequence (see `hold_touch_event`).
+            if self.higher_tier_bound {
+                data.hold_touch_event(HeldTouchEvent::Down {
+                    slot: event.slot,
+                    focus,
+                    location: event.location,
+                    time: event.time,
+                });
+            } else {
+                handle.down(data, focus, event, seq);
+            }
         } else {
+            // Anything still withheld is dropped unsent; fingers already
+            // delivered are revoked by the escalation cancel below.
+            data.discard_touch_holdback();
             // Escalation from app-forwarding to a system gesture: revoke the app's
             // in-flight touch sequence so it sees no dangling points. smithay's touch
             // cancel skips any slot already framed (current >= pending) — i.e. every
@@ -848,7 +1048,35 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         event: &UpEvent,
         seq: Serial,
     ) {
+        if data.touch_state.replaying_holdback {
+            handle.up(data, event, seq);
+            return;
+        }
         let was_present = self.points.contains_key(&event.slot);
+
+        // A lift while the sequence still belongs to the app pins it there
+        // (see `claims_blocked`).
+        if was_present && self.plan.is_empty() {
+            self.claims_blocked = true;
+        }
+
+        // A lift also flushes any withheld events right away — typing contacts
+        // are short, so rolled keys deliver at first lift, not at the deadline.
+        if was_present && data.touch_state.holdback.is_some() {
+            data.hold_touch_event(HeldTouchEvent::Up {
+                slot: event.slot,
+                time: event.time,
+            });
+            self.flush_holdback_inner(data, handle, seq);
+            self.points.remove(&event.slot);
+            if self.points.is_empty() {
+                handle.unset_grab(self, data);
+            } else {
+                self.rebaseline();
+            }
+            return;
+        }
+
         handle.up(data, event, seq);
         self.points.remove(&event.slot);
 
@@ -866,7 +1094,7 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             if was_present && panned && self.ever_active && !self.zoom_engaged {
                 data.launch_momentum_on(&self.output);
             }
-            if was_present {
+            if was_present && !self.claims_blocked {
                 self.detect_tap(data, event.time);
             }
             handle.unset_grab(self, data);
@@ -883,6 +1111,10 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         event: &MotionEvent,
         seq: Serial,
     ) {
+        if data.touch_state.replaying_holdback {
+            handle.motion(data, None, event, seq);
+            return;
+        }
         let (camera, zoom) = self.camera_zoom();
         let screen = canvas_to_screen(CanvasPos(event.location), camera, zoom).0;
         let stored_focus = match self.points.get_mut(&event.slot) {
@@ -896,8 +1128,17 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             }
         };
 
-        // Unbound gesture → forward to the app.
-        if self.plan.is_empty() {
+        if data.touch_state.holdback.is_some() {
+            data.hold_touch_event(HeldTouchEvent::Motion {
+                slot: event.slot,
+                location: event.location,
+                time: event.time,
+            });
+            return;
+        }
+
+        // Unbound gesture (or one an early lift pinned to the app) → forward.
+        if self.claims_blocked || self.plan.is_empty() {
             handle.motion(data, stored_focus, event, seq);
             return;
         }
@@ -962,15 +1203,19 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
             // window) falls through to pan.
             if !self.zoom_engaged {
                 let held = event.time.saturating_sub(self.tap_start_time) >= HOLD_MS;
-                let preempt = if self.armed_for_move {
-                    self.plan.doubletap_swipe.clone()
+                // The held→cluster upgrade is a doubletap-swipe affordance
+                // ("hold to move the cluster"). A hold-swipe binding is already
+                // held by definition, so upgrading it would make `move-window`
+                // indistinguishable from `move-snapped-windows` there.
+                let (preempt, cluster) = if self.armed_for_move {
+                    (self.plan.doubletap_swipe.clone(), held)
                 } else if held {
-                    self.plan.hold_swipe.clone()
+                    (self.plan.hold_swipe.clone(), false)
                 } else {
-                    None
+                    (None, false)
                 };
                 if let Some(action) = preempt
-                    && self.start_window_grab(action, data, handle, event, seq, held)
+                    && self.start_window_grab(action, data, handle, event, seq, cluster)
                 {
                     return;
                 }
@@ -1051,5 +1296,15 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut DriftWm) {}
+    fn unset(&mut self, data: &mut DriftWm) {
+        // Normally the buffer is already flushed (lift) or discarded (claim)
+        // by now; this catches a grab torn down mid-hold, e.g. on a dead
+        // start-data surface, so a stale timer can't replay into the next
+        // sequence.
+        if let Some(buffer) = data.touch_state.holdback.take()
+            && let Some(token) = buffer.timer
+        {
+            data.loop_handle.remove(token);
+        }
+    }
 }

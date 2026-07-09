@@ -62,9 +62,13 @@ impl DriftWm {
                 self.cancel_animations();
                 self.gesture_output = self.active_output();
                 match entry {
-                    GestureConfigEntry::Continuous(ContinuousAction::MoveWindow) => {
+                    GestureConfigEntry::Continuous(
+                        action @ (ContinuousAction::MoveWindow
+                        | ContinuousAction::MoveSnappedWindows),
+                    ) => {
                         if let Some((window, _)) = self.window_under(pos) {
-                            return self.start_gesture_move(window, pos);
+                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                            return self.start_gesture_move(window, pos, cluster);
                         }
                         // Not over a moveable window — flush and fall through
                         self.flush_middle_click(pending.press_time, pending.release_time);
@@ -111,9 +115,10 @@ impl DriftWm {
                     ContinuousAction::PanViewport => {
                         self.gesture_state = Some(GestureState::SwipePan);
                     }
-                    ContinuousAction::MoveWindow => {
+                    ContinuousAction::MoveWindow | ContinuousAction::MoveSnappedWindows => {
                         if let Some((window, _)) = self.window_under(pos) {
-                            return self.start_gesture_move(window, pos);
+                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                            return self.start_gesture_move(window, pos, cluster);
                         }
                         // Not over a window — fall back to pan
                         self.gesture_state = Some(GestureState::SwipePan);
@@ -403,7 +408,7 @@ impl DriftWm {
     /// on the pointer so gesture updates just warp the cursor and the grab
     /// handles window positioning (identical to Alt+click drag). Pinned windows
     /// get the screen-space pinned grab; widgets fall through to Swipe3Pan.
-    fn start_gesture_move(&mut self, window: Window, pos: Point<f64, Logical>) {
+    fn start_gesture_move(&mut self, window: Window, pos: Point<f64, Logical>, cluster: bool) {
         if window
             .wl_surface()
             .as_ref()
@@ -430,11 +435,12 @@ impl DriftWm {
             return;
         }
 
-        // 3-finger double-tap+drag is the trackpad-first way to move a
-        // single window. Cluster drag is a mouse action (Alt+Shift+Left);
-        // there's no modifier on a gesture to distinguish single-vs-cluster,
-        // so gestures always move the focused window alone.
         let initial_window_location = self.stage.position_of(&window).unwrap_or_default();
+        let (members, surfaces) = if cluster {
+            self.cluster_snapshot_for_drag(&window, initial_window_location)
+        } else {
+            (Vec::new(), HashSet::new())
+        };
         let pointer = self.seat.get_pointer().unwrap();
         let Some(output) = self.active_output() else {
             return;
@@ -448,8 +454,8 @@ impl DriftWm {
             window,
             initial_window_location,
             output,
-            Vec::new(),
-            HashSet::new(),
+            members,
+            surfaces,
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
 

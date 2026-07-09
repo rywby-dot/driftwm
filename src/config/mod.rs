@@ -1614,10 +1614,50 @@ mod tests {
     }
 
     #[test]
-    fn touch_hold_swipe_rejects_resize_window_snapped() {
-        // Touch window-grabs are single-window only, unlike the trackpad gesture.
+    fn touch_hold_swipe_accepts_snapped_window_grabs() {
+        // Touch shares the trackpad's window-grab action set, snapped included.
         let trigger = GestureTrigger::HoldSwipe { fingers: 3 };
-        assert!(parse_touch_config_entry(&trigger, "resize-window-snapped").is_err());
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "resize-window-snapped"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindowSnapped
+            ))
+        );
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_doubletap_swipe_accepts_snapped_window_grabs() {
+        let trigger = GestureTrigger::DoubletapSwipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "resize-window-snapped"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindowSnapped
+            ))
+        );
+    }
+
+    #[test]
+    fn gesture_doubletap_swipe_accepts_move_snapped_windows() {
+        // The trackpad path shares the same window-grab action set.
+        let trigger = GestureTrigger::DoubletapSwipe { fingers: 3 };
+        assert_eq!(
+            parse_gesture_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
     }
 
     #[test]

@@ -286,6 +286,9 @@ pub enum ContinuousAction {
     PanViewport,
     Zoom,
     MoveWindow,
+    /// Same as `MoveWindow` plus cluster drag: every snapped neighbor moves
+    /// with the grabbed window. Opt-in via explicit binding.
+    MoveSnappedWindows,
     ResizeWindow,
     /// Same as `ResizeWindow` plus cluster propagation: delta applies to the
     /// focused window's snap-cluster neighbors. Opt-in via explicit binding.

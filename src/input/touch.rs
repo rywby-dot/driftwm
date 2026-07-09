@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::decorations::DecorationHit;
 use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab, TouchGestureGrab};
 use crate::state::{DriftWm, FocusTarget, SessionLock, output_state};
-use driftwm::canvas::{ScreenPos, screen_to_canvas};
+use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     backend::input::{AbsolutePositionEvent, Event, InputBackend, TouchEvent, TouchSlot},
@@ -22,15 +22,58 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
     },
     utils::{IsAlive, Logical, Point, SERIAL_COUNTER},
-    wayland::{compositor::with_states, seat::WaylandFocus},
+    wayland::{
+        compositor::{get_parent, with_states},
+        seat::WaylandFocus,
+    },
 };
+
+/// How long touch events are withheld from the app after each finger lands,
+/// giving the next finger of a forming multi-finger gesture time to register
+/// before the app sees — and highlights, types, scrolls — anything. Each new
+/// finger re-arms the window; a gesture claim discards the buffer, a lift or
+/// the deadline flushes it. Tune against the stagger deltas logged at debug
+/// level.
+const HOLDBACK_MS: u64 = 40;
+
+/// A touch event withheld from the app while a higher finger-count tier may
+/// still claim the sequence (see [`DriftWm::hold_touch_event`]).
+pub enum HeldTouchEvent {
+    Down {
+        slot: TouchSlot,
+        focus: Option<(FocusTarget, Point<f64, Logical>)>,
+        location: Point<f64, Logical>,
+        time: u32,
+    },
+    Motion {
+        slot: TouchSlot,
+        location: Point<f64, Logical>,
+        time: u32,
+    },
+    Up {
+        slot: TouchSlot,
+        time: u32,
+    },
+}
+
+/// Withheld events of the live touch sequence plus the deadline timer that
+/// flushes them if no gesture claims the sequence in time.
+#[derive(Default)]
+pub struct HoldbackBuffer {
+    pub(crate) events: Vec<HeldTouchEvent>,
+    pub(crate) timer: Option<RegistrationToken>,
+}
 
 /// A close-button press awaiting release. Fires only if the finger lifts while
 /// still inside the button — touch's analogue of the pointer close path.
+/// Pinned windows hit-test their decorations in screen space, canvas windows
+/// in canvas space, so both positions are tracked.
 pub struct PendingClose {
     slot: TouchSlot,
     window: Window,
     last_canvas: Point<f64, Logical>,
+    last_screen: Point<f64, Logical>,
+    pinned: bool,
 }
 
 /// Active touch window-move that is edge-panning the camera. The animation loop
@@ -62,6 +105,13 @@ pub struct TouchState {
     /// re-resolving per event, so it can't diverge from the grab's output on a
     /// mid-gesture hotplug or `map_to_output` reload (and avoids per-event work).
     pub output: Option<Output>,
+    /// Withheld events of the live sequence; lives here rather than in the
+    /// gesture grab so the deadline timer can reach it.
+    pub holdback: Option<HoldbackBuffer>,
+    /// A holdback flush is replaying events through the touch handle; the
+    /// gesture grab passes replayed events straight through instead of
+    /// re-processing them.
+    pub replaying_holdback: bool,
 }
 
 impl TouchState {
@@ -72,6 +122,8 @@ impl TouchState {
             pending_center_timer: None,
             edge_pan: None,
             output: None,
+            holdback: None,
+            replaying_holdback: false,
         }
     }
 }
@@ -155,9 +207,118 @@ impl DriftWm {
         }
     }
 
+    /// Withhold a touch event from the app. A `Down` (re-)arms the flush
+    /// deadline: each landing finger buys the next one `HOLDBACK_MS` to
+    /// register before the sequence is handed to the app.
+    pub(crate) fn hold_touch_event(&mut self, ev: HeldTouchEvent) {
+        let arm = matches!(ev, HeldTouchEvent::Down { .. });
+        let buffer = self.touch_state.holdback.get_or_insert_default();
+        buffer.events.push(ev);
+        if arm {
+            if let Some(token) = buffer.timer.take() {
+                self.loop_handle.remove(token);
+            }
+            let timer = Timer::from_duration(Duration::from_millis(HOLDBACK_MS));
+            buffer.timer = self
+                .loop_handle
+                .insert_source(timer, |_, _, data: &mut DriftWm| {
+                    data.flush_touch_holdback();
+                    TimeoutAction::Drop
+                })
+                .ok();
+            // No deadline means events could sit withheld until the finger
+            // lifts; degrade to eager forwarding instead.
+            if buffer.timer.is_none() {
+                self.flush_touch_holdback();
+            }
+        }
+    }
+
+    /// Drop the withheld events unsent — a gesture claimed the sequence, so
+    /// the app must never see them.
+    pub(crate) fn discard_touch_holdback(&mut self) {
+        let Some(buffer) = self.touch_state.holdback.take() else {
+            return;
+        };
+        if let Some(token) = buffer.timer {
+            self.loop_handle.remove(token);
+        }
+        tracing::debug!(
+            "touch holdback: discarded {} events (gesture claim)",
+            buffer.events.len()
+        );
+    }
+
+    /// Deliver every withheld event to the app, in order. Runs outside grab
+    /// dispatch (the deadline timer), so it replays through the public touch
+    /// handle with `replaying_holdback` set; in-grab flushes (a finger lift)
+    /// go through the grab's inner handle instead, which doesn't re-enter.
+    pub(crate) fn flush_touch_holdback(&mut self) {
+        let Some(buffer) = self.touch_state.holdback.take() else {
+            return;
+        };
+        if let Some(token) = buffer.timer {
+            self.loop_handle.remove(token);
+        }
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        tracing::debug!(
+            "touch holdback: flushing {} events (deadline)",
+            buffer.events.len()
+        );
+        self.touch_state.replaying_holdback = true;
+        for ev in buffer.events {
+            match ev {
+                HeldTouchEvent::Down {
+                    slot,
+                    focus,
+                    location,
+                    time,
+                } => touch.down(
+                    self,
+                    focus,
+                    &DownEvent {
+                        slot,
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                ),
+                HeldTouchEvent::Motion {
+                    slot,
+                    location,
+                    time,
+                } => touch.motion(
+                    self,
+                    None,
+                    &MotionEvent {
+                        slot,
+                        location,
+                        time,
+                    },
+                ),
+                // Unreachable from the deadline timer — a buffered Up triggers
+                // an immediate in-grab flush.
+                HeldTouchEvent::Up { slot, time } => touch.up(
+                    self,
+                    &UpEvent {
+                        slot,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                ),
+            }
+        }
+        touch.frame(self);
+        self.touch_state.replaying_holdback = false;
+    }
+
     /// Set up a touch resize grab on `window` for `edges`: clear fit state, mark
     /// the surface/toplevel resizing (for commit-time top/left repositioning),
-    /// and build the grab. Single-window, canvas-space only (no pinned path).
+    /// and build the grab. `snapped` extends the resize to the window's
+    /// snap-cluster; a screen-pinned window resizes in screen space instead
+    /// (single-window, anchored to its pin site).
     pub(crate) fn build_touch_resize_grab(
         &mut self,
         window: &Window,
@@ -165,10 +326,18 @@ impl DriftWm {
         touch_start: TouchGrabStartData<DriftWm>,
         output: Output,
         slots: usize,
+        snapped: bool,
     ) -> Option<ResizeSurfaceGrab> {
         let initial_window_location = self.stage.position_of(window)?;
         let initial_window_size = window.geometry().size;
         let wl_surface = window.wl_surface().map(|s| s.into_owned())?;
+
+        let pinned_site = self.stage.pin_of(window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output))
+            .unwrap_or(output);
 
         self.stage.clear_fit(window);
 
@@ -180,7 +349,7 @@ impl DriftWm {
                     edges,
                     initial_window_location,
                     initial_window_size,
-                    initial_screen_pos: None,
+                    initial_screen_pos: pinned_initial_screen_pos,
                 });
         });
 
@@ -191,6 +360,12 @@ impl DriftWm {
             });
         }
 
+        // Pinned resize is screen-space and single-window — no snap or cluster.
+        let cluster_resize = if snapped && pinned_site.is_none() {
+            self.cluster_snapshot_for_resize(window, edges)
+        } else {
+            crate::state::ClusterResizeSnapshot::empty()
+        };
         let constraints = crate::grabs::SizeConstraints::for_window(window);
         Some(ResizeSurfaceGrab::new_touch(
             touch_start,
@@ -201,6 +376,8 @@ impl DriftWm {
             output,
             constraints,
             slots,
+            cluster_resize,
+            pinned_initial_screen_pos,
         ))
     }
 
@@ -277,6 +454,26 @@ impl DriftWm {
         // break double-tap-to-fit.
         self.cancel_pending_center();
 
+        // Pinned windows render above canvas content and hit-test their SSD in
+        // screen space — the canvas-space check below can't see them.
+        match self.pinned_decoration_under(screen_pos) {
+            Some((window, DecorationHit::TitleBar)) => {
+                self.start_touch_pinned_move(&window, slot, canvas_pos, serial);
+                return;
+            }
+            Some((window, DecorationHit::CloseButton)) => {
+                self.touch_state.pending_close = Some(PendingClose {
+                    slot,
+                    window,
+                    last_canvas: canvas_pos,
+                    last_screen: screen_pos,
+                    pinned: true,
+                });
+                return;
+            }
+            _ => {}
+        }
+
         // Fresh interaction. The first finger hit-tests SSD decorations.
         match self.decoration_under(canvas_pos) {
             Some((window, DecorationHit::TitleBar)) => {
@@ -288,6 +485,8 @@ impl DriftWm {
                     slot,
                     window,
                     last_canvas: canvas_pos,
+                    last_screen: screen_pos,
+                    pinned: false,
                 });
                 return;
             }
@@ -300,10 +499,20 @@ impl DriftWm {
         // raises (same as click-to-focus); empty canvas stops any coast.
         let under = self.pointer_focus_under(screen_pos, canvas_pos);
         if let Some((ref target, _)) = under {
-            if let Some(window) = self.window_for_surface(&target.0) {
+            // The hit may be a subsurface; windows are keyed by their root.
+            let mut root = target.0.clone();
+            while let Some(parent) = get_parent(&root) {
+                root = parent;
+            }
+            if let Some(window) = self.window_for_surface(&root) {
                 self.raise_and_focus(&window, serial);
             } else {
-                self.set_window_focus(Some(target.clone()), serial);
+                // Layer surface: mirror the pointer path — keyboard focus only
+                // if it asks (on-demand). A `none` layer (e.g. an OSK) must not
+                // steal focus from the window it types into. Popups also land
+                // here (get_parent only walks subsurfaces) and keep the current
+                // focus — a grabbing popup already holds the keyboard grab.
+                self.focus_layer_if_on_demand(Some(target.0.clone()), serial);
             }
         } else {
             self.cancel_animations();
@@ -328,6 +537,54 @@ impl DriftWm {
                 time,
             },
         );
+    }
+
+    /// Build a screen-space move grab for a pinned `window`, anchored by the
+    /// finger's offset to the pin site — converted with the site output's own
+    /// camera, so every pinned-touch-move entry point shares one offset
+    /// convention. `None` if the window lost its pin or output.
+    pub(crate) fn build_touch_pinned_move_grab(
+        &self,
+        window: &Window,
+        touch_start: TouchGrabStartData<DriftWm>,
+        slots: usize,
+    ) -> Option<MoveSurfaceGrab> {
+        let site = self.stage.pin_of(window).cloned()?;
+        let output = self.output_by_name(&site.output)?;
+        let (camera, zoom) = {
+            let os = output_state(&output);
+            (os.camera, os.zoom)
+        };
+        let finger_screen = canvas_to_screen(CanvasPos(touch_start.location), camera, zoom).0;
+        let grab_offset = site.screen_pos.to_f64() - finger_screen;
+        Some(MoveSurfaceGrab::new_pinned_touch(
+            touch_start,
+            window.clone(),
+            output,
+            grab_offset,
+            slots,
+        ))
+    }
+
+    /// Touch analogue of `start_pinned_move`: drag a screen-pinned window by a
+    /// fixed screen-space offset from the finger.
+    fn start_touch_pinned_move(
+        &mut self,
+        window: &Window,
+        slot: TouchSlot,
+        location: Point<f64, Logical>,
+        serial: smithay::utils::Serial,
+    ) {
+        let start = TouchGrabStartData {
+            focus: None,
+            slot,
+            location,
+        };
+        let Some(grab) = self.build_touch_pinned_move_grab(window, start, 1) else {
+            return;
+        };
+        self.raise_and_focus(window, serial);
+        self.seat.get_touch().unwrap().set_grab(self, grab, serial);
     }
 
     fn start_touch_move(
@@ -404,6 +661,7 @@ impl DriftWm {
             && pc.slot == slot
         {
             pc.last_canvas = canvas_pos;
+            pc.last_screen = screen_pos;
             return;
         }
 
@@ -438,10 +696,17 @@ impl DriftWm {
 
         if let Some(pc) = self.touch_state.pending_close.take() {
             if pc.slot == slot {
-                let still_inside = matches!(
-                    self.decoration_under(pc.last_canvas),
-                    Some((ref w, DecorationHit::CloseButton)) if *w == pc.window
-                );
+                let still_inside = if pc.pinned {
+                    matches!(
+                        self.pinned_decoration_under(pc.last_screen),
+                        Some((ref w, DecorationHit::CloseButton)) if *w == pc.window
+                    )
+                } else {
+                    matches!(
+                        self.decoration_under(pc.last_canvas),
+                        Some((ref w, DecorationHit::CloseButton)) if *w == pc.window
+                    )
+                };
                 if still_inside {
                     pc.window.send_close();
                 }

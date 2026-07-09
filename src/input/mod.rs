@@ -918,6 +918,17 @@ impl DriftWm {
         self.element_under_skipping(point, |_| false)
     }
 
+    /// The screen-pinned window under an output-relative screen position:
+    /// `pinned_window_under` resolved from focus surface to window element.
+    pub(crate) fn pinned_element_under(&self, screen_pos: Point<f64, Logical>) -> Option<Window> {
+        let (target, _) = self.pinned_window_under(screen_pos, screen_pos)?;
+        let mut root = target.0;
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        self.window_for_surface(&root)
+    }
+
     /// Find the Wayland surface and local coordinates under the given canvas position.
     /// This is the foundation for all hit-testing — focus, gestures, resize grabs.
     /// Also checks SSD decoration areas (title bar, resize borders), interleaved

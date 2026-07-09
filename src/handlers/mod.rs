@@ -1023,6 +1023,9 @@ impl SessionLockHandler for DriftWm {
         }
         self.held_action = None;
         self.cursor.grab_cursor = false;
+        // Withheld touch events must never reach an app beneath the lock
+        // surface — their deadline timer would otherwise replay them mid-lock.
+        self.discard_touch_holdback();
         // Lock may swallow key releases and prevents focus history updates while
         // mid-cycle; reset these so none survive the locked window.
         self.stage.cancel_cycle();
