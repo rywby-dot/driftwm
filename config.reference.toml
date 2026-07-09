@@ -76,6 +76,7 @@
 # accel_speed = 0.0           # pointer acceleration (-1.0 to 1.0)
 # accel_profile = "flat"      # "flat" or "adaptive"
 # natural_scroll = false      # reverse scroll direction
+# left_handed = false         # swap left/right mouse buttons (skipped on devices without left-handed support)
 
 [input.touch]
 # enable = true               # enable touchscreen support

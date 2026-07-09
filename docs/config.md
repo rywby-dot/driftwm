@@ -182,6 +182,12 @@ Default: `false`
 
 reverse scroll direction
 
+### `left_handed`
+
+Default: `false`
+
+swap left/right mouse buttons (skipped on devices without left-handed support)
+
 ## `[input.touch]`
 
 ### `enable`
