@@ -1691,8 +1691,39 @@ mod tests {
     }
 
     #[test]
-    fn default_touch_bindings_on_window_is_empty() {
-        assert!(default_touch_bindings().on_window.is_empty());
+    fn default_touch_bindings_window_targeted_gestures_bind_on_window() {
+        let bindings = default_touch_bindings();
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::Doubletap { fingers: 3 }),
+            Some(&GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::FitWindow
+            )))
+        );
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::DoubletapSwipe { fingers: 3 }),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::MoveWindow
+            ))
+        );
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::HoldSwipe { fingers: 3 }),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindow
+            ))
+        );
+        // Forwarding tiers (1-2 fingers on a window) stay unbound.
+        assert!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::Swipe { fingers: 2 })
+                .is_none()
+        );
     }
 
     #[test]

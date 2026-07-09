@@ -743,14 +743,25 @@ pub(super) fn default_gesture_bindings(
     }
 }
 
-/// Default touch bindings, keyed by bare trigger (touch has no modifiers). These
-/// reproduce the previously hardcoded recognizer behavior exactly: 1–2 fingers on
-/// the canvas pan (2 fingers also pinch-zoom), while on a window they forward to the
-/// app (no `on_window` bindings); 3-finger pan/zoom + tap/doubletap/move/resize and
-/// 4-finger navigate all bind `anywhere`. `on_window` is empty on purpose — `lookup`
-/// falls back from a specific context to `anywhere`, never the reverse.
+/// Default touch bindings, keyed by bare trigger (touch has no modifiers).
+/// Window-targeted gestures (fit/move/resize) bind `on_window` so a gesture
+/// starting on empty canvas just pans; `lookup` falls back from a specific
+/// context to `anywhere`, never the reverse.
 pub(super) fn default_touch_bindings() -> ContextBindings<GestureTrigger, GestureConfigEntry> {
-    let on_window = HashMap::new();
+    let on_window = HashMap::from([
+        (
+            GestureTrigger::Doubletap { fingers: 3 },
+            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::FitWindow)),
+        ),
+        (
+            GestureTrigger::DoubletapSwipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::MoveWindow),
+        ),
+        (
+            GestureTrigger::HoldSwipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::ResizeWindow),
+        ),
+    ]);
 
     let on_canvas = HashMap::from([
         (
@@ -806,18 +817,6 @@ pub(super) fn default_touch_bindings() -> ContextBindings<GestureTrigger, Gestur
         (
             GestureTrigger::Tap { fingers: 3 },
             GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::CenterWindow)),
-        ),
-        (
-            GestureTrigger::Doubletap { fingers: 3 },
-            GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::FitWindow)),
-        ),
-        (
-            GestureTrigger::DoubletapSwipe { fingers: 3 },
-            GestureConfigEntry::Continuous(ContinuousAction::MoveWindow),
-        ),
-        (
-            GestureTrigger::HoldSwipe { fingers: 3 },
-            GestureConfigEntry::Continuous(ContinuousAction::ResizeWindow),
         ),
     ]);
 
