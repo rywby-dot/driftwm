@@ -266,7 +266,7 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
     }
 
     // Mark outputs dirty for per-output animations.
-    for (_, surface) in dev.surfaces.iter() {
+    for surface in dev.surfaces.values() {
         if data.dpms_off_outputs.contains(&surface.output) {
             continue;
         }

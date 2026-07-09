@@ -1719,10 +1719,9 @@ mod tests {
         );
         // Forwarding tiers (1-2 fingers on a window) stay unbound.
         assert!(
-            bindings
+            !bindings
                 .on_window
-                .get(&GestureTrigger::Swipe { fingers: 2 })
-                .is_none()
+                .contains_key(&GestureTrigger::Swipe { fingers: 2 })
         );
     }
 
