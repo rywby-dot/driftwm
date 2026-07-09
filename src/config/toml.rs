@@ -267,6 +267,9 @@ pub(super) struct WindowRuleFile {
     /// Output name (e.g. `"DP-1"`) this window should fullscreen onto, overriding
     /// the client-requested output.
     pub output: Option<String>,
+    /// Stacking order among layer-shell surfaces on the same wlr-layer
+    /// (higher = on top; ties keep map order).
+    pub layer_order: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

@@ -645,6 +645,11 @@ pub struct WindowRule {
     /// the client-requested output; `None` defers to the client's request, then
     /// the active output.
     pub output: Option<String>,
+    /// Stacking order among layer-shell surfaces sharing the same wlr-layer
+    /// (the protocol has no z-index within a layer, so map order decides by
+    /// default). Higher stacks on top; ties keep map order. Ignored for
+    /// regular windows.
+    pub layer_order: Option<i32>,
 }
 
 impl WindowRule {
@@ -684,6 +689,7 @@ pub struct AppliedWindowRule {
     pub corner_radius: Option<i32>,
     pub shadow: Option<bool>,
     pub output: Option<String>,
+    pub layer_order: Option<i32>,
 }
 
 impl AppliedWindowRule {
@@ -732,6 +738,9 @@ impl AppliedWindowRule {
         if rule.output.is_some() {
             self.output = rule.output.clone();
         }
+        if let Some(lo) = rule.layer_order {
+            self.layer_order = Some(lo);
+        }
     }
 }
 
@@ -752,6 +761,7 @@ impl From<&WindowRule> for AppliedWindowRule {
             corner_radius: rule.corner_radius,
             shadow: rule.shadow,
             output: rule.output.clone(),
+            layer_order: rule.layer_order,
         }
     }
 }

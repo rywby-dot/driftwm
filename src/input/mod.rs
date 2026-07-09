@@ -823,32 +823,31 @@ impl DriftWm {
             driftwm::canvas::canvas_to_screen(driftwm::canvas::CanvasPos(canvas_pos), camera, zoom)
                 .0;
 
-        let map = layer_map_for_output(&output);
         // Floating bars/docks may reserve no exclusive zone, so there's nothing
         // to measure against -- hit-test directly instead, or hovering the bar
         // to click it also pans and fights the click with pointer warps.
         // Only Top/Overlay: Background/Bottom usually hold a full-output
         // wallpaper surface, which would match everywhere and kill cursor-pan.
         //
-        // surface_under() rather than a bare layer_under(): a bar surface often
-        // spans the full width while only drawing a few clusters, so the bbox
-        // alone would block panning across the transparent gaps. Checking the
-        // input region makes this exactly "would a click here hit the bar?".
+        // surface_under() on every surface rather than a bare layer_under():
+        // a bar often spans the full width while only drawing a few clusters,
+        // and a pass-through overlay's bbox may cover a bar beneath it — the
+        // input regions make this exactly "would a click here hit a bar?".
         let over_layer_surface = [WlrLayer::Top, WlrLayer::Overlay].iter().any(|&layer| {
-            let Some(surface) = map.layer_under(layer, screen_pos) else {
-                return false;
-            };
-            let geo = map.layer_geometry(surface).unwrap_or_default();
-            let surface_local = screen_pos - geo.loc.to_f64();
-            surface
-                .surface_under(surface_local, WindowSurfaceType::ALL)
-                .is_some()
+            self.layers_on_sorted(&output, layer)
+                .iter()
+                .any(|(surface, geo)| {
+                    let surface_local = screen_pos - geo.loc.to_f64();
+                    surface
+                        .surface_under(surface_local, WindowSurfaceType::ALL)
+                        .is_some()
+                })
         });
         if over_layer_surface {
             crate::state::output_state(&output).edge_pan_velocity = None;
             return;
         }
-        let usable = map.non_exclusive_zone();
+        let usable = layer_map_for_output(&output).non_exclusive_zone();
         let velocity = cursor_edge_pan_velocity(
             screen_pos,
             usable,
@@ -1377,11 +1376,12 @@ impl DriftWm {
         layers: &[WlrLayer],
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
         let output = self.active_output()?;
-        let output = &output;
-        let map = layer_map_for_output(output);
         for &layer in layers {
-            if let Some(surface) = map.layer_under(layer, screen_pos) {
-                let geo = map.layer_geometry(surface).unwrap_or_default();
+            // Try every surface in the layer, topmost first: the top surface's
+            // *input region* may exclude the point (a pass-through overlay)
+            // even though its bbox contains it, and the surface beneath must
+            // still receive the input.
+            for (surface, geo) in self.layers_on_sorted(&output, layer) {
                 let surface_local = screen_pos - geo.loc.to_f64();
                 if let Some((wl_surface, sub_loc)) =
                     surface.surface_under(surface_local, WindowSurfaceType::ALL)

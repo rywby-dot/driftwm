@@ -5,7 +5,7 @@ use smithay::backend::renderer::{
     },
     gles::GlesRenderer,
 };
-use smithay::desktop::{PopupManager, layer_map_for_output};
+use smithay::desktop::PopupManager;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
@@ -289,7 +289,6 @@ pub(super) fn build_layer_elements(
     layer: WlrLayer,
     blur_layer_tag: Option<BlurLayer>,
 ) -> (Vec<OutputRenderElements>, Vec<BlurRequestData>) {
-    let map = layer_map_for_output(output);
     let output_scale = output.current_scale().fractional_scale();
     let scale: Scale<f64> = output_scale.into();
     let mut elements = Vec::new();
@@ -300,15 +299,9 @@ pub(super) fn build_layer_elements(
         && state.render.blur_up_shader.is_some()
         && state.render.blur_mask_shader.is_some();
 
-    // Snapshot the layer list so we can drop the map borrow before reborrowing
-    // state for chrome resolution. LayerSurface is a smart pointer; clones are
-    // cheap.
-    let layer_surfaces: Vec<(smithay::desktop::LayerSurface, Rectangle<i32, Logical>)> = map
-        .layers_on(layer)
-        .rev()
-        .map(|s| (s.clone(), map.layer_geometry(s).unwrap_or_default()))
-        .collect();
-    drop(map);
+    // Topmost first — element lists are front-to-back. Shares the z-order
+    // (map order + `layer_order` rules) with hit-testing and focus scans.
+    let layer_surfaces = state.layers_on_sorted(output, layer);
 
     for (surface, geo) in layer_surfaces {
         let loc = geo.loc.to_physical_precise_round(output_scale);

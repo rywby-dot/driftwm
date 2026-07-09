@@ -414,6 +414,7 @@ pub(super) fn parse_window_rule(
         corner_radius,
         shadow: r.shadow,
         output: r.output,
+        layer_order: r.layer_order,
     })
 }
 

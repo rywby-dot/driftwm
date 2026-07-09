@@ -1040,7 +1040,17 @@ Effect fields:
   - pass_keys = false / omit — compositor handles everything (default)
   - VT switching (Ctrl+Alt+F1–F12) — always stays in the compositor
 
-Layer-shell surfaces (panels, notifications, bars like waybar): `decoration` is ignored — layers have no decoration mode. Chrome (border_width, corner_radius, shadow) is field-by-field opt-in on the rule and does NOT inherit from [decorations]. Without explicit values on the rule, a layer surface has no border, no shadow, and no corner clip.
+Layer-shell surfaces (panels, notifications, bars like waybar): matched by their namespace against `app_id`. `decoration` is ignored — layers have no decoration mode. Chrome (border_width, corner_radius, shadow) is field-by-field opt-in on the rule and does NOT inherit from [decorations]. Without explicit values on the rule, a layer surface has no border, no shadow, and no corner clip.
+
+- `layer_order` — stacking among layer surfaces sharing the same wlr-layer (higher = on top; ties stack by map order, newest on top). The protocol has no z-index within a layer, so two overlay clients (e.g. an on-screen keyboard and a touch visualizer) otherwise stack by launch order. Ignored for regular windows.
+
+**Example: keep the on-screen keyboard above other overlay surfaces**
+
+```toml
+[[window_rules]]
+app_id      = "wvkbd"
+layer_order = 10
+```
 
 **Example: Desktop widget (pinned clock/calendar)**
 

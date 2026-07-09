@@ -872,6 +872,55 @@ impl DriftWm {
         }
     }
 
+    /// Layer-shell surfaces of `layer` on `output` with their mapped
+    /// geometries, topmost first. The protocol has no z-order within a
+    /// wlr-layer, so map order decides (newest on top) unless `layer_order`
+    /// window rules rank surfaces explicitly (higher on top; ties keep map
+    /// order). Render, hit-testing, and focus scans all use this, so visual
+    /// z, input z, and focus priority can't disagree.
+    pub fn layers_on_sorted(
+        &self,
+        output: &Output,
+        layer: smithay::wayland::shell::wlr_layer::Layer,
+    ) -> Vec<(
+        smithay::desktop::LayerSurface,
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    )> {
+        let map = smithay::desktop::layer_map_for_output(output);
+        // Rule resolution globs per surface; skip it when no rule ranks layers.
+        let has_orders = self
+            .config
+            .window_rules
+            .iter()
+            .any(|r| r.layer_order.is_some());
+        let mut surfaces: Vec<_> = map
+            .layers_on(layer)
+            .enumerate()
+            .map(|(map_idx, s)| {
+                let order = if has_orders {
+                    self.config
+                        .resolve_window_rules(s.namespace(), "")
+                        .and_then(|r| r.layer_order)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                (
+                    order,
+                    map_idx,
+                    s.clone(),
+                    map.layer_geometry(s).unwrap_or_default(),
+                )
+            })
+            .collect();
+        surfaces.sort_by_key(|&(order, map_idx, ..)| (order, map_idx));
+        surfaces.reverse();
+        surfaces
+            .into_iter()
+            .map(|(_, _, s, geo)| (s, geo))
+            .collect()
+    }
+
     /// First mapped layer surface (across outputs and canvas layers) that
     /// requests `Exclusive` keyboard interactivity, in z-priority order.
     fn exclusive_layer_focus(&self) -> Option<FocusTarget> {
@@ -888,9 +937,8 @@ impl DriftWm {
             }
         }
         for output in self.space.outputs() {
-            let map = smithay::desktop::layer_map_for_output(output);
             for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
-                for surface in map.layers_on(layer) {
+                for (surface, _) in self.layers_on_sorted(output, layer) {
                     let s = surface.wl_surface();
                     if s.alive()
                         && surface.cached_state().keyboard_interactivity
