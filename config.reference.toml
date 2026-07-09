@@ -40,6 +40,8 @@
 # # also launches XDG autostart entries (~/.config/autostart, /etc/xdg/autostart),
 # # in addition to the autostart list above. To opt out:
 # #   systemctl --user mask xdg-desktop-autostart.target
+# # Example:
+# # autostart = ["waybar", "swaync"]
 
 [env]
 # # Environment variables set before any clients launch.
@@ -427,7 +429,7 @@
 # #   N-finger-pinch-in/out     — threshold only
 # #   N-finger-hold             — threshold only (fires on release)
 # #
-# # Continuous actions: pan-viewport, zoom, move-window, resize-window, resize-window-snapped
+# # Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped
 # # Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, exec <cmd>, etc.
 
 [gestures.on-window]
@@ -482,8 +484,9 @@
 # #   N-finger-doubletap-swipe  — continuous only (tap then drag)
 # #   N-finger-hold-swipe       — continuous only (dwell then drag)
 # #
-# # Continuous actions: pan-viewport (swipe), zoom (pinch), move-window / resize-window
-# # (doubletap-swipe / hold-swipe). A held move-window extends to the snap-cluster.
+# # Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs —
+# # move-window / move-snapped-windows / resize-window / resize-window-snapped
+# # (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster.
 # # Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, exec <cmd>, etc.
 # #
 # # Note: within one physical gesture, a continuous translation (pan) and a
@@ -491,9 +494,13 @@
 # # continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
 
 [touch.on-window]
-# # Empty by default: 1–2 fingers starting on a window forward to the app, and the
-# # 3+ finger gestures below are bound "anywhere" so they apply over windows too.
-# # Bind here to override an "anywhere" gesture only when it starts on a window.
+# # 1–2 fingers starting on a window forward to the app, and the 3+ finger
+# # pan/zoom/navigate gestures are bound "anywhere" so they apply over windows
+# # too. The window-targeted gestures live here: they act on the window the
+# # fingers land on (a gesture starting on empty canvas just pans).
+# "3-finger-doubletap" = "fit-window"
+# "3-finger-doubletap-swipe" = "move-window"  # continuous (hold to move the cluster)
+# "3-finger-hold-swipe" = "resize-window"     # continuous (dwell then drag)
 
 [touch.on-canvas]
 # "1-finger-swipe" = "pan-viewport"
@@ -509,9 +516,6 @@
 # # 5-finger navigation mirrors 4-finger by default, so a stray 5th contact
 # # doesn't abort a navigation gesture.
 # "3-finger-tap" = "center-window"
-# "3-finger-doubletap" = "fit-window"
-# "3-finger-doubletap-swipe" = "move-window"  # continuous (hold to move the cluster)
-# "3-finger-hold-swipe" = "resize-window"     # continuous (dwell then drag)
 
 [xwayland]
 # # X11 support via xwayland-satellite. driftwm spawns satellite eagerly at

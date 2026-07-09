@@ -45,6 +45,12 @@ Running driftwm as a systemd session (via driftwm-session / a display manager) a
 systemctl --user mask xdg-desktop-autostart.target
 ```
 
+**Example:**
+
+```toml
+autostart = ["waybar", "swaync"]
+```
+
 ## `[env]`
 
 Environment variables set before any clients launch. Child processes (autostart, exec bindings) inherit these. These override the compositor's built-in toolkit defaults (MOZ_ENABLE_WAYLAND, QT_QPA_PLATFORM, SDL_VIDEODRIVER, GDK_BACKEND, ELECTRON_OZONE_PLATFORM_HINT).
@@ -793,7 +799,7 @@ Gesture types:
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-hold` — threshold only (fires on release)
 
-Continuous actions: pan-viewport, zoom, move-window, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, exec <cmd>, etc.
+Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, exec <cmd>, etc.
 
 ## `[gestures.on-window]`
 
@@ -859,13 +865,19 @@ Touch gesture types (1–5 fingers):
 - `N-finger-doubletap-swipe` — continuous only (tap then drag)
 - `N-finger-hold-swipe` — continuous only (dwell then drag)
 
-Continuous actions: pan-viewport (swipe), zoom (pinch), move-window / resize-window (doubletap-swipe / hold-swipe). A held move-window extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, exec <cmd>, etc.
+Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, exec <cmd>, etc.
 
 Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
 
 ## `[touch.on-window]`
 
-Empty by default: 1–2 fingers starting on a window forward to the app, and the 3+ finger gestures below are bound "anywhere" so they apply over windows too. Bind here to override an "anywhere" gesture only when it starts on a window.
+1–2 fingers starting on a window forward to the app, and the 3+ finger pan/zoom/navigate gestures are bound "anywhere" so they apply over windows too. The window-targeted gestures live here: they act on the window the fingers land on (a gesture starting on empty canvas just pans).
+
+| Binding | Action | Notes |
+| --- | --- | --- |
+| `"3-finger-doubletap"` | `fit-window` |  |
+| `"3-finger-doubletap-swipe"` | `move-window` | continuous (hold to move the cluster) |
+| `"3-finger-hold-swipe"` | `resize-window` | continuous (dwell then drag) |
 
 ## `[touch.on-canvas]`
 
@@ -887,9 +899,6 @@ Empty by default: 1–2 fingers starting on a window forward to the app, and the
 | `"4-finger-pinch-in"` | `zoom-to-fit` | threshold |
 | `"4-finger-pinch-out"` | `home-toggle` | threshold |
 | `"3-finger-tap"` | `center-window` |  |
-| `"3-finger-doubletap"` | `fit-window` |  |
-| `"3-finger-doubletap-swipe"` | `move-window` | continuous (hold to move the cluster) |
-| `"3-finger-hold-swipe"` | `resize-window` | continuous (dwell then drag) |
 
 ## `[xwayland]`
 
