@@ -161,7 +161,10 @@ A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 ```
 
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
-focused window first.
+focused window first. The reply also carries `fullscreen` and `pinned`
+(screen-space windows), `layers` (namespaces of screen-space layer-shell
+surfaces), and `canvas_layers` (canvas-positioned layers with rule-coordinate
+position and size).
 
 ### Talking to the socket directly
 

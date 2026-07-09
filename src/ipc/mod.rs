@@ -241,12 +241,15 @@ fn layout_code(layout_list: &str, index: usize) -> Option<String> {
 fn cmd_state(state: &mut DriftWm) -> Response {
     let windows = state.window_inventory();
     let (fullscreen, pinned) = state.screen_space_inventory();
+    let (layers, canvas_layers) = state.layer_inventory();
     Response::State {
         camera: camera_center(state),
         zoom: state.zoom(),
         windows,
         fullscreen,
         pinned,
+        layers,
+        canvas_layers,
     }
 }
 

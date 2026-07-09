@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use driftwm::window_ext::WindowExt;
 
-use crate::ipc::protocol::{OutputFullscreen, OutputPinned, WindowInfo};
+use crate::ipc::protocol::{CanvasLayerInfo, OutputFullscreen, OutputPinned, WindowInfo};
 
 use super::{DriftWm, output_state};
 
@@ -121,6 +121,40 @@ impl DriftWm {
         windows
     }
 
+    /// Layer-shell inventory, shared by the IPC `state` reply and the state
+    /// file: namespaces of screen-space layer surfaces, plus canvas-positioned
+    /// layers (which bypass the layer map) with their canvas rect in rule
+    /// coordinates like `windows=`, sorted for deterministic output.
+    pub fn layer_inventory(&self) -> (Vec<String>, Vec<CanvasLayerInfo>) {
+        let mut layers: Vec<String> = Vec::new();
+        for output in self.space.outputs() {
+            let layer_map = smithay::desktop::layer_map_for_output(output);
+            for layer in layer_map.layers() {
+                let ns = layer.namespace().to_string();
+                if !ns.is_empty() && !layers.contains(&ns) {
+                    layers.push(ns);
+                }
+            }
+        }
+
+        let mut canvas_layers: Vec<CanvasLayerInfo> = self
+            .canvas_layers
+            .iter()
+            .filter_map(|cl| {
+                let pos = cl.position?;
+                let size = cl.surface.bbox().size;
+                let (rx, ry) = driftwm::canvas::internal_to_rule(pos, size);
+                Some(CanvasLayerInfo {
+                    app_id: cl.namespace.clone(),
+                    position: [rx, ry],
+                    size: [size.w, size.h],
+                })
+            })
+            .collect();
+        canvas_layers.sort_by(|a, b| (&a.app_id, a.position).cmp(&(&b.app_id, b.position)));
+        (layers, canvas_layers)
+    }
+
     /// Screen-space windows (fullscreen + pinned) for the IPC `state` reply,
     /// each tagged with its output. Mirrors the state file's per-output
     /// `outputs.{name}.{fullscreen,pinned}` sections (same source fields), so a
@@ -180,36 +214,7 @@ impl DriftWm {
 
         let window_fps = self.window_inventory();
 
-        // Layer-shell namespaces (waybar, notifications, etc.).
-        let mut layers: Vec<String> = Vec::new();
-        for output in self.space.outputs() {
-            let layer_map = smithay::desktop::layer_map_for_output(output);
-            for layer in layer_map.layers() {
-                let ns = layer.namespace().to_string();
-                if !ns.is_empty() && !layers.contains(&ns) {
-                    layers.push(ns);
-                }
-            }
-        }
-
-        // Canvas-positioned layers bypass the layer map; report them with
-        // their canvas rect (rule coordinates, like `windows=`) so tools can
-        // discover their namespaces and placement.
-        let mut canvas_layer_infos: Vec<CanvasLayerInfo> = self
-            .canvas_layers
-            .iter()
-            .filter_map(|cl| {
-                let pos = cl.position?;
-                let size = cl.surface.bbox().size;
-                let (rx, ry) = driftwm::canvas::internal_to_rule(pos, size);
-                Some(CanvasLayerInfo {
-                    app_id: cl.namespace.clone(),
-                    position: [rx, ry],
-                    size: [size.w, size.h],
-                })
-            })
-            .collect();
-        canvas_layer_infos.sort_by(|a, b| (&a.app_id, a.position).cmp(&(&b.app_id, b.position)));
+        let (layers, canvas_layer_infos) = self.layer_inventory();
         let canvas_sig: Vec<(String, [i32; 2], [i32; 2])> = canvas_layer_infos
             .iter()
             .map(|c| (c.app_id.clone(), c.position, c.size))
@@ -387,18 +392,6 @@ impl DriftWm {
             self.state_file_canvas_layers = canvas_sig;
         }
     }
-}
-
-/// A canvas-positioned layer surface in the state file's `canvas_layers=`
-/// line. `position` uses rule coordinates (Y-up, window-centered), like
-/// `windows=`. The top-left anchor is frozen at map time while the center is
-/// derived from the *current* size, so for a surface that grew after mapping
-/// the reported center drifts from the rule that placed it.
-#[derive(serde::Serialize)]
-struct CanvasLayerInfo {
-    app_id: String,
-    position: [i32; 2],
-    size: [i32; 2],
 }
 
 fn state_file_dir() -> Option<std::path::PathBuf> {

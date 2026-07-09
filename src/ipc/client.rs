@@ -246,6 +246,8 @@ fn print_response(response: Response) {
             windows,
             fullscreen,
             pinned,
+            layers,
+            canvas_layers,
         } => {
             println!("camera {} {}", camera.0, camera.1);
             println!("zoom {zoom}");
@@ -281,6 +283,17 @@ fn print_response(response: Response) {
                 println!(
                     "  {} {} [{}, {}] {}x{}{}",
                     p.output, p.app_id, p.position[0], p.position[1], p.size[0], p.size[1], title
+                );
+            }
+            println!("layers {}", layers.len());
+            for ns in layers {
+                println!("    {ns}");
+            }
+            println!("canvas-layers {}", canvas_layers.len());
+            for c in canvas_layers {
+                println!(
+                    "    {} [{}, {}] {}x{}",
+                    c.app_id, c.position[0], c.position[1], c.size[0], c.size[1]
                 );
             }
         }

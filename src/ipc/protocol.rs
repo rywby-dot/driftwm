@@ -82,6 +82,12 @@ pub enum Response {
         fullscreen: Vec<OutputFullscreen>,
         #[serde(default)]
         pinned: Vec<OutputPinned>,
+        /// Namespaces of screen-space layer-shell surfaces (bars, OSKs,
+        /// overlays) — the `app_id` a window rule matches them by.
+        #[serde(default)]
+        layers: Vec<String>,
+        #[serde(default)]
+        canvas_layers: Vec<CanvasLayerInfo>,
     },
     Focused(Option<String>),
     /// Window-center, Y-up coordinates.
@@ -130,6 +136,19 @@ pub struct OutputPinned {
     pub output: String,
     pub app_id: String,
     pub title: String,
+    pub position: [i32; 2],
+    pub size: [i32; 2],
+}
+
+/// A canvas-positioned layer surface, shared by the IPC `state` reply and the
+/// state file's `canvas_layers=` line. `app_id` is the layer-shell namespace;
+/// `position` uses rule coordinates (Y-up, window-centered), like
+/// [`WindowInfo`]. The top-left anchor is frozen at map time while the center
+/// is derived from the *current* size, so for a surface that grew after
+/// mapping the reported center drifts from the rule that placed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanvasLayerInfo {
+    pub app_id: String,
     pub position: [i32; 2],
     pub size: [i32; 2],
 }
@@ -226,6 +245,12 @@ mod tests {
                     title: "Volume".into(),
                     position: [20, 40],
                     size: [320, 240],
+                }],
+                layers: vec!["waybar".into()],
+                canvas_layers: vec![CanvasLayerInfo {
+                    app_id: "drift-clock".into(),
+                    position: [0, 200],
+                    size: [311, 136],
                 }],
             }),
             Ok(Response::Focused(None)),
