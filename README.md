@@ -111,6 +111,8 @@ action (launching an app, navigating) naturally exits it.
 
 ### Touchscreen
 
+https://github.com/user-attachments/assets/35316541-ad39-4c36-95ab-4093bd48c172
+
 Everything works by touch too: pan and zoom the canvas, jump between windows, and
 move or resize windows — even whole window groups — exactly as you would on a
 trackpad.
