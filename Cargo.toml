@@ -45,6 +45,11 @@ tracy-client = { version = "0.18.4", default-features = false, optional = true }
 [dev-dependencies]
 proptest = "1"
 
+[lints.clippy]
+# A guard locked in a scrutinee outlives the body — re-locking inside deadlocks
+# the event loop (see dev/docs/CAVEATS.md).
+significant_drop_in_scrutinee = "warn"
+
 [features]
 # Enables the Tracy profiler instrumentation. Spans, plots, and frame marks
 # are no-ops without this feature, so it carries zero overhead off.

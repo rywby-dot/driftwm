@@ -293,6 +293,9 @@ impl DriftWm {
                 let mut os = super::output_state(&output);
                 os.camera = ret.camera;
                 os.zoom = ret.zoom;
+                os.camera_target = None;
+                os.zoom_target = None;
+                os.zoom_animation_center = None;
             }
         }
         if !dead.is_empty() {

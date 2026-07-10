@@ -240,9 +240,21 @@ impl XdgShellHandler for DriftWm {
         let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
         if let Some(ref output) = fs_output {
             self.stage.take_fullscreen(&output.name());
-            if let Some(ret) = output_state(output).fullscreen_return.take() {
-                output_state(output).camera = ret.camera;
-                output_state(output).zoom = ret.zoom;
+            // Two statements, not one `if let`: the scrutinee's MutexGuard
+            // lives to the end of the body, deadlocking the re-lock inside.
+            let ret = output_state(output).fullscreen_return.take();
+            if let Some(ret) = ret {
+                {
+                    let mut os = output_state(output);
+                    os.camera = ret.camera;
+                    os.zoom = ret.zoom;
+                    // The per-tick clear stops firing once take_fullscreen
+                    // removes the stage entry, so targets must be reset here
+                    // (as in exit_fullscreen_on).
+                    os.camera_target = None;
+                    os.zoom_target = None;
+                    os.zoom_animation_center = None;
+                }
                 self.update_output_from_camera();
             }
         }

@@ -309,12 +309,19 @@ pub fn output_logical_size(output: &Output) -> Size<i32, Logical> {
 }
 
 pub fn output_state(output: &Output) -> MutexGuard<'_, OutputState> {
-    output
+    let mutex = output
         .user_data()
         .get::<Mutex<OutputState>>()
-        .expect("OutputState not initialized on output")
-        .lock()
-        .expect("OutputState mutex poisoned")
+        .expect("OutputState not initialized on output");
+    // Only the main thread locks this, so contention can only be a re-entrant
+    // lock — fail loudly in dev builds instead of deadlocking.
+    if cfg!(debug_assertions) {
+        mutex
+            .try_lock()
+            .expect("output_state locked re-entrantly — this deadlocks in release builds")
+    } else {
+        mutex.lock().expect("OutputState mutex poisoned")
+    }
 }
 
 /// An output's current viewport as a canvas rect: `screen = (canvas − camera) ·
@@ -1896,6 +1903,26 @@ mod tests {
             home_return: None,
             fullscreen_return: None,
         }
+    }
+
+    #[test]
+    fn output_state_relock_panics_instead_of_deadlocking() {
+        let output = Output::new(
+            "relock-test".to_string(),
+            smithay::output::PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: smithay::output::Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "0".to_string(),
+            },
+        );
+        init_output_state(&output, Point::from((0.0, 0.0)), 0.96, Point::from((0, 0)));
+        let _guard = output_state(&output);
+        let relock = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(output_state(&output));
+        }));
+        assert!(relock.is_err(), "re-entrant lock must panic, not deadlock");
     }
 
     #[test]
