@@ -91,12 +91,10 @@ impl WlrLayerShellHandler for DriftWm {
             });
             desktop_surface.layer_surface().send_configure();
 
-            // Send wl_surface.enter so client knows output scale/transform
-            if let Some(client) = desktop_surface.wl_surface().client() {
-                for co in resolved_output.client_outputs(&client) {
-                    desktop_surface.wl_surface().enter(&co);
-                }
-            }
+            // Output::enter (vs raw wl_surface.enter) tells the client the
+            // output's scale/transform and records the surface in enter
+            // tracking, so leave_all on output teardown covers canvas layers.
+            resolved_output.enter(desktop_surface.wl_surface());
 
             self.canvas_layers.push(CanvasLayer {
                 surface: desktop_surface,

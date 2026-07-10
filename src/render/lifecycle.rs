@@ -19,7 +19,15 @@ const FRAME_CALLBACK_THROTTLE: Duration = Duration::from_millis(995);
 pub fn refresh_foreign_toplevels(state: &mut crate::state::DriftWm) {
     let keyboard = state.seat.get_keyboard().unwrap();
     let focused = keyboard.current_focus().map(|f| f.0);
-    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+    // Skip virtual placeholders for disconnected monitors — their wl_output
+    // global is gone, so advertising them to new toplevels would reference a
+    // proxy clients have already destroyed.
+    let outputs: Vec<Output> = state
+        .space
+        .outputs()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
     driftwm::protocols::foreign_toplevel::refresh::<crate::state::DriftWm>(
         &mut state.foreign_toplevel_state,
         &mut state.foreign_toplevel_list_state,

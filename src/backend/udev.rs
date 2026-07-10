@@ -810,6 +810,11 @@ pub fn init_udev(
                                             .cloned()
                                             .collect();
                                         for old in &virtual_outputs {
+                                            // Surfaces re-enter the placeholder while headless
+                                            // whenever their bbox changes; drain those enters
+                                            // now so clients see the old output's leave before
+                                            // the new output's enter.
+                                            old.leave_all();
                                             data.space.unmap_output(old);
                                             data.render.remove_output(&old.name());
                                         }
@@ -1303,6 +1308,10 @@ fn create_surface(
 /// Tear down a `wl_output` global. Disables it now so clients see the
 /// removal event, then queues a delayed `remove_global` so any in-flight
 /// bind requests don't hit a freed global and get protocol-killed.
+///
+/// Callers must send every event referencing this output (`wl_surface.leave`,
+/// foreign-toplevel `output_leave`, …) before calling this — see the ordering
+/// note in `teardown_output`.
 fn remove_output_global(data: &mut DriftWm, global: GlobalId) {
     data.display_handle
         .disable_global::<DriftWm>(global.clone());
@@ -1328,6 +1337,14 @@ fn remove_output_global(data: &mut DriftWm, global: GlobalId) {
 /// dying output keeps mutating its stale per-output state on every cursor event.
 fn teardown_output(data: &mut DriftWm, surface: SurfaceData, is_last: bool) {
     let SurfaceData { output, global, .. } = surface;
+
+    // Send wl_surface.leave while clients' wl_output proxies are still valid.
+    // Once the global is disabled below, clients destroy their proxy on
+    // global_remove — a leave sent after that (normally by the next
+    // Space::refresh) arrives in libwayland with a NULL wl_output argument and
+    // segfaults clients that don't null-check it. leave_all also clears
+    // smithay's enter tracking, so the later refresh-driven leave is a no-op.
+    output.leave_all();
 
     driftwm::protocols::foreign_toplevel::send_output_leave_all(
         &mut data.foreign_toplevel_state,
