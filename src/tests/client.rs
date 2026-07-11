@@ -330,6 +330,16 @@ impl Window {
         self.surface.commit();
     }
 
+    /// Clean client-initiated close: tear down the xdg role and surface in
+    /// protocol order (toplevel → xdg_surface → viewport → wl_surface). The
+    /// server sees `toplevel_destroyed` on the next dispatch.
+    pub fn destroy(&self) {
+        self.xdg_toplevel.destroy();
+        self.xdg_surface.destroy();
+        self.viewport.destroy();
+        self.surface.destroy();
+    }
+
     pub fn ack_last(&self) {
         let serial = self.configures_received.last().unwrap().0;
         self.xdg_surface.ack_configure(serial);

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
@@ -5,7 +6,9 @@ use std::time::Duration;
 
 use smithay::output::Output;
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
+use smithay::reexports::calloop::{
+    EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+};
 
 use driftwm::config::Config;
 
@@ -22,6 +25,10 @@ pub struct Fixture {
     pub event_loop: EventLoop<'static, FixtureState>,
     pub handle: LoopHandle<'static, FixtureState>,
     pub state: FixtureState,
+    /// Outer-loop source token per client, so `kill_client` can unregister the
+    /// nested client loop before dropping the client (whose callback would
+    /// otherwise fire against a missing client).
+    client_tokens: HashMap<ClientId, RegistrationToken>,
 }
 
 pub struct FixtureState {
@@ -59,6 +66,7 @@ impl Fixture {
             event_loop,
             handle,
             state,
+            client_tokens: HashMap::new(),
         }
     }
 
@@ -85,16 +93,37 @@ impl Fixture {
 
         let fd = client.event_loop.as_fd().try_clone_to_owned().unwrap();
         let source = Generic::new(fd, Interest::READ, Mode::Level);
-        self.handle
+        let token = self
+            .handle
             .insert_source(source, move |_, _, state: &mut FixtureState| {
                 state.client(id).dispatch();
                 Ok(PostAction::Continue)
             })
             .unwrap();
+        self.client_tokens.insert(id, token);
 
         self.state.clients.push(client);
         self.roundtrip(id);
         id
+    }
+
+    /// Simulate abrupt client death: unregister the client's nested loop from
+    /// the outer loop, then drop the client so its socket closes and the server
+    /// observes the disconnect. Does not settle — the caller pumps and asserts.
+    pub fn kill_client(&mut self, id: ClientId) {
+        if let Some(token) = self.client_tokens.remove(&id) {
+            self.handle.remove(token);
+        }
+        self.state.clients.retain(|c| c.id != id);
+    }
+
+    /// Dispatch the server loop `rounds` times with no client to roundtrip
+    /// against. Used after `kill_client` to let the server process the socket
+    /// close (destroy handlers, `retain_alive`, invariant check) to completion.
+    pub fn pump(&mut self, rounds: usize) {
+        for _ in 0..rounds {
+            self.state.server.dispatch();
+        }
     }
 
     pub fn client(&mut self, id: ClientId) -> &mut Client {
