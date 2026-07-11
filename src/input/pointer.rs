@@ -154,7 +154,9 @@ impl DriftWm {
                         // if the post-exit dispatch lookup missed.
                     }
                     Some(_) => {
-                        pos = self.exit_fullscreen_remap_pointer(pos);
+                        // The exit warps the pointer to keep its screen spot.
+                        self.exit_fullscreen();
+                        pos = pointer.current_location();
                     }
                     None => {
                         // Reclaim keyboard focus for the fullscreen window before
@@ -831,8 +833,9 @@ impl DriftWm {
             {
                 Some(MouseAction::PanViewport | MouseAction::Zoom) => {
                     // Dispatch below anchors pan/zoom on `pos`, so it must be
-                    // the remapped post-exit position.
-                    pos = self.exit_fullscreen_remap_pointer(pos);
+                    // the post-exit position (the exit warps the pointer).
+                    self.exit_fullscreen();
+                    pos = pointer.current_location();
                 }
                 Some(_) => {}
                 None => {

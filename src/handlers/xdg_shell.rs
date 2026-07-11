@@ -244,18 +244,7 @@ impl XdgShellHandler for DriftWm {
             // lives to the end of the body, deadlocking the re-lock inside.
             let ret = output_state(output).fullscreen_return.take();
             if let Some(ret) = ret {
-                {
-                    let mut os = output_state(output);
-                    os.camera = ret.camera;
-                    os.zoom = ret.zoom;
-                    // The per-tick clear stops firing once take_fullscreen
-                    // removes the stage entry, so targets must be reset here
-                    // (as in exit_fullscreen_on).
-                    os.camera_target = None;
-                    os.zoom_target = None;
-                    os.zoom_animation_center = None;
-                }
-                self.update_output_from_camera();
+                self.restore_fullscreen_view(output, ret.camera, ret.zoom);
             }
         }
         // Belt and suspenders: a dead window whose surface no longer resolves

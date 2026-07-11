@@ -68,7 +68,8 @@ impl DriftWm {
                         | ContinuousAction::MoveSnappedWindows),
                     ) => {
                         if self.is_fullscreen() {
-                            pos = self.exit_fullscreen_remap_pointer(pos);
+                            self.exit_fullscreen();
+                            pos = pointer.current_location();
                         }
                         if let Some((window, _)) = self.window_under(pos) {
                             let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
@@ -82,7 +83,8 @@ impl DriftWm {
                         | ContinuousAction::ResizeWindowSnapped),
                     ) => {
                         if self.is_fullscreen() {
-                            pos = self.exit_fullscreen_remap_pointer(pos);
+                            self.exit_fullscreen();
+                            pos = pointer.current_location();
                         }
                         if let Some((window, _)) = self.window_under(pos).filter(|(w, _)| {
                             !w.wl_surface()
@@ -117,7 +119,8 @@ impl DriftWm {
         match entry {
             Some(GestureConfigEntry::Continuous(action)) => {
                 if self.is_fullscreen() {
-                    pos = self.exit_fullscreen_remap_pointer(pos);
+                    self.exit_fullscreen();
+                    pos = pointer.current_location();
                 }
                 self.cancel_animations();
                 self.gesture_output = self.active_output();

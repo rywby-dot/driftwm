@@ -49,7 +49,7 @@ impl DriftWm {
             // Exit before baselining: the gesture zooms from the restored
             // camera/zoom, not the locked fullscreen viewport.
             if self.is_fullscreen() {
-                self.exit_fullscreen_remap_pointer(pos);
+                self.exit_fullscreen();
             }
             self.cancel_animations();
             self.gesture_output = self.active_output();

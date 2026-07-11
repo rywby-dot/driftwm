@@ -843,14 +843,14 @@ impl DriftWm {
             let time = self.start_time.elapsed().as_millis() as u32;
             self.seat.get_keyboard().unwrap().unset_grab(self);
             // Defer the pointer ungrab to an idle: a focus change can originate
-            // inside a PointerGrab's own callback (NavigateGrab's center-nearest
-            // drag and PanGrab's click-on-empty-canvas both move focus from their
-            // motion/button), and PointerHandle holds a non-reentrant mutex across
-            // that callback. Calling `unset_grab` inline would re-lock it on the
-            // same thread and hang the compositor; the idle runs once dispatch
-            // unwinds and the lock is free. Whatever owns the pointer by then —
-            // the popup grab on the keyboard path or the drag grab itself on the
-            // mouse path — has finished interacting, so ending it is harmless.
+            // inside a PointerGrab's own callback (PanGrab's click-on-empty-canvas
+            // moves focus from its button handler), and PointerHandle holds a
+            // non-reentrant mutex across that callback. Calling `unset_grab` inline
+            // would re-lock it on the same thread and hang the compositor; the idle
+            // runs once dispatch unwinds and the lock is free. Whatever owns the
+            // pointer by then — the popup grab on the keyboard path or the drag
+            // grab itself on the mouse path — has finished interacting, so ending
+            // it is harmless.
             self.loop_handle.insert_idle(move |data| {
                 data.seat
                     .get_pointer()
