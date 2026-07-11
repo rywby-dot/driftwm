@@ -91,6 +91,16 @@ impl DriftWm {
         let Some(home) = self.output_for_window(window) else {
             return;
         };
+        // Exit fullscreen before activating a different window on that output
+        // — otherwise the target gets focus while hidden behind the
+        // fullscreen window, and the visibility check below runs against the
+        // parked camera instead of the restored one.
+        if self
+            .fullscreen_window_on(&home)
+            .is_some_and(|fs| &fs != window)
+        {
+            self.exit_fullscreen_on(&home);
+        }
         if self.window_visible_at_least_on(window, &home, ACTIVATION_VISIBLE_THRESHOLD) {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.raise_and_focus(window, serial);
