@@ -81,6 +81,13 @@ fn window_list_changed(a: &[WindowInfo], b: &[WindowInfo]) -> bool {
         })
 }
 
+// Titles are excluded from file dirtiness (see above), but IPC subscribers want
+// them, so a title-only change still pushes an event without rewriting the file.
+// A length change is already covered by `window_list_changed`.
+fn window_titles_changed(a: &[WindowInfo], b: &[WindowInfo]) -> bool {
+    a.iter().zip(b).any(|(x, y)| x.title != y.title)
+}
+
 impl DriftWm {
     /// The canvas window inventory in the shared [`WindowInfo`] shape (position =
     /// window center, Y-up), focused window first. Single source of truth for
@@ -232,6 +239,10 @@ impl DriftWm {
             return;
         }
 
+        // Retry any event bytes a stalled subscriber couldn't take, so it
+        // converges after draining even if nothing else changes.
+        crate::ipc::flush_subscriber_outboxes(self);
+
         let window_fps = self.window_inventory();
 
         let (layers, canvas_layer_infos) = self.layer_inventory();
@@ -338,10 +349,30 @@ impl DriftWm {
         let screen_space_dirty =
             pinned_sig != self.state_file_pinned || fullscreen_sig != self.state_file_fullscreen;
 
-        if !layout_dirty && !any_output_dirty && !windows_dirty && !screen_space_dirty {
+        let titles_dirty = window_titles_changed(&window_fps, &self.state_file_windows);
+        // The file's top-level camera and the snapshot's `active` flags follow
+        // the active output, so switching outputs dirties them even when no
+        // camera moved.
+        let active_name = self.active_output().map(|o| o.name());
+        let active_dirty = active_name != self.state_file_active_output;
+
+        if !layout_dirty
+            && !any_output_dirty
+            && !windows_dirty
+            && !screen_space_dirty
+            && !active_dirty
+        {
+            if titles_dirty {
+                self.state_file_last_write = Instant::now();
+                crate::ipc::broadcast_state_event(self);
+                // Cache the new titles or this re-fires every tick; the file
+                // itself deliberately stays stale on title-only changes.
+                self.state_file_windows = window_fps;
+            }
             return;
         }
         self.state_file_last_write = Instant::now();
+        crate::ipc::broadcast_state_event(self);
 
         let z = self.zoom();
         let vp = self.get_viewport_size();
@@ -428,6 +459,7 @@ impl DriftWm {
             self.state_file_pinned = pinned_sig;
             self.state_file_fullscreen = fullscreen_sig;
             self.state_file_canvas_layers = canvas_sig;
+            self.state_file_active_output = active_name;
         }
     }
 }
@@ -485,4 +517,35 @@ pub fn read_all_per_output_state() -> HashMap<String, (Point<f64, Logical>, f64)
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win(id: u64, title: &str) -> WindowInfo {
+        WindowInfo {
+            id,
+            app_id: "app".into(),
+            title: title.into(),
+            position: [0, 0],
+            size: [100, 100],
+            is_focused: false,
+            is_widget: false,
+        }
+    }
+
+    #[test]
+    fn titles_changed_detects_title_only_diff() {
+        let a = vec![win(1, "one"), win(2, "two")];
+        let b = vec![win(1, "one"), win(2, "TWO")];
+        assert!(window_titles_changed(&a, &b));
+    }
+
+    #[test]
+    fn titles_changed_ignores_equal_titles() {
+        let a = vec![win(1, "one"), win(2, "two")];
+        let b = vec![win(1, "one"), win(2, "two")];
+        assert!(!window_titles_changed(&a, &b));
+    }
 }

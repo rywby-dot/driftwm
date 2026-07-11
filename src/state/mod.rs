@@ -392,6 +392,12 @@ pub struct DriftWm {
     pub backend: Option<Backend>,
     // -- global: IPC server --
     pub ipc_server: Option<crate::ipc::IpcServer>,
+    /// Subscribed IPC connections receiving pushed state events. Pruned when a
+    /// push write finds the connection gone, and on connection teardown.
+    pub ipc_subscribers: Vec<crate::ipc::Subscriber>,
+    /// Hash of the last broadcast event, to skip re-sending an identical
+    /// snapshot when a dirty tick didn't change what subscribers see.
+    pub ipc_last_event_hash: Option<u64>,
     // -- global: SSD decorations --
     pub decorations: HashMap<
         smithay::reexports::wayland_server::backend::ObjectId,
@@ -560,6 +566,10 @@ pub struct DriftWm {
     /// Sorted `(namespace, position, size)` of canvas-positioned layers, for
     /// the same staleness detection as the pinned/fullscreen signatures.
     pub state_file_canvas_layers: Vec<(String, [i32; 2], [i32; 2])>,
+    /// Name of the active output at the last state-file write. The file's
+    /// top-level camera and the snapshot's `active` flags follow the active
+    /// output, so switching outputs must dirty them even when no camera moved.
+    pub state_file_active_output: Option<String>,
 
     pub autostart: Vec<String>,
 

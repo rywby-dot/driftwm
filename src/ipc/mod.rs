@@ -1,4 +1,5 @@
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -16,7 +17,10 @@ use driftwm::window_ext::WindowExt;
 pub mod client;
 pub mod protocol;
 
-use self::protocol::{Reply, Request, Response, ScreenshotTarget, WindowSelector, socket_path};
+use self::protocol::{
+    Event, OutputInfo, Reply, Request, Response, ScreenshotTarget, StateInfo, WindowSelector,
+    socket_path,
+};
 
 /// Reject a command line longer than this (without a newline) — bounds the
 /// per-connection buffer against a client that never terminates a command.
@@ -105,34 +109,67 @@ fn serve_connection(
     let mut chunk = [0u8; 1024];
     loop {
         match stream.read(&mut chunk) {
-            Ok(0) => return PostAction::Remove, // EOF
+            Ok(0) => return disconnect(stream, state), // EOF
             Ok(n) => {
                 buffer.extend_from_slice(&chunk[..n]);
                 if buffer.len() > MAX_COMMAND_SIZE {
                     tracing::warn!("IPC command too large, disconnecting");
-                    return PostAction::Remove;
+                    return disconnect(stream, state);
                 }
                 while let Some(nl) = buffer.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = buffer.drain(..=nl).collect();
-                    let reply = process_line(&line[..nl], state);
-                    if write_reply(stream, &reply).is_err() {
-                        return PostAction::Remove;
+                    // A half-written pushed event must be flushed before any
+                    // reply, or the reply lands mid-line and corrupts framing.
+                    if flush_pending_events(stream, state).is_err() {
+                        return disconnect(stream, state);
+                    }
+                    let written = match serde_json::from_slice::<Request>(&line[..nl]) {
+                        // Needs the raw stream to register a push channel, so it's
+                        // handled here rather than through the stream-less dispatch.
+                        Ok(Request::Subscribe) => subscribe(stream, state),
+                        Ok(request) => write_reply(stream, &dispatch(request, state)),
+                        Err(e) => write_reply(stream, &Err(format!("invalid request: {e}"))),
+                    };
+                    if written.is_err() {
+                        return disconnect(stream, state);
                     }
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => return PostAction::Continue,
             Err(e) => {
                 tracing::warn!("IPC read error: {e}");
-                return PostAction::Remove;
+                return disconnect(stream, state);
             }
         }
     }
 }
 
-fn process_line(line: &[u8], state: &mut DriftWm) -> Reply {
-    let request: Request =
-        serde_json::from_slice(line).map_err(|e| format!("invalid request: {e}"))?;
-    dispatch(request, state)
+/// Tear down a connection, forgetting its subscription. Must run while the
+/// serving fd is still open: once calloop closes it, the fd number can be
+/// reused by a new connection, and a stale registry entry keyed on it would
+/// swallow that connection's own `Subscribe`.
+fn disconnect(stream: &UnixStream, state: &mut DriftWm) -> PostAction {
+    let fd = stream.as_raw_fd();
+    state.ipc_subscribers.retain(|s| s.fd != fd);
+    PostAction::Remove
+}
+
+/// Blocking-flush any pushed-event bytes still pending on this connection's
+/// subscription (the client is mid-request, so it's reading).
+fn flush_pending_events(stream: &UnixStream, state: &mut DriftWm) -> std::io::Result<()> {
+    let fd = stream.as_raw_fd();
+    let Some(sub) = state.ipc_subscribers.iter_mut().find(|s| s.fd == fd) else {
+        return Ok(());
+    };
+    let partial = std::mem::take(&mut sub.partial);
+    let queued = sub.queued.take();
+    if !partial.is_empty() {
+        write_line(stream, &partial)?;
+    }
+    if let Some(event) = queued {
+        write_line(stream, &event)?;
+    }
+    Ok(())
 }
 
 fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
@@ -148,6 +185,8 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Zoom(arg) => cmd_zoom(arg, state),
         Request::Layout { short } => cmd_layout(short, state),
         Request::State => Ok(cmd_state(state)),
+        // Handled in serve_connection, which has the raw stream Subscribe needs.
+        Request::Subscribe => unreachable!("Subscribe is handled before dispatch"),
         Request::Focus(arg) => cmd_focus(arg, state),
         Request::Move { window, to } => cmd_move(window, to, state),
         Request::Close(sel) => cmd_close(sel, state),
@@ -241,17 +280,51 @@ fn layout_code(layout_list: &str, index: usize) -> Option<String> {
 }
 
 fn cmd_state(state: &mut DriftWm) -> Response {
+    Response::State(state_info(state))
+}
+
+/// Build the full state snapshot shared by the `state` reply and subscription
+/// events, so the two representations can't drift.
+pub(crate) fn state_info(state: &mut DriftWm) -> StateInfo {
     let windows = state.window_inventory();
     let (fullscreen, pinned) = state.screen_space_inventory();
     let (layers, canvas_layers) = state.layer_inventory();
-    Response::State {
-        camera: camera_center(state),
-        zoom: state.zoom(),
+    let layout = state.active_layout.clone();
+    let layout_short = active_layout_short(state);
+    let camera = camera_center(state);
+    let zoom = state.zoom();
+
+    let active = state.active_output();
+    let outputs = state
+        .space
+        .outputs()
+        .map(|output| {
+            let (cam, z) = {
+                let os = crate::state::output_state(output);
+                (os.camera, os.zoom)
+            };
+            let logical = crate::state::output_logical_size(output);
+            OutputInfo {
+                name: output.name(),
+                camera: driftwm::canvas::viewport_center(cam, z, logical),
+                zoom: z,
+                size: [logical.w, logical.h],
+                active: active.as_ref() == Some(output),
+            }
+        })
+        .collect();
+
+    StateInfo {
+        camera,
+        zoom,
+        layout,
+        layout_short,
         windows,
         fullscreen,
         pinned,
         layers,
         canvas_layers,
+        outputs,
     }
 }
 
@@ -543,16 +616,153 @@ fn union_rect(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> Rectang
     Rectangle::new((x0, y0).into(), (x1 - x0, y1 - y0).into())
 }
 
-/// Serialize and send a reply. Switches to a bounded blocking write so a large
-/// reply isn't truncated on `WouldBlock` and a stuck reader can't hang the loop.
-fn write_reply(mut stream: &UnixStream, reply: &Reply) -> std::io::Result<()> {
+/// Serialize and send a reply over `stream`.
+fn write_reply(stream: &UnixStream, reply: &Reply) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(reply)?;
     bytes.push(b'\n');
+    write_line(stream, &bytes)
+}
+
+/// Send a pre-serialized line on the request/reply path. Switches to a bounded
+/// blocking write so a large payload isn't truncated on `WouldBlock` and a stuck
+/// reader can't hang the loop, then restores nonblocking.
+fn write_line(mut stream: &UnixStream, bytes: &[u8]) -> std::io::Result<()> {
     stream.set_nonblocking(false).ok();
     stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
-    let res = stream.write_all(&bytes);
+    let res = stream.write_all(bytes);
     stream.set_nonblocking(true).ok();
     res
+}
+
+/// A subscribed IPC connection: the serving stream's fd (for dedup and
+/// disconnect cleanup), a cloned write handle, and at most two buffered
+/// events — the unwritten tail of the one in flight, plus the newest queued
+/// one (older queued events are superseded, since each is a full snapshot).
+/// Writes never block, so a subscriber that stops reading just accumulates a
+/// queued event and converges once its socket drains.
+pub struct Subscriber {
+    fd: std::os::fd::RawFd,
+    stream: UnixStream,
+    partial: Vec<u8>,
+    queued: Option<Vec<u8>>,
+}
+
+/// Ack a `Subscribe`, push the current snapshot, and register the connection for
+/// future pushes. A repeat on an already-subscribed connection just re-sends the
+/// snapshot (deduped by the serving stream's fd). A failed `try_clone` replies
+/// `Err` and registers nothing.
+fn subscribe(stream: &UnixStream, state: &mut DriftWm) -> std::io::Result<()> {
+    // Clone the write half before acking, so a clone failure surfaces as an
+    // error reply rather than a silently half-registered subscriber.
+    let clone = match stream.try_clone() {
+        Ok(c) => c,
+        Err(e) => return write_reply(stream, &Err(format!("cannot subscribe: {e}"))),
+    };
+    write_reply(stream, &Ok(Response::Ok))?;
+    // The initial snapshot may block (bounded): the client just asked for it,
+    // so it's reading — same guarantee a `state` reply gets.
+    let mut bytes = serde_json::to_vec(&Event::State(state_info(state)))?;
+    bytes.push(b'\n');
+    write_line(stream, &bytes)?;
+    let fd = stream.as_raw_fd();
+    if !state.ipc_subscribers.iter().any(|s| s.fd == fd) {
+        state.ipc_subscribers.push(Subscriber {
+            fd,
+            stream: clone,
+            partial: Vec::new(),
+            queued: None,
+        });
+    }
+    Ok(())
+}
+
+/// Push the current state to every subscriber, dropping the ones whose
+/// connection is gone. Writes never block: a subscriber still draining a
+/// previous event gets this one queued (superseding any older queued event)
+/// and converges once its socket drains.
+pub(crate) fn broadcast_state_event(state: &mut DriftWm) {
+    if state.ipc_subscribers.is_empty() {
+        return;
+    }
+    let Ok(mut bytes) = serde_json::to_vec(&Event::State(state_info(state))) else {
+        return;
+    };
+    bytes.push(b'\n');
+    // A dirty tick that serializes to the same snapshot (e.g. the state-file
+    // write failing persistently and retrying) carries no information — don't
+    // re-send it. New subscribers got the snapshot at subscribe time.
+    let digest = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    if state.ipc_last_event_hash == Some(digest) {
+        return;
+    }
+    state.ipc_last_event_hash = Some(digest);
+
+    let mut subs = std::mem::take(&mut state.ipc_subscribers);
+    subs.retain_mut(|sub| {
+        if sub.partial.is_empty() {
+            sub.partial = bytes.clone();
+        } else {
+            sub.queued = Some(bytes.clone());
+        }
+        drain_subscriber(sub)
+    });
+    state.ipc_subscribers = subs;
+}
+
+/// Retry buffered event writes for subscribers whose socket was full, so a
+/// stalled-then-recovered subscriber converges even when no new change fires a
+/// broadcast. Called from the same throttled tick as the state file.
+pub(crate) fn flush_subscriber_outboxes(state: &mut DriftWm) {
+    if state
+        .ipc_subscribers
+        .iter()
+        .all(|s| s.partial.is_empty() && s.queued.is_none())
+    {
+        return;
+    }
+    state.ipc_subscribers.retain_mut(drain_subscriber);
+}
+
+/// Write as much buffered event data as the socket accepts without blocking.
+/// `false` means the connection is gone.
+fn drain_subscriber(sub: &mut Subscriber) -> bool {
+    loop {
+        if sub.partial.is_empty() {
+            match sub.queued.take() {
+                Some(next) => sub.partial = next,
+                None => return true,
+            }
+        }
+        if !try_drain(&sub.stream, &mut sub.partial) {
+            return false;
+        }
+        if !sub.partial.is_empty() {
+            // Socket full — keep the tail for the next attempt.
+            return true;
+        }
+    }
+}
+
+/// Write as much of `pending` as the socket accepts without blocking, keeping
+/// the rest. `false` means the connection is gone.
+fn try_drain(mut stream: &UnixStream, pending: &mut Vec<u8>) -> bool {
+    while !pending.is_empty() {
+        match stream.write(pending) {
+            Ok(0) => return false,
+            Ok(n) => {
+                pending.drain(..n);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// The viewport center, Y-up — same representation as the state file, so `camera`,

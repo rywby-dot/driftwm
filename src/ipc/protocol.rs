@@ -32,6 +32,10 @@ pub enum Request {
         short: bool,
     },
     State,
+    /// Switches the connection to push mode: after the `Ok` reply the server
+    /// writes one [`Event`] line immediately and another on every state change
+    /// (throttled with the state file, ~10/sec).
+    Subscribe,
     /// Focus a window when `Some` (by [`WindowSelector`]); read the focused
     /// window's `app_id` when `None`.
     Focus(Option<WindowSelector>),
@@ -95,23 +99,7 @@ pub enum Response {
     },
     Zoom(f64),
     Layout(String),
-    State {
-        camera: (f64, f64),
-        zoom: f64,
-        windows: Vec<WindowInfo>,
-        /// Fullscreen + screen-pinned windows, which live in screen space and
-        /// are therefore excluded from `windows` (canvas coords). Empty when none.
-        #[serde(default)]
-        fullscreen: Vec<OutputFullscreen>,
-        #[serde(default)]
-        pinned: Vec<OutputPinned>,
-        /// Namespaces of screen-space layer-shell surfaces (bars, OSKs,
-        /// overlays) — the `app_id` a window rule matches them by.
-        #[serde(default)]
-        layers: Vec<String>,
-        #[serde(default)]
-        canvas_layers: Vec<CanvasLayerInfo>,
-    },
+    State(StateInfo),
     Focused(Option<String>),
     /// Window-center, Y-up coordinates.
     Position {
@@ -129,6 +117,56 @@ pub enum Response {
 
 /// The result of a request: `Ok(Response)` or a human-readable error string.
 pub type Reply = Result<Response, String>;
+
+/// The full compositor state snapshot: the payload of a [`Response::State`]
+/// reply and of a subscription [`Event::State`]. Whole-state, so a subscriber
+/// can diff or re-render from each snapshot without tracking granular events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StateInfo {
+    pub camera: (f64, f64),
+    pub zoom: f64,
+    /// Active keyboard layout, full XKB name (e.g. `English (US)`).
+    #[serde(default)]
+    pub layout: String,
+    /// The configured layout code for the active group (e.g. `us`).
+    #[serde(default)]
+    pub layout_short: String,
+    pub windows: Vec<WindowInfo>,
+    /// Fullscreen + screen-pinned windows, which live in screen space and
+    /// are therefore excluded from `windows` (canvas coords). Empty when none.
+    #[serde(default)]
+    pub fullscreen: Vec<OutputFullscreen>,
+    #[serde(default)]
+    pub pinned: Vec<OutputPinned>,
+    /// Namespaces of screen-space layer-shell surfaces (bars, OSKs,
+    /// overlays) — the `app_id` a window rule matches them by.
+    #[serde(default)]
+    pub layers: Vec<String>,
+    #[serde(default)]
+    pub canvas_layers: Vec<CanvasLayerInfo>,
+    /// Per-output camera state. `camera` is the viewport center, Y-up, like
+    /// the top-level `camera`.
+    #[serde(default)]
+    pub outputs: Vec<OutputInfo>,
+}
+
+/// One output's viewport in the `state` reply. `camera` is the viewport
+/// center, Y-up; `size` is the output's logical size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputInfo {
+    pub name: String,
+    pub camera: (f64, f64),
+    pub zoom: f64,
+    pub size: [i32; 2],
+    pub active: bool,
+}
+
+/// A line pushed to a subscribed connection. Not wrapped in a `Reply` —
+/// events are one-way and can't fail per-request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Event {
+    State(StateInfo),
+}
 
 /// One window in the canvas inventory (`position` = window center, Y-up).
 ///
@@ -215,6 +253,7 @@ mod tests {
             Request::Layout { short: false },
             Request::Layout { short: true },
             Request::State,
+            Request::Subscribe,
             Request::Focus(None),
             Request::Focus(Some(WindowSelector::AppId("alacritty".into()))),
             Request::Focus(Some(WindowSelector::Id(5))),
@@ -300,45 +339,57 @@ mod tests {
         );
     }
 
+    fn sample_state() -> StateInfo {
+        StateInfo {
+            camera: (0.0, 0.0),
+            zoom: 1.0,
+            layout: "English (US)".into(),
+            layout_short: "us".into(),
+            windows: vec![WindowInfo {
+                id: 1,
+                app_id: "foo".into(),
+                title: "bar".into(),
+                position: [10, -20],
+                size: [640, 480],
+                is_focused: true,
+                is_widget: false,
+            }],
+            fullscreen: vec![OutputFullscreen {
+                id: 2,
+                output: "DP-1".into(),
+                app_id: "mpv".into(),
+                title: "video".into(),
+            }],
+            pinned: vec![OutputPinned {
+                id: 3,
+                output: "HDMI-A-1".into(),
+                app_id: "pavucontrol".into(),
+                title: "Volume".into(),
+                position: [20, 40],
+                size: [320, 240],
+            }],
+            layers: vec!["waybar".into()],
+            canvas_layers: vec![CanvasLayerInfo {
+                app_id: "drift-clock".into(),
+                position: [0, 200],
+                size: [311, 136],
+            }],
+            outputs: vec![OutputInfo {
+                name: "DP-1".into(),
+                camera: (-960.0, -600.0),
+                zoom: 1.0,
+                size: [1920, 1200],
+                active: true,
+            }],
+        }
+    }
+
     #[test]
     fn reply_roundtrip() {
-        let windows = vec![WindowInfo {
-            id: 1,
-            app_id: "foo".into(),
-            title: "bar".into(),
-            position: [10, -20],
-            size: [640, 480],
-            is_focused: true,
-            is_widget: false,
-        }];
         let replies: Vec<Reply> = vec![
             Ok(Response::Camera { x: 1.0, y: 2.0 }),
             Ok(Response::Zoom(1.5)),
-            Ok(Response::State {
-                camera: (0.0, 0.0),
-                zoom: 1.0,
-                windows,
-                fullscreen: vec![OutputFullscreen {
-                    id: 2,
-                    output: "DP-1".into(),
-                    app_id: "mpv".into(),
-                    title: "video".into(),
-                }],
-                pinned: vec![OutputPinned {
-                    id: 3,
-                    output: "HDMI-A-1".into(),
-                    app_id: "pavucontrol".into(),
-                    title: "Volume".into(),
-                    position: [20, 40],
-                    size: [320, 240],
-                }],
-                layers: vec!["waybar".into()],
-                canvas_layers: vec![CanvasLayerInfo {
-                    app_id: "drift-clock".into(),
-                    position: [0, 200],
-                    size: [311, 136],
-                }],
-            }),
+            Ok(Response::State(sample_state())),
             Ok(Response::Focused(None)),
             Ok(Response::Ok),
             Err("no focused window".into()),
@@ -348,6 +399,51 @@ mod tests {
             let back: Reply = serde_json::from_str(&json).unwrap();
             assert_eq!(reply, &back);
         }
+    }
+
+    #[test]
+    fn event_roundtrip() {
+        roundtrip(&Event::State(sample_state()));
+    }
+
+    /// The `State` reply serializes as `{"State":{...}}` with every field present.
+    #[test]
+    fn state_response_wire_shape() {
+        let json = serde_json::to_value(Response::State(sample_state())).unwrap();
+        let obj = json
+            .get("State")
+            .expect("State serializes as {\"State\":{...}}");
+        for key in [
+            "camera",
+            "zoom",
+            "layout",
+            "layout_short",
+            "windows",
+            "fullscreen",
+            "pinned",
+            "layers",
+            "canvas_layers",
+            "outputs",
+        ] {
+            assert!(obj.get(key).is_some(), "missing key {key}");
+        }
+    }
+
+    /// A reply from a compositor without the `layout`/`layout_short`/`outputs`
+    /// fields still parses — that's what their `#[serde(default)]`s are for
+    /// (a newer `driftwm msg` against an older compositor).
+    #[test]
+    fn state_reply_without_new_fields_parses() {
+        let old = r#"{"Ok":{"State":{"camera":[0.0,0.0],"zoom":1.0,"windows":[
+            {"id":1,"app_id":"foo","title":"","position":[0,0],"size":[1,1],
+             "is_focused":false,"is_widget":false}]}}}"#;
+        let reply: Reply = serde_json::from_str(old).unwrap();
+        let Ok(Response::State(info)) = reply else {
+            panic!("expected a State reply");
+        };
+        assert!(info.layout.is_empty());
+        assert!(info.outputs.is_empty());
+        assert_eq!(info.windows.len(), 1);
     }
 
     #[test]

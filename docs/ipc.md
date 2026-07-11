@@ -25,6 +25,7 @@ when given no arguments and writes when given arguments.
 | `action <spec>`  | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                      |
 | `screenshot ...` | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots)) |
 | `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory (each window has a stable `id`)                          |
+| `subscribe`      | `driftwm msg subscribe`       | Stream state snapshots: the current one immediately, then one on every change (`--json` for line-delimited JSON, see [Subscribing to changes](#subscribing-to-changes)) |
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
@@ -125,6 +126,30 @@ scene with the canvas background + every window's chrome (`all` adds a
 > one); a gigapixel TIFF wallpaper uses a coarse pyramid level (softens at extreme
 > `--scale`); captures tile internally but cap at 16384 px/side.
 
+### Subscribing to changes
+
+`subscribe` turns the connection into a live feed instead of polling. The client
+sends one request, the server acks it, then pushes an **event** line for the
+current state immediately and again on every change — throttled to ~10/sec,
+piggybacking on the [state file](#state-file)'s change detection. Changes to
+camera/zoom, the window inventory, focus, window **titles**, keyboard layout, and
+per-output viewports all trigger a push.
+
+Each event is `{"State":{...}}` — the **whole** snapshot, same shape as the
+`state` reply, and **not** wrapped in `Ok`/`Err` (events are one-way). Because
+every event is complete, a consumer can just re-render, or diff against the
+previous one. A subscriber that stalls (stops reading) never blocks the
+compositor — it just misses snapshots until it drains its socket, then catches
+up in full on the next change.
+
+```bash
+# Print the focused window's app_id whenever anything changes.
+driftwm msg --json subscribe | jq -r '.State.windows[0].app_id'
+
+# Human-readable blocks, one per change, separated by a blank line.
+driftwm msg subscribe
+```
+
 ## Wire protocol
 
 The socket path is `$XDG_RUNTIME_DIR/driftwm/ipc-<WAYLAND_DISPLAY>.sock`
@@ -161,6 +186,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 | screenshot       | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}` |
 | screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)            |
 | state            | `"State"`                                                                 |
+| subscribe        | `"Subscribe"`                                                             |
 
 ### Responses
 
@@ -171,7 +197,8 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Focused":"alacritty"}}      // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
 {"Ok":"Ok"}                          // action / close
-{"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"windows":[
+{"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
+  "layout_short":"us","windows":[
   {"id":3,"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
    "is_focused":true,"is_widget":false}
 ]}}}
@@ -181,10 +208,24 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
 focused window first. Each entry's `id` is a stable per-session window handle —
 pass it back as a selector to `focus`, `move`, `close`, or `screenshot window`.
-The reply also carries `fullscreen` and `pinned` (screen-space windows, which
-carry an `id` too), `layers` (namespaces of screen-space layer-shell surfaces),
-and `canvas_layers` (canvas-positioned layers with rule-coordinate position and
-size).
+The reply also carries `layout` (full XKB name) and `layout_short` (the
+configured code for the active group); `fullscreen` and `pinned` (screen-space
+windows, which carry an `id` too); `layers` (namespaces of screen-space
+layer-shell surfaces); `canvas_layers` (canvas-positioned layers with
+rule-coordinate position and size); and `outputs` (per-output `name`, viewport
+`camera` (center, Y-up), `zoom`, logical `size`, and `active` flag).
+
+### Events
+
+A `subscribe` connection doesn't get `Ok`/`Err` replies after the initial ack;
+it gets one-way **event** lines:
+
+```json
+{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)","layout_short":"us","windows":[...],"outputs":[...]}}
+```
+
+The `State` payload is identical to the `state` reply's, so anything that reads
+one reads the other.
 
 ### Talking to the socket directly
 
@@ -200,7 +241,8 @@ echo '{"Camera":[500,300]}' | socat -t1 - UNIX-CONNECT:"$SOCK"
 For read-only polling (status bars, scripts), driftwm also writes a throttled
 (~10 Hz) snapshot to `$XDG_RUNTIME_DIR/driftwm/state` — `key=value` lines plus a
 `windows=` JSON array using the same window shape as `state`. Reading that file
-avoids a socket round-trip when you only need to observe.
+avoids a socket round-trip when you only need to observe; when you'd rather be
+pushed than poll, use [`subscribe`](#subscribing-to-changes) instead.
 
 Layer-shell clients appear too: `layers=` lists the namespaces of screen-space
 layer surfaces (bars, OSKs, overlays — useful for finding the `app_id` a
@@ -211,4 +253,6 @@ placing rule if the surface resized after mapping).
 
 ## Limitations
 
-- There is no event/subscription stream yet — poll `state` or the state file.
+- `subscribe` events are whole-state snapshots, not granular event types
+  (window-opened, focus-changed, …) — diff consecutive snapshots if you need
+  the delta.

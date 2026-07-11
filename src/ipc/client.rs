@@ -6,7 +6,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use super::protocol::{Reply, Request, Response, ScreenshotTarget, WindowSelector, socket_path};
+use super::protocol::{
+    Event, Reply, Request, Response, ScreenshotTarget, StateInfo, WindowSelector, socket_path,
+};
 
 /// `driftwm msg <...>` subcommands. Variants with optional positionals read when
 /// omitted and write when given.
@@ -25,6 +27,8 @@ pub enum Msg {
     },
     /// Dump camera, zoom, and the window inventory.
     State,
+    /// Stream state snapshots as they change (one JSON line per event with --json).
+    Subscribe,
     /// Print the focused window, or focus a window by app_id substring or `--id`
     /// (the stable id shown in `state`).
     Focus {
@@ -141,6 +145,18 @@ pub fn run(msg: &Msg, json: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Subscribe switches to push mode: the first reply is just the ack, then the
+    // server streams `Event` lines on the same connection until it closes.
+    if matches!(msg, Msg::Subscribe) {
+        if json && reply.is_err() {
+            // Same error surface as every other --json command.
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            std::process::exit(1);
+        }
+        reply?;
+        return stream_events(reader, json);
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&reply)?);
         // Exit non-zero on a command error too, so scripts can branch on it.
@@ -179,6 +195,7 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         Msg::Zoom { level } => Request::Zoom(*level),
         Msg::Layout { short } => Request::Layout { short: *short },
         Msg::State => Request::State,
+        Msg::Subscribe => Request::Subscribe,
         Msg::Focus { app_id, id } => Request::Focus(window_selector(app_id, *id)),
         Msg::Move { x, y, id } => {
             let to = match (x, y) {
@@ -274,6 +291,34 @@ fn resolve_output_path(output: &Option<String>) -> Result<String, String> {
     Ok(abs.to_string_lossy().into_owned())
 }
 
+/// Read pushed `Event` lines until the server closes the connection, printing
+/// each one (raw JSON with `--json`, else the human-readable block). Flushes
+/// per event so a downstream pipe (jq, a script) sees each snapshot promptly.
+fn stream_events(
+    mut reader: BufReader<UnixStream>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(()); // server closed the connection
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if json {
+            println!("{trimmed}");
+        } else {
+            let Event::State(info) = serde_json::from_str::<Event>(trimmed)?;
+            print_state(&info);
+            println!();
+        }
+        std::io::stdout().flush()?;
+    }
+}
+
 fn print_response(response: Response) {
     match response {
         Response::Camera { x, y } => println!("camera {x} {y}"),
@@ -284,70 +329,66 @@ fn print_response(response: Response) {
         Response::Position { x, y } => println!("{x} {y}"),
         Response::Screenshot { path, .. } => println!("{path}"),
         Response::Ok => println!("ok"),
-        Response::State {
-            camera,
-            zoom,
-            windows,
-            fullscreen,
-            pinned,
-            layers,
-            canvas_layers,
-        } => {
-            println!("camera {} {}", camera.0, camera.1);
-            println!("zoom {zoom}");
-            println!("windows {}", windows.len());
-            for w in windows {
-                let mark = if w.is_focused { "*" } else { " " };
-                let title = if w.title.is_empty() {
-                    String::new()
-                } else {
-                    format!("  \"{}\"", w.title)
-                };
-                println!(
-                    "  {mark} #{} {} [{}, {}] {}x{}{}",
-                    w.id, w.app_id, w.position[0], w.position[1], w.size[0], w.size[1], title
-                );
-            }
-            println!("fullscreen {}", fullscreen.len());
-            for f in fullscreen {
-                let title = if f.title.is_empty() {
-                    String::new()
-                } else {
-                    format!("  \"{}\"", f.title)
-                };
-                println!("  {} #{} {}{}", f.output, f.id, f.app_id, title);
-            }
-            println!("pinned {}", pinned.len());
-            for p in pinned {
-                let title = if p.title.is_empty() {
-                    String::new()
-                } else {
-                    format!("  \"{}\"", p.title)
-                };
-                println!(
-                    "  {} #{} {} [{}, {}] {}x{}{}",
-                    p.output,
-                    p.id,
-                    p.app_id,
-                    p.position[0],
-                    p.position[1],
-                    p.size[0],
-                    p.size[1],
-                    title
-                );
-            }
-            println!("layers {}", layers.len());
-            for ns in layers {
-                println!("    {ns}");
-            }
-            println!("canvas-layers {}", canvas_layers.len());
-            for c in canvas_layers {
-                println!(
-                    "    {} [{}, {}] {}x{}",
-                    c.app_id, c.position[0], c.position[1], c.size[0], c.size[1]
-                );
-            }
-        }
+        Response::State(info) => print_state(&info),
+    }
+}
+
+fn print_state(info: &StateInfo) {
+    println!("camera {} {}", info.camera.0, info.camera.1);
+    println!("zoom {}", info.zoom);
+    println!("layout {} ({})", info.layout, info.layout_short);
+    println!("windows {}", info.windows.len());
+    for w in &info.windows {
+        let mark = if w.is_focused { "*" } else { " " };
+        let title = if w.title.is_empty() {
+            String::new()
+        } else {
+            format!("  \"{}\"", w.title)
+        };
+        println!(
+            "  {mark} #{} {} [{}, {}] {}x{}{}",
+            w.id, w.app_id, w.position[0], w.position[1], w.size[0], w.size[1], title
+        );
+    }
+    println!("fullscreen {}", info.fullscreen.len());
+    for f in &info.fullscreen {
+        let title = if f.title.is_empty() {
+            String::new()
+        } else {
+            format!("  \"{}\"", f.title)
+        };
+        println!("  {} #{} {}{}", f.output, f.id, f.app_id, title);
+    }
+    println!("pinned {}", info.pinned.len());
+    for p in &info.pinned {
+        let title = if p.title.is_empty() {
+            String::new()
+        } else {
+            format!("  \"{}\"", p.title)
+        };
+        println!(
+            "  {} #{} {} [{}, {}] {}x{}{}",
+            p.output, p.id, p.app_id, p.position[0], p.position[1], p.size[0], p.size[1], title
+        );
+    }
+    println!("layers {}", info.layers.len());
+    for ns in &info.layers {
+        println!("    {ns}");
+    }
+    println!("canvas-layers {}", info.canvas_layers.len());
+    for c in &info.canvas_layers {
+        println!(
+            "    {} [{}, {}] {}x{}",
+            c.app_id, c.position[0], c.position[1], c.size[0], c.size[1]
+        );
+    }
+    println!("outputs {}", info.outputs.len());
+    for o in &info.outputs {
+        let mark = if o.active { "*" } else { " " };
+        println!(
+            "  {mark} {} camera {} {} zoom {} {}x{}",
+            o.name, o.camera.0, o.camera.1, o.zoom, o.size[0], o.size[1]
+        );
     }
 }
 
@@ -386,6 +427,11 @@ mod tests {
             .unwrap(),
             Request::Focus(Some(WindowSelector::Id(5)))
         );
+    }
+
+    #[test]
+    fn subscribe_maps_to_request() {
+        assert_eq!(to_request(&Msg::Subscribe).unwrap(), Request::Subscribe);
     }
 
     #[test]
