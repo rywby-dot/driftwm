@@ -408,6 +408,7 @@ mod harness {
     use smithay::utils::{Logical, Point, Size};
     use std::collections::{HashMap, HashSet};
 
+    use crate::layout::auto_placement::{Rect, place_auto};
     use crate::layout::cluster::{self, ResizeClassification, Side};
     use crate::layout::snap::SnapRect;
     use crate::stage::mock::{SentConfigure, TestWindow};
@@ -426,6 +427,12 @@ mod harness {
             y: i32,
             w: i32,
             h: i32,
+        },
+        MapNewAutoPlaced {
+            w: i32,
+            h: i32,
+            vx: i32,
+            vy: i32,
         },
         CloseWindow {
             idx: usize,
@@ -472,6 +479,12 @@ mod harness {
             idx: usize,
             output: usize,
         },
+        RemoveOutput {
+            output: usize,
+        },
+        AddOutput {
+            output: usize,
+        },
         ToggleFit {
             idx: usize,
         },
@@ -497,6 +510,8 @@ mod harness {
         prop_oneof![
             3 => (-2000..2000i32, -2000..2000i32, 50..500i32, 50..500i32)
                 .prop_map(|(x, y, w, h)| Op::MapNew { x, y, w, h }),
+            2 => (50..500i32, 50..500i32, -1000..1000i32, -1000..1000i32)
+                .prop_map(|(w, h, vx, vy)| Op::MapNewAutoPlaced { w, h, vx, vy }),
             2 => idx.clone().prop_map(|idx| Op::CloseWindow { idx }),
             1 => idx.clone().prop_map(|idx| Op::CrashWindow { idx }),
             1 => (idx.clone(), idx.clone()).prop_map(|(child, parent)| Op::SetParent { child, parent }),
@@ -515,6 +530,8 @@ mod harness {
             2 => (0..3usize).prop_map(|output| Op::ExitFullscreen { output }),
             2 => (idx.clone(), 0..3usize)
                 .prop_map(|(idx, output)| Op::TogglePin { idx, output }),
+            1 => (0..3usize).prop_map(|output| Op::RemoveOutput { output }),
+            1 => (0..3usize).prop_map(|output| Op::AddOutput { output }),
             2 => idx.clone().prop_map(|idx| Op::ToggleFit { idx }),
             1 => (idx.clone(), 50..500i32, 50..500i32)
                 .prop_map(|(idx, w, h)| Op::ResizeGrabEnd { idx, w, h }),
@@ -535,6 +552,12 @@ mod harness {
         /// the model of `FullscreenReturn::pinned`.
         pin_return: HashMap<String, PinnedSite>,
         next_label: u64,
+        /// Live space outputs, mirroring the udev output registry.
+        live: Vec<String>,
+        /// The single virtual placeholder kept when the last output is
+        /// removed (production's `disconnected_outputs`); pins/fullscreen may
+        /// still target it.
+        placeholder: Option<String>,
     }
 
     /// Plain window footprint (no SSD bar / border in the model).
@@ -608,6 +631,77 @@ mod harness {
                 fit_expect: HashMap::new(),
                 pin_return: HashMap::new(),
                 next_label: 0,
+                live: OUTPUTS.iter().map(|o| o.to_string()).collect(),
+                placeholder: None,
+            }
+        }
+
+        /// The output-choosing ops' equivalent of `space.outputs()`: the live
+        /// outputs plus the single virtual placeholder (itself a normal space
+        /// output that fullscreen/pin may target).
+        fn output_at(&self, sel: usize) -> String {
+            let mut outs: Vec<&String> = self.live.iter().collect();
+            if let Some(ph) = &self.placeholder {
+                outs.push(ph);
+            }
+            outs[sel % outs.len()].clone()
+        }
+
+        /// Rebind every pin whose home output is no longer live to `to`,
+        /// keeping `screen_pos` (the harness has no output sizes to clamp
+        /// against). Mirrors `reassign_orphaned_pinned`: also rebinds pins
+        /// suspended in fullscreen (`pin_return`, modeling
+        /// `FullscreenReturn::pinned`), since a window pinned to output A but
+        /// fullscreened on B would otherwise restore onto the dead A.
+        fn reassign_orphaned_pinned(&mut self, to: &str) {
+            let live = self.live.clone();
+            let orphans: Vec<(TestWindow, PinnedSite)> = self
+                .stage
+                .pinned_windows()
+                .filter(|(_, site)| !live.contains(&site.output))
+                .map(|(w, site)| (w.clone(), site.clone()))
+                .collect();
+            let moved = !orphans.is_empty();
+            for (w, mut site) in orphans {
+                site.output = to.to_string();
+                self.stage.set_pin(&w, site);
+            }
+            if moved {
+                self.sync_pinned();
+            }
+            for site in self.pin_return.values_mut() {
+                if !live.contains(&site.output) {
+                    site.output = to.to_string();
+                }
+            }
+        }
+
+        /// Every output referenced by a fullscreen entry or a pin site must
+        /// still be a live output or the virtual placeholder — output
+        /// teardown/connect never strands stage state on a gone output.
+        fn verify_outputs(&self) {
+            let mapped = |name: &str| {
+                self.live.iter().any(|o| o == name) || self.placeholder.as_deref() == Some(name)
+            };
+            for (output, _) in self.stage.fullscreen_entries() {
+                assert!(
+                    mapped(output),
+                    "fullscreen entry on unmapped output {output}"
+                );
+            }
+            for (_, site) in self.stage.pinned_windows() {
+                assert!(
+                    mapped(&site.output),
+                    "pinned window on unmapped output {}",
+                    site.output
+                );
+            }
+            for (output, site) in &self.pin_return {
+                assert!(
+                    mapped(&site.output),
+                    "pin suspended by fullscreen on {output} on unmapped output {}",
+                    site.output
+                );
             }
         }
 
@@ -683,6 +777,101 @@ mod harness {
             }
         }
 
+        /// Drive the real `place_auto` for a new window and assert its
+        /// contract: overlap-free against every obstacle rect (ineligible
+        /// windows included) and snap-adjacent to the anchor's cluster.
+        /// Deliberately wider than production's `place_adjacent_to`, which
+        /// drops ineligible windows from the obstacle list entirely — kept
+        /// here to exercise that half of the interface. Falls back to
+        /// `(vx, vy)` when there's no eligible anchor or no fit.
+        #[allow(clippy::mutable_key_type)]
+        fn auto_place(&self, new_w: i32, new_h: i32, vx: i32, vy: i32) -> (i32, i32) {
+            let Some(anchor) = self.stage.focus_history().first().cloned() else {
+                return (vx, vy);
+            };
+            if !self.stage.contains(&anchor) {
+                return (vx, vy);
+            }
+
+            let mut rects: Vec<Rect> = Vec::new();
+            let mut eligible: HashSet<usize> = HashSet::new();
+            let mut eligible_rects: Vec<(TestWindow, SnapRect)> = Vec::new();
+            let mut focused_idx = None;
+            for win in self.stage.windows() {
+                let Some(pos) = self.stage.position_of(win) else {
+                    continue;
+                };
+                let size = StageElement::size(win);
+                let idx = rects.len();
+                rects.push(Rect {
+                    x: pos.x as f64,
+                    y: pos.y as f64,
+                    w: size.w as f64,
+                    h: size.h as f64,
+                });
+                if *win == anchor {
+                    focused_idx = Some(idx);
+                }
+                if !win.is_widget() && !self.stage.is_fullscreen(win) && !self.stage.is_pinned(win)
+                {
+                    eligible.insert(idx);
+                    eligible_rects.push((
+                        win.clone(),
+                        SnapRect {
+                            x_low: pos.x as f64,
+                            x_high: (pos.x + size.w) as f64,
+                            y_low: pos.y as f64,
+                            y_high: (pos.y + size.h) as f64,
+                        },
+                    ));
+                }
+            }
+            let Some(focused_idx) = focused_idx else {
+                return (vx, vy);
+            };
+
+            let Some((px, py)) = place_auto(
+                &rects,
+                focused_idx,
+                &eligible,
+                new_w as f64,
+                new_h as f64,
+                (vx as f64, vy as f64),
+                GAP,
+            ) else {
+                return (vx, vy);
+            };
+
+            let placed = SnapRect {
+                x_low: px,
+                x_high: px + new_w as f64,
+                y_low: py,
+                y_high: py + new_h as f64,
+            };
+            // place_auto's forbidden-interval logic must clear the new frame
+            // of every obstacle, not just its own cluster.
+            for r in &rects {
+                let obstacle = SnapRect {
+                    x_low: r.x,
+                    x_high: r.x + r.w,
+                    y_low: r.y,
+                    y_high: r.y + r.h,
+                };
+                assert!(
+                    !overlaps(&placed, &obstacle),
+                    "auto-placed window overlaps an existing window"
+                );
+            }
+            let community = cluster::cluster_of(&anchor, &eligible_rects, GAP);
+            assert!(
+                eligible_rects.iter().any(|(m, r)| community.contains(m)
+                    && cluster::adjacent_side(&placed, r, GAP).is_some()),
+                "auto-placed window not adjacent to the anchor's cluster"
+            );
+
+            (px.round() as i32, py.round() as i32)
+        }
+
         // TestWindow hashes by Rc pointer identity (stable under interior
         // mutation), so clippy's mutable-key-type lint is a false positive —
         // same rationale as production's smithay::Window keys.
@@ -696,6 +885,18 @@ mod harness {
                     // new_toplevel: map + raise + enforce; focus comes later
                     // (first commit), modeled by RaiseAndFocus ops.
                     self.stage.map(win.clone(), Point::from((*x, *y)));
+                    self.stage.raise(&win);
+                    self.stage.enforce_stacking();
+                    self.windows.push(win);
+                }
+                Op::MapNewAutoPlaced { w, h, vx, vy } => {
+                    // new_toplevel with placement = "auto": place adjacent to
+                    // the focused window's cluster via the real place_auto.
+                    let win = TestWindow::new(self.next_label);
+                    self.next_label += 1;
+                    win.set_size(Size::from((*w, *h)));
+                    let pos = self.auto_place(*w, *h, *vx, *vy);
+                    self.stage.map(win.clone(), Point::from(pos));
                     self.stage.raise(&win);
                     self.stage.enforce_stacking();
                     self.windows.push(win);
@@ -822,11 +1023,11 @@ mod harness {
                     if w.is_widget() || !w.is_alive() {
                         return;
                     }
-                    let key = OUTPUTS[output % OUTPUTS.len()];
+                    let key = self.output_at(*output);
                     // Idempotent re-assert keeps the existing saved geometry.
                     if self
                         .stage
-                        .fullscreen_on(key)
+                        .fullscreen_on(&key)
                         .is_some_and(|fs| fs.window == w)
                     {
                         w.enter_fullscreen_configure(Size::from((1920, 1080)));
@@ -837,8 +1038,8 @@ mod harness {
                     {
                         self.exit_fullscreen(&other);
                     }
-                    if self.stage.fullscreen_on(key).is_some() {
-                        self.exit_fullscreen(key);
+                    if self.stage.fullscreen_on(&key).is_some() {
+                        self.exit_fullscreen(&key);
                     }
                     let saved_size = if self.stage.is_fit(&w) {
                         StageElement::size(&w)
@@ -850,17 +1051,18 @@ mod harness {
                     let saved_location = self.stage.position_of(&w).unwrap_or_default();
                     // Unpin into fullscreen; the exit restores the site.
                     if let Some(site) = self.stage.take_pin(&w) {
-                        self.pin_return.insert(key.to_string(), site);
+                        self.pin_return.insert(key.clone(), site);
                     }
                     self.stage
-                        .set_fullscreen(key, w.clone(), saved_location, saved_size);
+                        .set_fullscreen(&key, w.clone(), saved_location, saved_size);
                     w.enter_fullscreen_configure(Size::from((1920, 1080)));
                     self.stage.map(w.clone(), Point::from((0, 0)));
                     self.stage.raise(&w);
                     self.stage.enforce_stacking();
                 }
                 Op::ExitFullscreen { output } => {
-                    self.exit_fullscreen(OUTPUTS[output % OUTPUTS.len()]);
+                    let key = self.output_at(*output);
+                    self.exit_fullscreen(&key);
                 }
                 Op::ToggleFit { idx } => {
                     let Some(w) = self.pick(*idx) else { return };
@@ -925,14 +1127,48 @@ mod harness {
                         let pos = self.stage.position_of(&w).unwrap_or_default();
                         self.stage.map(w, pos);
                     } else {
+                        let out = self.output_at(*output);
                         self.stage.drop_from_focus_history(&w);
                         self.stage.set_pin(
                             &w,
                             PinnedSite {
-                                output: OUTPUTS[output % OUTPUTS.len()].to_string(),
+                                output: out,
                                 screen_pos: Point::from((10, 10)),
                             },
                         );
+                    }
+                }
+                Op::RemoveOutput { output } => {
+                    // teardown_output: exit fullscreen on the gone output, then
+                    // either keep it as the last-output placeholder (pins stay)
+                    // or unmap it and rebind orphaned pins to a survivor.
+                    if self.live.is_empty() {
+                        return;
+                    }
+                    let name = self.live[*output % self.live.len()].clone();
+                    self.exit_fullscreen(&name);
+                    self.live.retain(|o| o != &name);
+                    if self.live.is_empty() {
+                        self.placeholder = Some(name);
+                    } else {
+                        let to = self.live[0].clone();
+                        self.reassign_orphaned_pinned(&to);
+                    }
+                }
+                Op::AddOutput { output } => {
+                    // Connect handler: swap the placeholder for the new output
+                    // (exiting any fullscreen entered on it), then rebind pins
+                    // orphaned by the swap to the new output.
+                    let name = OUTPUTS[*output % OUTPUTS.len()].to_string();
+                    if self.live.contains(&name) {
+                        return;
+                    }
+                    if let Some(ph) = self.placeholder.take() {
+                        self.exit_fullscreen(&ph);
+                        self.live.push(name.clone());
+                        self.reassign_orphaned_pinned(&name);
+                    } else {
+                        self.live.push(name);
                     }
                 }
                 Op::MoveCluster { idx, dx, dy } => {
@@ -1165,6 +1401,97 @@ mod harness {
         }
     }
 
+    #[test]
+    fn removing_last_output_keeps_pins_on_placeholder() {
+        let mut sim = Sim::new();
+        sim.apply(&Op::MapNew {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        });
+        sim.apply(&Op::TogglePin { idx: 0, output: 0 });
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-0");
+
+        // Drop the two other outputs (non-last), then OUT-0 (last).
+        sim.apply(&Op::RemoveOutput { output: 2 });
+        sim.apply(&Op::RemoveOutput { output: 1 });
+        assert_eq!(sim.live, ["OUT-0".to_string()]);
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-0");
+
+        sim.apply(&Op::RemoveOutput { output: 0 });
+        assert!(sim.live.is_empty());
+        assert_eq!(sim.placeholder.as_deref(), Some("OUT-0"));
+        // The last-output placeholder keeps its pins verbatim.
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-0");
+        sim.verify_outputs();
+    }
+
+    #[test]
+    fn removing_non_last_output_rebinds_pin_and_exits_fullscreen() {
+        let mut sim = Sim::new();
+        sim.apply(&Op::MapNew {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        });
+        sim.apply(&Op::MapNew {
+            x: 500,
+            y: 0,
+            w: 100,
+            h: 100,
+        });
+        sim.apply(&Op::TogglePin { idx: 0, output: 2 });
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-2");
+        sim.apply(&Op::EnterFullscreen { idx: 1, output: 2 });
+        assert!(sim.stage.fullscreen_on("OUT-2").is_some());
+
+        sim.apply(&Op::RemoveOutput { output: 2 });
+        assert!(!sim.live.iter().any(|o| o == "OUT-2"));
+        assert!(sim.stage.fullscreen_on("OUT-2").is_none());
+        assert!(!sim.stage.is_fullscreen(&sim.windows[1]));
+        // The orphaned pin follows to the first survivor.
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-0");
+        sim.verify_outputs();
+    }
+
+    #[test]
+    fn reconnect_rebinds_orphaned_pins_and_clears_placeholder_fullscreen() {
+        let mut sim = Sim::new();
+        sim.apply(&Op::MapNew {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        });
+        sim.apply(&Op::MapNew {
+            x: 500,
+            y: 0,
+            w: 100,
+            h: 100,
+        });
+        sim.apply(&Op::TogglePin { idx: 0, output: 0 });
+        sim.apply(&Op::RemoveOutput { output: 2 });
+        sim.apply(&Op::RemoveOutput { output: 1 });
+        sim.apply(&Op::RemoveOutput { output: 0 });
+        assert_eq!(sim.placeholder.as_deref(), Some("OUT-0"));
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-0");
+
+        // Fullscreen on the placeholder is legal (a normal space output).
+        sim.apply(&Op::EnterFullscreen { idx: 1, output: 0 });
+        assert!(sim.stage.fullscreen_on("OUT-0").is_some());
+
+        // Reconnecting a differently-named output swaps out the placeholder:
+        // its fullscreen exits and the orphaned pin moves to the new output.
+        sim.apply(&Op::AddOutput { output: 1 });
+        assert_eq!(sim.live, ["OUT-1".to_string()]);
+        assert!(sim.placeholder.is_none());
+        assert!(sim.stage.fullscreen_on("OUT-0").is_none());
+        assert_eq!(sim.stage.pin_of(&sim.windows[0]).unwrap().output, "OUT-1");
+        sim.verify_outputs();
+    }
+
     proptest! {
         #[test]
         fn random_op_sequences_preserve_invariants(
@@ -1174,6 +1501,7 @@ mod harness {
             for op in &ops {
                 sim.apply(op);
                 sim.stage.verify_invariants();
+                sim.verify_outputs();
             }
         }
 
@@ -1200,7 +1528,7 @@ mod harness {
                 }
             }
             // Every exit configure carried a non-empty size.
-            for w in sim.windows {
+            for w in &sim.windows {
                 for c in w.sent_configures() {
                     if let SentConfigure::ExitFullscreen(s) | SentConfigure::ExitFit(s) = c {
                         prop_assert!(s.w > 0 && s.h > 0, "restore configure with empty size");
@@ -1208,6 +1536,7 @@ mod harness {
                 }
             }
             sim.stage.verify_invariants();
+            sim.verify_outputs();
         }
     }
 }
