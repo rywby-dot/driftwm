@@ -551,12 +551,12 @@ pub struct DriftWm {
     pub state_file_layout: String,
     pub state_file_windows: Vec<crate::ipc::protocol::WindowInfo>,
     pub state_file_layer_count: usize,
-    /// Sorted `(output, screen_pos, size)` of screen-pinned windows and
-    /// `(output, app_id)` of fullscreen windows. Both are excluded from the
+    /// Sorted `(id, output, screen_pos, size)` of screen-pinned windows and
+    /// `(output, id, app_id)` of fullscreen windows. Both are excluded from the
     /// canvas window list, so they need their own change detection to keep the
     /// state file's per-output sections from going stale.
-    pub state_file_pinned: Vec<(String, [i32; 2], [i32; 2])>,
-    pub state_file_fullscreen: Vec<(String, String)>,
+    pub state_file_pinned: Vec<(u64, String, [i32; 2], [i32; 2])>,
+    pub state_file_fullscreen: Vec<(String, u64, String)>,
     /// Sorted `(namespace, position, size)` of canvas-positioned layers, for
     /// the same staleness detection as the pinned/fullscreen signatures.
     pub state_file_canvas_layers: Vec<(String, [i32; 2], [i32; 2])>,

@@ -17,13 +17,14 @@ when given no arguments and writes when given arguments.
 | `zoom`           | `driftwm msg zoom`            | Print the zoom level                                                                                 |
 | `zoom <level>`   | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                   |
 | `focus`          | `driftwm msg focus`           | Print the focused window's `app_id`                                                                  |
-| `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive); navigates to it only if it's off-screen     |
-| `move`           | `driftwm msg move`            | Print the focused window's position                                                                  |
-| `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window                                                                              |
+| `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive), or `--id <n>` (from `state`); navigates to it only if it's off-screen |
+| `move`           | `driftwm msg move`            | Print the focused window's position (or `--id <n>`'s)                                                |
+| `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window, or `--id <n>`                                                               |
+| `close`          | `driftwm msg close`           | Close the focused window, a window by `app_id` substring, or `--id <n>`                              |
 | `layout`         | `driftwm msg layout`          | Print the active keyboard layout (full XKB name); `--short` prints the configured code (e.g. `ru`)   |
 | `action <spec>`  | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                      |
 | `screenshot ...` | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots)) |
-| `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory                                                          |
+| `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory (each window has a stable `id`)                          |
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
@@ -53,8 +54,12 @@ The dedicated commands above are the state you can **read or set**; every
 **one-shot** operation (closing a window, quitting, zooming a step) lives under
 `action` rather than as its own command.
 
-Window actions operate on the **focused** window, so to act on a specific one,
-select it first: `driftwm msg focus alacritty && driftwm msg action close-window`.
+Window actions operate on the **focused** window, so to act on a specific one
+via `action`, select it first:
+`driftwm msg focus alacritty && driftwm msg action close-window`. The dedicated
+`focus`, `move`, `close`, and `screenshot window` commands can instead target
+any window directly by its `id` from `state` (`--id <n>`), so the focus-first
+dance is no longer required for those.
 
 Switching the keyboard layout is `action switch-layout next|prev|<index>`; read
 the current layout with `layout` (full XKB name, e.g. `Russian`) or `layout
@@ -81,7 +86,8 @@ Window and camera positions use the same convention as
 [window rules](window-rules.md) and the [state file](#state-file): positions are
 a **center** point, with **Y pointing up**. So `move 0 0` centers the focused
 window on the canvas origin, `camera 0 0` centers the _viewport_ on the origin,
-and positive `y` is above it.
+and positive `y` is above it. Pinned and fullscreen windows live in screen
+space, not on the canvas, so `move` refuses to reposition them.
 
 ### Screenshots
 
@@ -94,6 +100,7 @@ use `grim` for a literal screen grab.
 ```bash
 driftwm msg screenshot                                # active output's current view
 driftwm msg screenshot window                         # focused window, isolated
+driftwm msg screenshot window --id 3                  # a specific window by id, isolated
 driftwm msg screenshot all --scale 2                  # all windows + background, 2× detail
 driftwm msg screenshot region 0 0 2000 1500           # canvas rect (center, Y-up)
 driftwm msg screenshot region $(slurp) --from-screen  # pick a region with slurp
@@ -101,9 +108,10 @@ driftwm msg screenshot window -o - | wl-copy          # capture window to clipbo
 ```
 
 Targets: **no subcommand** = the active output's viewport (what you see, minus
-panels); **`window`** = the focused window isolated on transparency; **`all`** /
-**`region`** = a scene with the canvas background + every window's chrome (`all`
-adds a `[zoom] fit_padding` margin).
+panels); **`window`** (optionally `<app_id>` or `--id <n>`) = a window isolated
+on transparency, defaulting to the focused one; **`all`** / **`region`** = a
+scene with the canvas background + every window's chrome (`all` adds a
+`[zoom] fit_padding` margin).
 
 - `--scale N` — pixels per canvas unit (default `1`); higher captures more detail
   than the screen shows, independent of zoom.
@@ -131,17 +139,27 @@ open until the client closes it.
 
 A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 
+A window can be targeted by a **selector**: a JSON number is its stable `id`
+(from `state`), a JSON string is a case-insensitive `app_id` substring.
+
+> [!NOTE]
+> The `Move` request and the `Window` screenshot target changed shape in this
+> release: the old `{"Move":[x,y]}` tuple and bare `"Window"` string forms are
+> gone (replaced by the object forms below).
+
 ### Requests
 
 | Request          | JSON to send                                                              |
 | ---------------- | ------------------------------------------------------------------------- |
 | get / set camera | `{"Camera":null}` / `{"Camera":[500,300]}`                                |
 | get / set zoom   | `{"Zoom":null}` / `{"Zoom":0.5}`                                          |
-| get / set focus  | `{"Focus":null}` / `{"Focus":"alacritty"}`                                |
-| get / set move   | `{"Move":null}` / `{"Move":[100,200]}`                                    |
+| get / set focus  | `{"Focus":null}` / `{"Focus":"alacritty"}` / `{"Focus":5}`                |
+| get / set move   | `{"Move":{}}` / `{"Move":{"window":5,"to":[100,200]}}` (both optional)    |
+| close            | `{"Close":null}` / `{"Close":5}` / `{"Close":"alacritty"}`                |
 | layout           | `{"Layout":{"short":false}}`                                              |
 | run action       | `{"Action":"switch-layout next"}`                                         |
 | screenshot       | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}` |
+| screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)            |
 | state            | `"State"`                                                                 |
 
 ### Responses
@@ -152,19 +170,21 @@ A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 {"Ok":{"Layout":"English (US)"}}    // or "us" for {"Layout":{"short":true}}
 {"Ok":{"Focused":"alacritty"}}      // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
-{"Ok":"Ok"}                          // camera-set / move-set / action etc.
+{"Ok":"Ok"}                          // action / close
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"windows":[
-  {"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
+  {"id":3,"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
    "is_focused":true,"is_widget":false}
 ]}}}
 {"Err":"no focused window"}
 ```
 
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
-focused window first. The reply also carries `fullscreen` and `pinned`
-(screen-space windows), `layers` (namespaces of screen-space layer-shell
-surfaces), and `canvas_layers` (canvas-positioned layers with rule-coordinate
-position and size).
+focused window first. Each entry's `id` is a stable per-session window handle —
+pass it back as a selector to `focus`, `move`, `close`, or `screenshot window`.
+The reply also carries `fullscreen` and `pinned` (screen-space windows, which
+carry an `id` too), `layers` (namespaces of screen-space layer-shell surfaces),
+and `canvas_layers` (canvas-positioned layers with rule-coordinate position and
+size).
 
 ### Talking to the socket directly
 

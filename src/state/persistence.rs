@@ -4,16 +4,17 @@
 //! the current camera/zoom and window/layer inventory. Writes are throttled
 //! to ~10/sec and only fire when something actually changed.
 //!
-//! The `windows=` line is a JSON array of objects with fields `app_id`,
-//! `title`, `position` ([x, y]), `size` ([w, h]), and booleans
-//! `is_focused`/`is_widget`. Position/size match the window-rules format in
-//! config.toml: position is the **window center** with **Y-up** convention.
+//! The `windows=` line is a JSON array of objects with fields `id` (stable
+//! per-session window handle), `app_id`, `title`, `position` ([x, y]), `size`
+//! ([w, h]), and booleans `is_focused`/`is_widget`. Position/size match the
+//! window-rules format in config.toml: position is the **window center** with
+//! **Y-up** convention.
 //!
 //! `windows=` is canvas-space only. Screen-space windows are reported under
 //! their owning output instead: `outputs.{name}.fullscreen` is a JSON
-//! `{app_id, title}` object, and `outputs.{name}.pinned` a JSON array of
-//! `{app_id, title, position, size}` (position = output-relative top-left, in
-//! screen pixels, Y-down).
+//! `{id, app_id, title}` object, and `outputs.{name}.pinned` a JSON array of
+//! `{id, app_id, title, position, size}` (position = output-relative top-left,
+//! in screen pixels, Y-down).
 
 use serde::Serialize;
 use smithay::utils::{Logical, Point};
@@ -30,6 +31,7 @@ use super::{DriftWm, output_state};
 /// A fullscreen window in the state file's per-output section.
 #[derive(Serialize)]
 struct FullscreenInfo {
+    id: u64,
     app_id: String,
     title: String,
 }
@@ -38,6 +40,7 @@ struct FullscreenInfo {
 /// the output-relative top-left in screen pixels (Y-down); `size` in pixels.
 #[derive(Serialize)]
 struct PinnedInfo {
+    id: u64,
     app_id: String,
     title: String,
     position: [i32; 2],
@@ -69,7 +72,8 @@ fn window_app_id_title(
 fn window_list_changed(a: &[WindowInfo], b: &[WindowInfo]) -> bool {
     a.len() != b.len()
         || a.iter().zip(b).any(|(x, y)| {
-            x.app_id != y.app_id
+            x.id != y.id
+                || x.app_id != y.app_id
                 || x.position != y.position
                 || x.size != y.size
                 || x.is_focused != y.is_focused
@@ -105,6 +109,11 @@ impl DriftWm {
             let size = window.geometry().size;
             let (rx, ry) = driftwm::canvas::internal_to_rule(loc, size);
             windows.push(WindowInfo {
+                id: self
+                    .stage
+                    .id_of(window)
+                    .expect("window from stage.windows() has an id")
+                    .0,
                 app_id,
                 title,
                 position: [rx, ry],
@@ -163,10 +172,16 @@ impl DriftWm {
     pub fn screen_space_inventory(&self) -> (Vec<OutputFullscreen>, Vec<OutputPinned>) {
         let mut fullscreen: Vec<OutputFullscreen> = Vec::new();
         for (output, fs) in self.stage.fullscreen_entries() {
+            // A dead fullscreen window may already be gone from the window list
+            // (and thus have no id) until the reap pass runs — skip it.
+            let Some(id) = self.stage.id_of(&fs.window) else {
+                continue;
+            };
             if let Some(surface) = fs.window.wl_surface() {
                 let (app_id, title) = window_app_id_title(&surface);
                 if !app_id.is_empty() {
                     fullscreen.push(OutputFullscreen {
+                        id: id.0,
                         output: output.clone(),
                         app_id,
                         title,
@@ -190,6 +205,11 @@ impl DriftWm {
             }
             let size = window.geometry().size;
             pinned.push(OutputPinned {
+                id: self
+                    .stage
+                    .id_of(window)
+                    .expect("window from stage.windows() has an id")
+                    .0,
                 output: p.output.clone(),
                 app_id,
                 title,
@@ -238,10 +258,16 @@ impl DriftWm {
                 continue;
             }
             let size = window.geometry().size;
+            let id = self
+                .stage
+                .id_of(window)
+                .expect("window from stage.windows() has an id")
+                .0;
             pinned_by_output
                 .entry(p.output.clone())
                 .or_default()
                 .push(PinnedInfo {
+                    id,
                     app_id,
                     title,
                     position: [p.screen_pos.x, p.screen_pos.y],
@@ -251,26 +277,38 @@ impl DriftWm {
 
         let mut fullscreen_by_output: HashMap<String, FullscreenInfo> = HashMap::new();
         for (output, fs) in self.stage.fullscreen_entries() {
+            // Dead fullscreen windows may lack an id until the reap pass runs —
+            // skip them here too (see `screen_space_inventory`).
+            let Some(id) = self.stage.id_of(&fs.window) else {
+                continue;
+            };
             if let Some(surface) = fs.window.wl_surface() {
                 let (app_id, title) = window_app_id_title(&surface);
                 if !app_id.is_empty() {
-                    fullscreen_by_output.insert(output.clone(), FullscreenInfo { app_id, title });
+                    fullscreen_by_output.insert(
+                        output.clone(),
+                        FullscreenInfo {
+                            id: id.0,
+                            app_id,
+                            title,
+                        },
+                    );
                 }
             }
         }
 
         // Sorted signatures for change detection (HashMap order is
         // nondeterministic; title excluded, matching the windows= title policy).
-        let mut pinned_sig: Vec<(String, [i32; 2], [i32; 2])> = Vec::new();
+        let mut pinned_sig: Vec<(u64, String, [i32; 2], [i32; 2])> = Vec::new();
         for (name, pins) in &pinned_by_output {
             for p in pins {
-                pinned_sig.push((name.clone(), p.position, p.size));
+                pinned_sig.push((p.id, name.clone(), p.position, p.size));
             }
         }
         pinned_sig.sort();
-        let mut fullscreen_sig: Vec<(String, String)> = fullscreen_by_output
+        let mut fullscreen_sig: Vec<(String, u64, String)> = fullscreen_by_output
             .iter()
-            .map(|(name, f)| (name.clone(), f.app_id.clone()))
+            .map(|(name, f)| (name.clone(), f.id, f.app_id.clone()))
             .collect();
         fullscreen_sig.sort();
 

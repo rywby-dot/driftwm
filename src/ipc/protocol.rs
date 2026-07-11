@@ -8,6 +8,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Selects a window: by stable id (JSON number) or case-insensitive `app_id`
+/// substring (JSON string). Untagged, so the wire form is just `5` or `"term"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WindowSelector {
+    Id(u64),
+    AppId(String),
+}
+
 /// A command from a client to the compositor. Variants carrying `Option<_>` read
 /// when `None` and write when `Some`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23,10 +32,20 @@ pub enum Request {
         short: bool,
     },
     State,
-    /// Focus a window by `app_id` substring when `Some`.
-    Focus(Option<String>),
-    /// Coordinates are window-center, Y-up (the window-rule convention).
-    Move(Option<(i32, i32)>),
+    /// Focus a window when `Some` (by [`WindowSelector`]); read the focused
+    /// window's `app_id` when `None`.
+    Focus(Option<WindowSelector>),
+    /// Move or query a window. `window` `None` targets the focused window; `to`
+    /// `None` reads the position instead of setting it. Coordinates are
+    /// window-center, Y-up (the window-rule convention).
+    Move {
+        #[serde(default)]
+        window: Option<WindowSelector>,
+        #[serde(default)]
+        to: Option<(i32, i32)>,
+    },
+    /// Close a window (the focused one when `None`); errors when nothing matches.
+    Close(Option<WindowSelector>),
     /// Run a config action by its config-grammar string, e.g. `"switch-layout
     /// next"`. Any keybindable action is reachable, so one-shot ops live here
     /// rather than as their own commands.
@@ -47,8 +66,12 @@ pub enum ScreenshotTarget {
     /// The active output's current viewport on the canvas — what's visible there
     /// (the default for a bare `screenshot`). Panels/layer-shells are excluded.
     Viewport,
-    /// The focused window's geometry rect.
-    Window,
+    /// A single window (the focused one when `window` is `None`), isolated on
+    /// transparency.
+    Window {
+        #[serde(default)]
+        window: Option<WindowSelector>,
+    },
     /// The bounding box of all non-widget windows.
     All,
     /// An explicit rectangle. Canvas coords are center/Y-up (the window-rule
@@ -111,8 +134,11 @@ pub type Reply = Result<Response, String>;
 ///
 /// Shared by the IPC [`Response::State`] payload and the
 /// `$XDG_RUNTIME_DIR/driftwm/state` file so the two representations can't drift.
+/// `id` is the compositor-session-stable window handle, usable as
+/// [`WindowSelector::Id`] to target this window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowInfo {
+    pub id: u64,
     pub app_id: String,
     pub title: String,
     pub position: [i32; 2],
@@ -124,6 +150,7 @@ pub struct WindowInfo {
 /// A fullscreen window in the IPC `state` reply — one per fullscreened output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputFullscreen {
+    pub id: u64,
     pub output: String,
     pub app_id: String,
     pub title: String,
@@ -133,6 +160,7 @@ pub struct OutputFullscreen {
 /// output-relative top-left in screen pixels (Y-down); `size` in pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputPinned {
+    pub id: u64,
     pub output: String,
     pub app_id: String,
     pub title: String,
@@ -187,9 +215,27 @@ mod tests {
             Request::Layout { short: false },
             Request::Layout { short: true },
             Request::State,
-            Request::Focus(Some("alacritty".into())),
-            Request::Move(None),
-            Request::Move(Some((0, 0))),
+            Request::Focus(None),
+            Request::Focus(Some(WindowSelector::AppId("alacritty".into()))),
+            Request::Focus(Some(WindowSelector::Id(5))),
+            Request::Move {
+                window: None,
+                to: None,
+            },
+            Request::Move {
+                window: None,
+                to: Some((0, 0)),
+            },
+            Request::Move {
+                window: Some(WindowSelector::Id(3)),
+                to: None,
+            },
+            Request::Move {
+                window: Some(WindowSelector::AppId("foot".into())),
+                to: Some((100, 200)),
+            },
+            Request::Close(None),
+            Request::Close(Some(WindowSelector::Id(7))),
             Request::Action("switch-layout next".into()),
             Request::Screenshot {
                 target: ScreenshotTarget::Viewport,
@@ -197,7 +243,14 @@ mod tests {
                 path: "/tmp/view.png".into(),
             },
             Request::Screenshot {
-                target: ScreenshotTarget::Window,
+                target: ScreenshotTarget::Window { window: None },
+                scale: 2.0,
+                path: "/tmp/shot.png".into(),
+            },
+            Request::Screenshot {
+                target: ScreenshotTarget::Window {
+                    window: Some(WindowSelector::Id(2)),
+                },
                 scale: 2.0,
                 path: "/tmp/shot.png".into(),
             },
@@ -218,8 +271,39 @@ mod tests {
     }
 
     #[test]
+    fn selector_wire_forms_parse() {
+        // Untagged: a bare string is an app_id, a bare number an id, null none.
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Focus":"term"}"#).unwrap(),
+            Request::Focus(Some(WindowSelector::AppId("term".into())))
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Focus":5}"#).unwrap(),
+            Request::Focus(Some(WindowSelector::Id(5)))
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Focus":null}"#).unwrap(),
+            Request::Focus(None)
+        );
+        // Move fields both default when omitted.
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Move":{}}"#).unwrap(),
+            Request::Move {
+                window: None,
+                to: None
+            }
+        );
+        // Screenshot window target defaults its selector too.
+        assert_eq!(
+            serde_json::from_str::<ScreenshotTarget>(r#"{"Window":{}}"#).unwrap(),
+            ScreenshotTarget::Window { window: None }
+        );
+    }
+
+    #[test]
     fn reply_roundtrip() {
         let windows = vec![WindowInfo {
+            id: 1,
             app_id: "foo".into(),
             title: "bar".into(),
             position: [10, -20],
@@ -235,11 +319,13 @@ mod tests {
                 zoom: 1.0,
                 windows,
                 fullscreen: vec![OutputFullscreen {
+                    id: 2,
                     output: "DP-1".into(),
                     app_id: "mpv".into(),
                     title: "video".into(),
                 }],
                 pinned: vec![OutputPinned {
+                    id: 3,
                     output: "HDMI-A-1".into(),
                     app_id: "pavucontrol".into(),
                     title: "Volume".into(),

@@ -16,7 +16,7 @@ use driftwm::window_ext::WindowExt;
 pub mod client;
 pub mod protocol;
 
-use self::protocol::{Reply, Request, Response, ScreenshotTarget, socket_path};
+use self::protocol::{Reply, Request, Response, ScreenshotTarget, WindowSelector, socket_path};
 
 /// Reject a command line longer than this (without a newline) — bounds the
 /// per-connection buffer against a client that never terminates a command.
@@ -149,7 +149,8 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Layout { short } => cmd_layout(short, state),
         Request::State => Ok(cmd_state(state)),
         Request::Focus(arg) => cmd_focus(arg, state),
-        Request::Move(arg) => cmd_move(arg, state),
+        Request::Move { window, to } => cmd_move(window, to, state),
+        Request::Close(sel) => cmd_close(sel, state),
         Request::Action(spec) => cmd_action(&spec, state),
         Request::Screenshot {
             target,
@@ -165,7 +166,8 @@ fn is_mutating(request: &Request) -> bool {
         Request::Camera(Some(_))
             | Request::Zoom(Some(_))
             | Request::Focus(Some(_))
-            | Request::Move(Some(_))
+            | Request::Move { to: Some(_), .. }
+            | Request::Close(_)
             | Request::Action(_)
     )
 }
@@ -253,40 +255,64 @@ fn cmd_state(state: &mut DriftWm) -> Response {
     }
 }
 
-fn cmd_focus(arg: Option<String>, state: &mut DriftWm) -> Reply {
-    match arg {
-        None => Ok(Response::Focused(
-            state.focused_window().and_then(|w| w.app_id_or_class()),
-        )),
-        Some(target) => {
-            let target = target.to_lowercase();
-            let found = state
+/// Resolve a selector to a live window. `None` = the focused window. AppId
+/// matching is a case-insensitive substring search that skips widgets; id
+/// lookup is exact and reaches widgets too.
+fn window_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Result<smithay::desktop::Window, String> {
+    match selector {
+        None => state
+            .focused_window()
+            .ok_or_else(|| "no focused window".to_string()),
+        Some(WindowSelector::Id(n)) => state
+            .stage
+            .window_by_id(driftwm::stage::ElementId(*n))
+            .cloned()
+            .ok_or_else(|| format!("no window with id {n}")),
+        Some(WindowSelector::AppId(s)) => {
+            let needle = s.to_lowercase();
+            state
                 .stage
                 .windows()
                 .find(|w| {
                     !w.is_widget()
                         && w.app_id_or_class()
-                            .is_some_and(|a| a.to_lowercase().contains(&target))
+                            .is_some_and(|a| a.to_lowercase().contains(&needle))
                 })
-                .cloned();
-
-            match found {
-                Some(window) => {
-                    let app_id = window.app_id_or_class();
-                    // Already on screen: just raise + focus, don't move the
-                    // camera. Pinned windows are always on screen and have no
-                    // canvas position to navigate to.
-                    if state.is_pinned(&window) || state.window_fully_in_viewport(&window) {
-                        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
-                    } else {
-                        state.navigate_to_window(&window, state.config.zoom_reset_on_activation);
-                    }
-                    Ok(Response::Focused(app_id))
-                }
-                None => Err(format!("no window matching '{target}'")),
-            }
+                .cloned()
+                .ok_or_else(|| format!("no window matching '{needle}'"))
         }
     }
+}
+
+fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let Some(selector) = arg else {
+        return Ok(Response::Focused(
+            state.focused_window().and_then(|w| w.app_id_or_class()),
+        ));
+    };
+    let window = window_by_selector(state, Some(&selector))?;
+    // Widgets are only reachable by id (the app_id search skips them) and can't
+    // take focus.
+    if window.is_widget() {
+        let id = state
+            .stage
+            .id_of(&window)
+            .expect("window from the stage has an id")
+            .0;
+        return Err(format!("window #{id} is a widget and cannot be focused"));
+    }
+    let app_id = window.app_id_or_class();
+    // Already on screen: just raise + focus, don't move the camera. Pinned
+    // windows are always on screen and have no canvas position to navigate to.
+    if state.is_pinned(&window) || state.window_fully_in_viewport(&window) {
+        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
+    } else {
+        state.navigate_to_window(&window, state.config.zoom_reset_on_activation);
+    }
+    Ok(Response::Focused(app_id))
 }
 
 /// Reuses the config-file parser so the IPC `action` command stays in lockstep
@@ -297,23 +323,36 @@ fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
     Ok(Response::Ok)
 }
 
-fn cmd_move(arg: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
-    let Some(window) = state.focused_window() else {
-        return Err("no focused window".to_string());
-    };
+fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
+    let window = window_by_selector(state, window.as_ref())?;
     let size = window.geometry().size;
-    match arg {
+    match to {
         None => {
             let loc = state.stage.position_of(&window).unwrap_or_default();
             let (x, y) = driftwm::canvas::internal_to_rule(loc, size);
             Ok(Response::Position { x, y })
         }
         Some((x, y)) => {
+            // A pinned window renders at its pin, a fullscreen one at its
+            // camera park — writing the canvas position would silently do
+            // nothing (pinned) or displace the park (fullscreen).
+            if !state.is_canvas_window(&window) {
+                return Err("pinned and fullscreen windows have no canvas position to move".into());
+            }
             let loc = driftwm::canvas::rule_to_internal(x, y, size);
-            state.map_window(window, loc, true);
+            // Activating is only consistent when the target already holds
+            // focus; a selector can reach any window.
+            let activate = state.focused_window().as_ref() == Some(&window);
+            state.map_window(window, loc, activate);
             Ok(Response::Position { x, y })
         }
     }
+}
+
+fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let window = window_by_selector(state, sel.as_ref())?;
+    window.send_close();
+    Ok(Response::Ok)
 }
 
 /// Capture a screenshot synchronously to `path`.
@@ -327,7 +366,7 @@ fn cmd_screenshot(target: &ScreenshotTarget, scale: f64, path: &str, state: &mut
     let region = resolve_screenshot_region(target, state)?;
     // `window` captures isolate the window on transparency; every other target is
     // a scene capture with the background.
-    let include_background = !matches!(target, ScreenshotTarget::Window);
+    let include_background = !matches!(target, ScreenshotTarget::Window { .. });
 
     let mut backend = state
         .backend
@@ -359,21 +398,23 @@ fn resolve_screenshot_region(
     target: &ScreenshotTarget,
     state: &DriftWm,
 ) -> Result<Rectangle<i32, Logical>, String> {
-    match *target {
+    match target {
         ScreenshotTarget::Viewport => {
             let output = state.active_output().ok_or("no active output to capture")?;
             Ok(crate::state::output_viewport_rect(&output))
         }
-        ScreenshotTarget::Window => {
+        ScreenshotTarget::Window { window } => {
+            let window = window_by_selector(state, window.as_ref())?;
             // Pinned and fullscreen windows render in screen space, not on the
             // canvas, so there's no canvas region to capture. Refuse rather than
             // emit the background behind them.
-            let window = state
-                .focused_window()
-                .filter(|w| state.is_canvas_window(w))
-                .ok_or("no focused window to capture")?;
+            if !state.is_canvas_window(&window) {
+                return Err(
+                    "pinned and fullscreen windows have no canvas region to capture".to_string(),
+                );
+            }
             window_visual_rect(state, &window)
-                .ok_or_else(|| "focused window has no capturable area".to_string())
+                .ok_or_else(|| "window has no capturable area".to_string())
         }
         ScreenshotTarget::All => {
             let mut acc: Option<Rectangle<i32, Logical>> = None;
@@ -403,6 +444,7 @@ fn resolve_screenshot_region(
             h,
             from_screen,
         } => {
+            let (x, y, w, h, from_screen) = (*x, *y, *w, *h, *from_screen);
             if w <= 0 || h <= 0 {
                 return Err("region width and height must be positive".to_string());
             }

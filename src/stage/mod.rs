@@ -157,6 +157,10 @@ impl<W: StageElement> Stage<W> {
         self.entry(window).map(|e| e.id)
     }
 
+    pub fn window_by_id(&self, id: ElementId) -> Option<&W> {
+        self.entries.iter().find(|e| e.id == id).map(|e| &e.window)
+    }
+
     /// Raise `window`, then its descendants breadth-first, so each child ends
     /// up directly above its own parent without jumping over unrelated windows
     /// higher in the stack. Returns the raise order so the caller can apply

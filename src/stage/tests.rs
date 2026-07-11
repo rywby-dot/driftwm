@@ -1,7 +1,7 @@
 use smithay::utils::{Point, Size};
 
 use super::mock::TestWindow;
-use super::{Stage, StageElement, subtree_raise_order};
+use super::{ElementId, Stage, StageElement, subtree_raise_order};
 
 fn stage_with(n: u64) -> (Stage<TestWindow>, Vec<TestWindow>) {
     let mut stage = Stage::new();
@@ -40,6 +40,32 @@ fn map_assigns_stable_unique_ids() {
     let w = TestWindow::new(99);
     stage.map(w.clone(), Point::from((0, 0)));
     assert!(stage.id_of(&w).unwrap() > id1);
+}
+
+#[test]
+fn window_by_id_looks_up_by_stable_id() {
+    let (mut stage, windows) = stage_with(2);
+    let id0 = stage.id_of(&windows[0]).unwrap();
+    let id1 = stage.id_of(&windows[1]).unwrap();
+    assert_ne!(id0, id1);
+    assert_eq!(stage.window_by_id(id0), Some(&windows[0]));
+    assert_eq!(stage.window_by_id(id1), Some(&windows[1]));
+    assert_eq!(stage.window_by_id(ElementId(999)), None);
+
+    // Ids survive a raise and a re-map (position change).
+    stage.raise(&windows[0]);
+    stage.map(windows[1].clone(), Point::from((7, 7)));
+    assert_eq!(stage.window_by_id(id0), Some(&windows[0]));
+    assert_eq!(stage.window_by_id(id1), Some(&windows[1]));
+
+    // A remapped window (removed, then mapped again) gets a fresh id, and the
+    // old id no longer resolves.
+    stage.remove(&windows[0]);
+    stage.map(windows[0].clone(), Point::from((0, 0)));
+    let new_id = stage.id_of(&windows[0]).unwrap();
+    assert_ne!(new_id, id0);
+    assert_eq!(stage.window_by_id(id0), None);
+    assert_eq!(stage.window_by_id(new_id), Some(&windows[0]));
 }
 
 #[test]

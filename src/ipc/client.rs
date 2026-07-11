@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use super::protocol::{Reply, Request, Response, ScreenshotTarget, socket_path};
+use super::protocol::{Reply, Request, Response, ScreenshotTarget, WindowSelector, socket_path};
 
 /// `driftwm msg <...>` subcommands. Variants with optional positionals read when
 /// omitted and write when given.
@@ -25,11 +25,31 @@ pub enum Msg {
     },
     /// Dump camera, zoom, and the window inventory.
     State,
-    /// Print the focused window, or focus a window by app_id substring.
-    Focus { app_id: Option<String> },
-    /// Get the focused window position, or move it (center, Y-up) with `<x> <y>`.
+    /// Print the focused window, or focus a window by app_id substring or `--id`
+    /// (the stable id shown in `state`).
+    Focus {
+        app_id: Option<String>,
+        /// Focus the window with this stable id (from `state`).
+        #[arg(long, conflicts_with = "app_id")]
+        id: Option<u64>,
+    },
+    /// Get a window's position, or move it (center, Y-up) with `<x> <y>`. Targets
+    /// the focused window, or `--id` (the stable id shown in `state`).
     #[command(allow_negative_numbers = true)]
-    Move { x: Option<i32>, y: Option<i32> },
+    Move {
+        x: Option<i32>,
+        y: Option<i32>,
+        /// Target the window with this stable id (from `state`).
+        #[arg(long)]
+        id: Option<u64>,
+    },
+    /// Close the focused window, or a window by app_id substring or `--id`.
+    Close {
+        app_id: Option<String>,
+        /// Close the window with this stable id (from `state`).
+        #[arg(long, conflicts_with = "app_id")]
+        id: Option<u64>,
+    },
     /// Run a config action, e.g. `action close-window`, `action quit`, `action switch-layout next`.
     #[command(allow_negative_numbers = true)]
     Action {
@@ -54,8 +74,13 @@ pub enum Msg {
 /// What `driftwm msg screenshot` captures.
 #[derive(clap::Subcommand, Debug)]
 pub enum ShotTarget {
-    /// The focused window.
-    Window,
+    /// The focused window, or a window by app_id substring or `--id`.
+    Window {
+        app_id: Option<String>,
+        /// Capture the window with this stable id (from `state`).
+        #[arg(long, conflicts_with = "app_id")]
+        id: Option<u64>,
+    },
     /// The bounding box of all windows.
     All,
     /// A rectangle — `X Y W H` (canvas coords, center/Y-up) or slurp's native
@@ -134,6 +159,16 @@ pub fn run(msg: &Msg, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Build a window selector from a subcommand's `app_id`/`--id` pair; clap's
+/// `conflicts_with` guarantees at most one is set (id wins if both are).
+fn window_selector(app_id: &Option<String>, id: Option<u64>) -> Option<WindowSelector> {
+    match (id, app_id) {
+        (Some(n), _) => Some(WindowSelector::Id(n)),
+        (None, Some(s)) => Some(WindowSelector::AppId(s.clone())),
+        (None, None) => None,
+    }
+}
+
 fn to_request(msg: &Msg) -> Result<Request, String> {
     Ok(match msg {
         Msg::Camera { x, y } => match (x, y) {
@@ -144,12 +179,19 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         Msg::Zoom { level } => Request::Zoom(*level),
         Msg::Layout { short } => Request::Layout { short: *short },
         Msg::State => Request::State,
-        Msg::Focus { app_id } => Request::Focus(app_id.clone()),
-        Msg::Move { x, y } => match (x, y) {
-            (None, None) => Request::Move(None),
-            (Some(x), Some(y)) => Request::Move(Some((*x, *y))),
-            _ => return Err("move needs both <x> and <y>".to_string()),
-        },
+        Msg::Focus { app_id, id } => Request::Focus(window_selector(app_id, *id)),
+        Msg::Move { x, y, id } => {
+            let to = match (x, y) {
+                (None, None) => None,
+                (Some(x), Some(y)) => Some((*x, *y)),
+                _ => return Err("move needs both <x> and <y>".to_string()),
+            };
+            Request::Move {
+                window: id.map(WindowSelector::Id),
+                to,
+            }
+        }
+        Msg::Close { app_id, id } => Request::Close(window_selector(app_id, *id)),
         Msg::Action { spec } => Request::Action(spec.join(" ")),
         Msg::Screenshot {
             target,
@@ -158,7 +200,9 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         } => {
             let target = match target {
                 None => ScreenshotTarget::Viewport,
-                Some(ShotTarget::Window) => ScreenshotTarget::Window,
+                Some(ShotTarget::Window { app_id, id }) => ScreenshotTarget::Window {
+                    window: window_selector(app_id, *id),
+                },
                 Some(ShotTarget::All) => ScreenshotTarget::All,
                 Some(ShotTarget::Region {
                     coords,
@@ -260,8 +304,8 @@ fn print_response(response: Response) {
                     format!("  \"{}\"", w.title)
                 };
                 println!(
-                    "  {mark} {} [{}, {}] {}x{}{}",
-                    w.app_id, w.position[0], w.position[1], w.size[0], w.size[1], title
+                    "  {mark} #{} {} [{}, {}] {}x{}{}",
+                    w.id, w.app_id, w.position[0], w.position[1], w.size[0], w.size[1], title
                 );
             }
             println!("fullscreen {}", fullscreen.len());
@@ -271,7 +315,7 @@ fn print_response(response: Response) {
                 } else {
                     format!("  \"{}\"", f.title)
                 };
-                println!("  {} {}{}", f.output, f.app_id, title);
+                println!("  {} #{} {}{}", f.output, f.id, f.app_id, title);
             }
             println!("pinned {}", pinned.len());
             for p in pinned {
@@ -281,8 +325,15 @@ fn print_response(response: Response) {
                     format!("  \"{}\"", p.title)
                 };
                 println!(
-                    "  {} {} [{}, {}] {}x{}{}",
-                    p.output, p.app_id, p.position[0], p.position[1], p.size[0], p.size[1], title
+                    "  {} #{} {} [{}, {}] {}x{}{}",
+                    p.output,
+                    p.id,
+                    p.app_id,
+                    p.position[0],
+                    p.position[1],
+                    p.size[0],
+                    p.size[1],
+                    title
                 );
             }
             println!("layers {}", layers.len());
@@ -302,10 +353,118 @@ fn print_response(response: Response) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_region;
+    use super::super::protocol::{Request, ScreenshotTarget, WindowSelector};
+    use super::{Msg, ShotTarget, parse_region, to_request};
 
     fn tokens(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn focus_maps_app_id_and_id() {
+        assert_eq!(
+            to_request(&Msg::Focus {
+                app_id: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Focus(None)
+        );
+        assert_eq!(
+            to_request(&Msg::Focus {
+                app_id: Some("term".into()),
+                id: None
+            })
+            .unwrap(),
+            Request::Focus(Some(WindowSelector::AppId("term".into())))
+        );
+        assert_eq!(
+            to_request(&Msg::Focus {
+                app_id: None,
+                id: Some(5)
+            })
+            .unwrap(),
+            Request::Focus(Some(WindowSelector::Id(5)))
+        );
+    }
+
+    #[test]
+    fn close_maps_default_and_id() {
+        assert_eq!(
+            to_request(&Msg::Close {
+                app_id: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Close(None)
+        );
+        assert_eq!(
+            to_request(&Msg::Close {
+                app_id: None,
+                id: Some(7)
+            })
+            .unwrap(),
+            Request::Close(Some(WindowSelector::Id(7)))
+        );
+    }
+
+    #[test]
+    fn move_maps_id_and_coords() {
+        assert_eq!(
+            to_request(&Msg::Move {
+                x: Some(10),
+                y: Some(20),
+                id: Some(3)
+            })
+            .unwrap(),
+            Request::Move {
+                window: Some(WindowSelector::Id(3)),
+                to: Some((10, 20))
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Move {
+                x: None,
+                y: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Move {
+                window: None,
+                to: None
+            }
+        );
+        // A lone coordinate is still an error.
+        assert!(
+            to_request(&Msg::Move {
+                x: Some(1),
+                y: None,
+                id: None
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn screenshot_window_maps_selector() {
+        let req = to_request(&Msg::Screenshot {
+            target: Some(ShotTarget::Window {
+                app_id: None,
+                id: Some(2),
+            }),
+            scale: 1.0,
+            output: Some("/tmp/x.png".into()),
+        })
+        .unwrap();
+        let Request::Screenshot { target, .. } = req else {
+            panic!("expected screenshot request");
+        };
+        assert_eq!(
+            target,
+            ScreenshotTarget::Window {
+                window: Some(WindowSelector::Id(2))
+            }
+        );
     }
 
     #[test]
