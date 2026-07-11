@@ -810,6 +810,11 @@ pub fn init_udev(
                                             .cloned()
                                             .collect();
                                         for old in &virtual_outputs {
+                                            // A window can have entered fullscreen while headless
+                                            // (the placeholder is a normal space output); exit it
+                                            // like teardown_output does, or the stage entry
+                                            // outlives its output.
+                                            data.exit_fullscreen_on(old);
                                             // Windows never enter placeholder outputs (membership
                                             // refresh excludes them), but a layer-shell surface
                                             // created while headless still gets entered on the
