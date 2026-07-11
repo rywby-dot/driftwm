@@ -317,3 +317,15 @@ let images = xcursor::parser::parse_xcursor(&std::fs::read(path)?)?;
 
 - **Temporaries in `if let` live until end of block** — separate `let x = expr.cloned(); if let Some(x) = x {` when needing `&mut self` inside the block.
 - **DMA-BUF blocker uses let-chains** — `if let Some(dmabuf) = ... && let Ok((blocker, source)) = ... && let Some(client) = ... { }` is idiomatic Rust 2024.
+
+### Output membership (`SpaceElement` on `Window`)
+
+driftwm drives per-window `wl_surface.enter`/`leave` itself (`DriftWm::refresh_window_outputs`) instead of `Space::refresh`. The relevant `SpaceElement` methods on `Window` (`smithay::desktop::space::SpaceElement`; call fully-qualified — `Window` has inherent methods with clashing names):
+
+- **`SpaceElement::output_enter(&self, output, overlap)`** — inserts `overlap` (relative to the window origin) into the `Window`'s private `WindowOutputUserData` overlap map (keyed by a downgraded `Output`) and calls `refresh()` to push the enter to the toplevel + its popups. Idempotent per output; re-sends on a changed overlap.
+- **`SpaceElement::output_leave(&self, output)`** — drops `output` from that map and sends `wl_surface.leave` for the toplevel and every popup. No-op after `Output::leave_all()`.
+- **`SpaceElement::refresh(&self)`** — re-runs the per-surface `output_update` for the toplevel and popups from the `Window`'s own overlap map; keeps popup enter/leave fresh without a full diff.
+- **`SpaceElement::bbox(&self)`** = `Window::bbox_with_popups()`; **`geometry()`** = the window geometry (decoration-excluded). `Space::refresh` translated the bbox by `location - geometry().loc` before intersecting each output — replicate this when computing overlaps.
+- **`Space::refresh` semantics (replaced)** — retained alive elements, diffed each element's bbox against every mapped output's geometry (`output_geometry(o).unwrap_or_else(Rectangle::zero)`), sent `output_enter`/`output_leave` on change, called `SpaceElement::refresh` per element, then `Output::cleanup` per output.
+- **`Output::cleanup(&self)`** — prunes dead surfaces from the output's own enter tracking. **`Output::leave_all(&self)`** — sends `wl_surface.leave` for every surface currently entered on the output (used on placeholder-output teardown).
+- **`UserDataMap`** is a lock-free append-only boxed list: a `&T` from `get`/`get_or_insert` stays valid across a later `insert_if_missing` of a *different* type, so holding one userdata borrow while a `SpaceElement` method touches another userdata entry is sound.

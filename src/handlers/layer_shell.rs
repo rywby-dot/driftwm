@@ -94,7 +94,11 @@ impl WlrLayerShellHandler for DriftWm {
             // Output::enter (vs raw wl_surface.enter) tells the client the
             // output's scale/transform and records the surface in enter
             // tracking, so leave_all on output teardown covers canvas layers.
-            resolved_output.enter(desktop_surface.wl_surface());
+            // Skip a placeholder output: its wl_output global is dead, so
+            // entering it would reference a NULL proxy.
+            if !self.disconnected_outputs.contains(&resolved_output.name()) {
+                resolved_output.enter(desktop_surface.wl_surface());
+            }
 
             self.canvas_layers.push(CanvasLayer {
                 surface: desktop_surface,

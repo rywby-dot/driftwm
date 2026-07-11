@@ -278,11 +278,11 @@ pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
 
     // Cleanup
     state.stage.retain_alive();
-    state.space.refresh();
+    state.refresh_window_outputs();
     state.popups.cleanup();
     layer_map_for_output(output).cleanup();
     #[cfg(debug_assertions)]
-    state.verify_stage_parity();
+    state.verify_stage_invariants();
 
     state.refresh_idle_inhibit();
 }

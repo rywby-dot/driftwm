@@ -3,7 +3,7 @@
 //! `stage`, `decorations`, and `config.snap_gap`.
 
 use smithay::{
-    desktop::{Space, Window},
+    desktop::Window,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Resource, protocol::wl_surface::WlSurface},
@@ -75,15 +75,12 @@ impl ClusterResizeSnapshot {
 
     /// Compute shifts, reposition every affected cluster member, and re-map
     /// the primary to the top of the z-order so it stays on top of its own
-    /// cluster. Writes go through stage and space together (the map_window
-    /// contract, inlined here because the grab owns this snapshot, not
-    /// `DriftWm`).
+    /// cluster. Writes go through the stage (the map_window contract, inlined
+    /// here because the grab owns this snapshot, not `DriftWm`).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::disallowed_methods)]
     pub fn apply_member_shifts(
         &mut self,
         stage: &mut driftwm::stage::Stage<Window>,
-        space: &mut Space<Window>,
         primary: &Window,
         initial_size: Size<i32, Logical>,
         new_w: i32,
@@ -105,14 +102,12 @@ impl ClusterResizeSnapshot {
             }
             let new_pos = m.initial_pos + Point::from((*dx, *dy));
             stage.map(m.window.clone(), new_pos);
-            space.map_element(m.window.clone(), new_pos, false);
         }
 
         if !shifts.is_empty()
             && let Some(cur) = stage.position_of(primary)
         {
             stage.map(primary.clone(), cur);
-            space.map_element(primary.clone(), cur, false);
         }
     }
 

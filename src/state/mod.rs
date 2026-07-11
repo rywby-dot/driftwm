@@ -6,6 +6,7 @@ pub mod fit;
 mod focus;
 mod fullscreen;
 mod init;
+mod membership;
 mod navigation;
 pub mod persistence;
 mod placement;
@@ -363,16 +364,15 @@ pub struct DriftWm {
     pub loop_handle: LoopHandle<'static, DriftWm>,
     pub loop_signal: LoopSignal,
 
-    /// Source of truth for the window list, z-order, positions, focus
-    /// history / MRU cycle, fullscreen membership, and fit state. `space`
-    /// mirrors it — mutate both together through [`Self::map_window`] /
-    /// [`Self::raise_window`] / [`Self::unmap_window`] and the stage-backed
-    /// methods.
+    /// Sole source of truth for the window list, z-order, positions, focus
+    /// history / MRU cycle, fullscreen membership, and fit state. Mutate
+    /// through [`Self::map_window`] / [`Self::raise_window`] /
+    /// [`Self::unmap_window`] and the stage-backed methods.
     pub stage: driftwm::stage::Stage<Window>,
-    /// Mirror of the stage with two remaining jobs: the output registry
-    /// (`map_output` / `outputs` / `output_geometry`) and `Space::refresh`,
-    /// which sends clients `wl_surface.enter`/`leave` from element positions.
-    /// Never read window state from it — a clippy lint enforces this.
+    /// Output registry only (`map_output` / `outputs` / `output_geometry`);
+    /// holds no window elements. Per-window output membership
+    /// (`wl_surface.enter`/`leave`) is driven by [`Self::refresh_window_outputs`],
+    /// not by this. A clippy lint bans every `Space` element method.
     pub space: Space<Window>,
     pub popups: PopupManager,
 
@@ -664,50 +664,55 @@ impl DriftWm {
         self.idle_notifier_state.set_is_inhibited(is_inhibited);
     }
 
+    /// Replicates `Space`'s activate semantics: xdg Activated set on `target`,
+    /// cleared on every other window. Pending-only — the configure rides on the
+    /// next send.
+    fn set_activated_exclusive(&self, target: &Window) {
+        for w in self.stage.windows() {
+            w.set_activated(w == target);
+        }
+    }
+
     /// Push any `below` windows to the bottom of the z-order.
-    /// Called after every `raise_element()` to maintain stacking.
-    #[allow(clippy::disallowed_methods)]
+    /// Called after every raise to maintain stacking.
     pub fn enforce_below_windows(&mut self) {
         self.render.blur_geometry_generation += 1;
-        for w in self.stage.enforce_stacking() {
-            self.space.raise_element(&w, false);
-        }
+        self.stage.enforce_stacking();
     }
 
     /// Raise `window`, then its child windows, so a child/modal dialog stays
     /// directly above its own parent without jumping over unrelated windows
     /// that sit higher in the stack.
-    #[allow(clippy::disallowed_methods)]
     pub fn raise_with_children(&mut self, window: &Window) {
         for w in self.stage.raise_with_children(window) {
-            self.space.raise_element(&w, true);
+            self.set_activated_exclusive(&w);
         }
     }
 
-    /// Map (or move) `window` at `pos` in stage and space together. `activate`
-    /// keeps `Space::map_element` semantics: set the xdg Activated state on
-    /// this window and clear it on every other.
-    #[allow(clippy::disallowed_methods)]
+    /// Map (or move) `window` at `pos`, exclusively activating it if
+    /// `activate` is set.
     pub fn map_window(&mut self, window: Window, pos: Point<i32, Logical>, activate: bool) {
         self.stage.map(window.clone(), pos);
-        self.space.map_element(window, pos, activate);
+        if activate {
+            self.set_activated_exclusive(&window);
+        }
     }
 
-    #[allow(clippy::disallowed_methods)]
     pub fn raise_window(&mut self, window: &Window, activate: bool) {
         self.stage.raise(window);
-        self.space.raise_element(window, activate);
+        if activate {
+            self.set_activated_exclusive(window);
+        }
     }
 
-    /// Remove `window` from stage and space. The stage side also purges it
-    /// from the focus history (clamping any active cycle) and from the
-    /// stage's fullscreen membership. The `fullscreen` viewport half (camera
-    /// restore) is NOT handled here — a caller unmapping a fullscreen window
-    /// must tear that down first, as `toplevel_destroyed` does.
-    #[allow(clippy::disallowed_methods)]
+    /// Remove `window` from the stage and send its per-output leaves. The stage
+    /// side also purges it from the focus history (clamping any active cycle)
+    /// and from the stage's fullscreen membership. The `fullscreen` viewport
+    /// half (camera restore) is NOT handled here — a caller unmapping a
+    /// fullscreen window must tear that down first, as `toplevel_destroyed` does.
     pub fn unmap_window(&mut self, window: &Window) {
         self.stage.remove(window);
-        self.space.unmap_elem(window);
+        membership::send_output_leaves(window);
     }
 
     /// Resolve an output name (the stage's fullscreen key) back to the live
@@ -1823,31 +1828,14 @@ impl DriftWm {
 }
 
 impl DriftWm {
-    /// Debug-only end-of-tick check: the stage and its `Space` mirror must
-    /// agree on the window set, z-order, and positions; the two halves of the
-    /// fullscreen split must cover the same outputs; and every SSD decoration
-    /// entry must belong to a live window. Any mismatch is a routing bug —
-    /// some mutation bypassed the stage wrappers.
+    /// Debug-only end-of-tick check: the stage's own structural invariants
+    /// hold; the two halves of the fullscreen split (stage membership and
+    /// per-output viewport-return) cover the same outputs; and every SSD
+    /// decoration entry belongs to a live window on the stage. A panic here is
+    /// a routing bug — some mutation bypassed the stage wrappers.
     #[cfg(debug_assertions)]
-    #[allow(clippy::disallowed_methods)] // comparing the two stores IS this function
-    pub fn verify_stage_parity(&self) {
+    pub fn verify_stage_invariants(&self) {
         self.stage.verify_invariants();
-
-        let stage_windows: Vec<&Window> = self.stage.windows().collect();
-        let space_windows: Vec<&Window> = self.space.elements().collect();
-        assert_eq!(
-            stage_windows.len(),
-            space_windows.len(),
-            "stage/space window count mismatch"
-        );
-        for (s, sp) in stage_windows.iter().zip(&space_windows) {
-            assert_eq!(*s, *sp, "stage/space z-order mismatch");
-            assert_eq!(
-                self.stage.position_of(s),
-                self.space.element_location(sp),
-                "stage/space position mismatch"
-            );
-        }
 
         for output in self.space.outputs() {
             assert_eq!(

@@ -198,7 +198,6 @@ impl DriftWm {
             self.cluster_snapshot_for_resize(primary, xdg_toplevel::ResizeEdge::BottomRight);
         br.apply_member_shifts(
             &mut self.stage,
-            &mut self.space,
             primary,
             old_size,
             old_size.w + dx_right,
@@ -212,7 +211,6 @@ impl DriftWm {
         let mut tl = self.cluster_snapshot_for_resize(primary, xdg_toplevel::ResizeEdge::TopLeft);
         tl.apply_member_shifts(
             &mut self.stage,
-            &mut self.space,
             primary,
             old_size,
             old_size.w - dx_left,

@@ -810,10 +810,12 @@ pub fn init_udev(
                                             .cloned()
                                             .collect();
                                         for old in &virtual_outputs {
-                                            // Surfaces re-enter the placeholder while headless
-                                            // whenever their bbox changes; drain those enters
-                                            // now so clients see the old output's leave before
-                                            // the new output's enter.
+                                            // Windows never enter placeholder outputs (membership
+                                            // refresh excludes them), but a layer-shell surface
+                                            // created while headless still gets entered on the
+                                            // placeholder by the layer map; drain those enters so
+                                            // clients see the old output's leave before the new
+                                            // output's enter.
                                             old.leave_all();
                                             data.space.unmap_output(old);
                                             data.render.remove_output(&old.name());

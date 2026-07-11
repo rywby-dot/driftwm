@@ -1,9 +1,8 @@
 //! Smithay-free source of truth for window state: the window list, z-order,
 //! per-window canvas position, focus history / MRU cycle, fullscreen
-//! membership, pin-to-screen membership, and fit state.
-//! `smithay::desktop::Space` mirrors this for rendering; `DriftWm` wrapper
-//! methods keep the two in sync (write-through) and a debug end-of-tick check
-//! asserts parity.
+//! membership, pin-to-screen membership, and fit state. `DriftWm` wrapper
+//! methods (`map_window` / `raise_window` / `unmap_window`) are the only way
+//! to mutate it, and a debug end-of-tick check asserts its invariants.
 //!
 //! The stage never touches protocol state (configures, buffers, damage). It
 //! answers queries and records decisions; the compositor applies the effects
@@ -160,7 +159,8 @@ impl<W: StageElement> Stage<W> {
 
     /// Raise `window`, then its descendants breadth-first, so each child ends
     /// up directly above its own parent without jumping over unrelated windows
-    /// higher in the stack. Returns the raise order for the caller to mirror.
+    /// higher in the stack. Returns the raise order so the caller can apply
+    /// per-window side effects (activation).
     pub fn raise_with_children(&mut self, window: &W) -> Vec<W> {
         let stack: Vec<W> = self.entries.iter().map(|e| e.window.clone()).collect();
         let order = subtree_raise_order(&stack, window, |child, parent| child.is_child_of(parent));
@@ -172,9 +172,9 @@ impl<W: StageElement> Stage<W> {
 
     /// Re-assert stacking classes: every non-widget window is raised (in
     /// current relative order) above any widget, then fullscreen windows go on
-    /// top. Returns the raise sequence for the caller to mirror.
-    pub fn enforce_stacking(&mut self) -> Vec<W> {
-        let mut raised: Vec<W> = self
+    /// top.
+    pub fn enforce_stacking(&mut self) {
+        let raised: Vec<W> = self
             .entries
             .iter()
             .filter(|e| !e.window.is_widget())
@@ -191,8 +191,6 @@ impl<W: StageElement> Stage<W> {
         for w in &fullscreen {
             self.raise(w);
         }
-        raised.extend(fullscreen);
-        raised
     }
 
     /// Move `window` to the front of the MRU history. Eligibility (widgets,
