@@ -1696,9 +1696,6 @@ impl DriftWm {
     /// unmapped) and the last-output reconnection (virtual placeholder swapped
     /// for the new monitor).
     pub fn reassign_orphaned_pinned(&mut self, to: &Output) {
-        if !self.stage.has_pinned() {
-            return;
-        }
         let live: Vec<String> = self.space.outputs().map(|o| o.name()).collect();
         let to_size = output_logical_size(to);
         let orphans: Vec<(Window, driftwm::stage::PinnedSite)> = self
@@ -1707,9 +1704,7 @@ impl DriftWm {
             .filter(|(_, site)| !live.contains(&site.output))
             .map(|(w, site)| (w.clone(), site.clone()))
             .collect();
-        if orphans.is_empty() {
-            return;
-        }
+        let moved = !orphans.is_empty();
         for (window, mut site) in orphans {
             let win_size = window.geometry().size;
             site.output = to.name();
@@ -1717,11 +1712,44 @@ impl DriftWm {
             site.screen_pos.y = site.screen_pos.y.clamp(0, (to_size.h - win_size.h).max(0));
             self.stage.set_pin(&window, site);
         }
-        // Re-anchor the Space loc to the new output now — `sync_pinned_locs`
-        // only fires on camera changes, which a hotplug doesn't guarantee, so
-        // without this the reassigned window keeps its stale (off the new
-        // output) canvas loc and gets culled until the next pan.
-        self.sync_pinned_locs();
+        if moved {
+            // Re-anchor the Space loc to the new output now — `sync_pinned_locs`
+            // only fires on camera changes, which a hotplug doesn't guarantee, so
+            // without this the reassigned window keeps its stale (off the new
+            // output) canvas loc and gets culled until the next pan.
+            self.sync_pinned_locs();
+        }
+        // A pin suspended by fullscreen (`fullscreen_return.pinned` on the
+        // fullscreen output) is invisible to `stage.pinned_windows()`; rebind
+        // it too, or fullscreen-exit restores the pin onto the dead output and
+        // the window strands there. Clamp against the fullscreen entry's saved
+        // size — the window's current geometry is the fullscreen viewport.
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            // A `fullscreen_return` without a stage entry is a divergence the
+            // stage invariants assert against; don't paper over it here.
+            let Some(saved_size) = self
+                .stage
+                .fullscreen_on(&output.name())
+                .map(|fs| fs.saved_size)
+            else {
+                continue;
+            };
+            let mut os = output_state(&output);
+            if let Some(ret) = os.fullscreen_return.as_mut()
+                && let Some(site) = ret.pinned.as_mut()
+                && !live.contains(&site.output)
+            {
+                site.output = to.name();
+                site.screen_pos.x = site
+                    .screen_pos
+                    .x
+                    .clamp(0, (to_size.w - saved_size.w).max(0));
+                site.screen_pos.y = site
+                    .screen_pos
+                    .y
+                    .clamp(0, (to_size.h - saved_size.h).max(0));
+            }
+        }
     }
 
     pub fn get_viewport_size(&self) -> Size<i32, Logical> {
@@ -1851,6 +1879,7 @@ impl DriftWm {
 }
 
 impl DriftWm {
+
     /// Debug-only end-of-tick check: the stage's own structural invariants
     /// hold; the two halves of the fullscreen split (stage membership and
     /// per-output viewport-return) cover the same outputs; and every SSD
@@ -1873,6 +1902,27 @@ impl DriftWm {
                 self.output_by_name(name).is_some(),
                 "stage fullscreen entry for {name} outlived its output"
             );
+        }
+        for (_, site) in self.stage.pinned_windows() {
+            assert!(
+                self.output_by_name(&site.output).is_some(),
+                "pin references dead output {}",
+                site.output
+            );
+        }
+        for output in self.space.outputs() {
+            if let Some(site) = output_state(output)
+                .fullscreen_return
+                .as_ref()
+                .and_then(|ret| ret.pinned.as_ref())
+            {
+                assert!(
+                    self.output_by_name(&site.output).is_some(),
+                    "pin suspended by fullscreen on {} references dead output {}",
+                    output.name(),
+                    site.output
+                );
+            }
         }
 
         for id in self.decorations.keys() {
