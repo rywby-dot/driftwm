@@ -10,6 +10,6 @@ Personal config files for my driftwm setup.
 | Notifications | [swaync](https://github.com/ErikReider/SwayNotificationCenter)                                                        | `swaync/`     |
 | Widgets       | Python scripts in [alacritty](https://github.com/alacritty/alacritty), pinned via window rules                        | `widgets/`    |
 | Wallpapers    | GLSL shaders                                                                                                          | `wallpapers/` |
-| Scripts       | Lock, battery notify                                                                                                  | `scripts/`    |
+| Scripts       | Lock, battery notify, canvas decals                                                                                   | `scripts/`    |
 | Icons         | [elementary](https://github.com/elementary/icons) + [Mignon-pastel](https://github.com/igorfmoraes/Mignon-icon-theme) | `icons/`      |
 | GTK theme     | [Everforest Light](https://github.com/Fausto-Korpsvart/Everforest-GTK-Theme)                                          | —             |
