@@ -185,6 +185,7 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Zoom(arg) => cmd_zoom(arg, state),
         Request::Layout { short } => cmd_layout(short, state),
         Request::State => Ok(cmd_state(state)),
+        Request::DebugCounters => Ok(Response::DebugCounters(state.debug_counters())),
         // Handled in serve_connection, which has the raw stream Subscribe needs.
         Request::Subscribe => unreachable!("Subscribe is handled before dispatch"),
         Request::Focus(arg) => cmd_focus(arg, state),

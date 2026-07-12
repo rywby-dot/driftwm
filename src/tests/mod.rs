@@ -5,6 +5,10 @@
 //! clients connect over socket pairs, and an outer calloop loop nests both the
 //! server loop and every client loop by their epoll fds, so one
 //! [`Fixture::dispatch`] pumps the whole graph deterministically.
+//!
+//! Every scenario is leak-checked at teardown: [`Fixture`]'s `Drop` tears down
+//! all clients and asserts `debug_counters` return to the construction-time
+//! baseline (opt out with `Fixture::skip_baseline_check`).
 
 mod client;
 mod fixture;

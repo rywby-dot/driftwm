@@ -26,6 +26,7 @@ when given no arguments and writes when given arguments.
 | `screenshot ...` | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots)) |
 | `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory (each window has a stable `id`)                          |
 | `subscribe`      | `driftwm msg subscribe`       | Stream state snapshots: the current one immediately, then one on every change (`--json` for line-delimited JSON, see [Subscribing to changes](#subscribing-to-changes)) |
+| `debug-counters` | `driftwm msg debug-counters`  | Print internal collection sizes for leak diagnosis (unstable keys — see [Debug counters](#debug-counters)) |
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
@@ -158,6 +159,26 @@ driftwm msg --json subscribe | jq -r '.State.windows[0].app_id'
 driftwm msg subscribe
 ```
 
+### Debug counters
+
+`debug-counters` prints the sizes of the compositor's internal
+per-window/surface/client collections, one `key: value` line per counter:
+
+```bash
+$ driftwm msg debug-counters
+canvas_layers: 0
+decorations: 2
+stage_entries: 2
+...
+```
+
+It's a **debugging/introspection endpoint**, not a stable interface: the keys
+are internal field names that can change or disappear between releases, so don't
+build tooling that depends on them. The point is leak diagnosis — a
+window/surface/client-keyed count should return to its idle baseline once the
+windows and clients that raised it are gone. (Output-keyed counters follow
+output lifetimes instead and can legitimately persist across hotplug.)
+
 ## Wire protocol
 
 The socket path is `$XDG_RUNTIME_DIR/driftwm/ipc-<WAYLAND_DISPLAY>.sock`
@@ -196,6 +217,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 | screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)            |
 | state            | `"State"`                                                                 |
 | subscribe        | `"Subscribe"`                                                             |
+| debug counters   | `"DebugCounters"` (reply keys are unstable — see [Debug counters](#debug-counters)) |
 
 ### Responses
 
@@ -206,6 +228,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}   // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
 {"Ok":"Ok"}                          // action / close
+{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}   // abridged
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
   "layout_short":"us","windows":[
   {"id":3,"app_id":"foot","title":"~","position":[0,0],"size":[800,480],

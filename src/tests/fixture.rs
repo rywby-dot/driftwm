@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
@@ -29,6 +29,12 @@ pub struct Fixture {
     /// nested client loop before dropping the client (whose callback would
     /// otherwise fire against a missing client).
     client_tokens: HashMap<ClientId, RegistrationToken>,
+    /// Counter snapshot taken at construction; `Drop` asserts every counter
+    /// returns here once the clients are torn down.
+    baseline: BTreeMap<String, usize>,
+    /// Opt out of the drop-time baseline check for a scenario that legitimately
+    /// ends in a non-baseline state.
+    skip_baseline: bool,
 }
 
 pub struct FixtureState {
@@ -62,11 +68,15 @@ impl Fixture {
             clients: Vec::new(),
         };
 
+        let baseline = state.server.state.debug_counters();
+
         Self {
             event_loop,
             handle,
             state,
             client_tokens: HashMap::new(),
+            baseline,
+            skip_baseline: false,
         }
     }
 
@@ -78,6 +88,21 @@ impl Fixture {
 
     pub fn state(&mut self) -> &mut DriftWm {
         &mut self.state.server.state
+    }
+
+    /// Current counter snapshot — for a scenario that wants to assert its own
+    /// intermediate baseline. Scaffolding for scenarios not yet written.
+    #[allow(dead_code)]
+    pub fn counters(&mut self) -> BTreeMap<String, usize> {
+        self.state().debug_counters()
+    }
+
+    /// Opt this fixture out of the drop-time baseline assertion, for a scenario
+    /// that legitimately ends off-baseline. Scaffolding for scenarios not yet
+    /// written.
+    #[allow(dead_code)]
+    pub fn skip_baseline_check(&mut self) {
+        self.skip_baseline = true;
     }
 
     pub fn add_output(&mut self, n: u8, size: (u16, u16)) -> Output {
@@ -144,6 +169,44 @@ impl Fixture {
     pub fn double_roundtrip(&mut self, id: ClientId) {
         self.roundtrip(id);
         self.roundtrip(id);
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // A panicking unwind is already failing the test; asserting here would
+        // bury the real cause under a double-panic abort.
+        if std::thread::panicking() || self.skip_baseline {
+            return;
+        }
+
+        // Tear down whatever the scenario left connected before checking for
+        // drainage.
+        for id in self.client_tokens.keys().copied().collect::<Vec<_>>() {
+            self.kill_client(id);
+        }
+
+        // The disconnect cascade (resource destroy handlers plus the idle work
+        // they defer) settles over several dispatch rounds, and on a loaded
+        // machine a single zero-timeout pump makes little progress — so pump
+        // until the counters drain rather than a fixed count, capped so a real
+        // leak still fails instead of spinning forever.
+        let mut counters = self.state().debug_counters();
+        for _ in 0..1000 {
+            if counters == self.baseline {
+                break;
+            }
+            self.pump(1);
+            counters = self.state().debug_counters();
+        }
+
+        assert_eq!(
+            counters, self.baseline,
+            "fixture teardown left compositor state above baseline — a \
+             window/surface/client-keyed collection leaked (see \
+             DriftWm::debug_counters); tear the scenario down cleanly or call \
+             skip_baseline_check"
+        );
     }
 }
 

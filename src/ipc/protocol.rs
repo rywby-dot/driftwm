@@ -4,6 +4,7 @@
 //! line, one `Reply` per line. Keeping it JSON means the socket is debuggable
 //! with `socat` and usable from any scripting language, not just `driftwm msg`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,10 @@ pub enum Request {
         short: bool,
     },
     State,
+    /// Sizes of the compositor's leak-prone internal collections, keyed by
+    /// field name. A debug/introspection endpoint — the keys are unstable
+    /// implementation detail, not a compatibility surface.
+    DebugCounters,
     /// Switches the connection to push mode: after the `Ok` reply the server
     /// writes one [`Event`] line immediately and another on every state change
     /// (throttled with the state file, ~10/sec).
@@ -100,6 +105,7 @@ pub enum Response {
     Zoom(f64),
     Layout(String),
     State(StateInfo),
+    DebugCounters(BTreeMap<String, usize>),
     Focused(Option<FocusedWindow>),
     /// Window-center, Y-up coordinates.
     Position {
@@ -260,6 +266,7 @@ mod tests {
             Request::Layout { short: false },
             Request::Layout { short: true },
             Request::State,
+            Request::DebugCounters,
             Request::Subscribe,
             Request::Focus(None),
             Request::Focus(Some(WindowSelector::AppId("alacritty".into()))),
@@ -397,6 +404,11 @@ mod tests {
             Ok(Response::Camera { x: 1.0, y: 2.0 }),
             Ok(Response::Zoom(1.5)),
             Ok(Response::State(sample_state())),
+            Ok(Response::DebugCounters(
+                [("stage_entries".to_string(), 2usize)]
+                    .into_iter()
+                    .collect(),
+            )),
             Ok(Response::Focused(None)),
             Ok(Response::Focused(Some(FocusedWindow {
                 id: 5,

@@ -27,6 +27,8 @@ pub enum Msg {
     },
     /// Dump camera, zoom, and the window inventory.
     State,
+    /// Print internal collection sizes for leak diagnosis (unstable keys).
+    DebugCounters,
     /// Stream state snapshots as they change (one JSON line per event with --json).
     Subscribe,
     /// Print the focused window, or focus a window by app_id substring or `--id`
@@ -195,6 +197,7 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         Msg::Zoom { level } => Request::Zoom(*level),
         Msg::Layout { short } => Request::Layout { short: *short },
         Msg::State => Request::State,
+        Msg::DebugCounters => Request::DebugCounters,
         Msg::Subscribe => Request::Subscribe,
         Msg::Focus { app_id, id } => Request::Focus(window_selector(app_id, *id)),
         Msg::Move { x, y, id } => {
@@ -332,6 +335,11 @@ fn print_response(response: Response) {
         Response::Screenshot { path, .. } => println!("{path}"),
         Response::Ok => println!("ok"),
         Response::State(info) => print_state(&info),
+        Response::DebugCounters(counters) => {
+            for (key, value) in counters {
+                println!("{key}: {value}");
+            }
+        }
     }
 }
 

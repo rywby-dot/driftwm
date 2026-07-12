@@ -29,7 +29,9 @@ under plain `cargo test` — no display, GPU, or root — and CI runs exactly th
   wiring, configure sequences as the client sees them, crash paths, focus
   timing. Start reading at `src/tests/window_opening.rs` — the idiom is
   map → roundtrip → snapshot/assert, and new scenarios should read as
-  specification sentences.
+  specification sentences. Every scenario is also leak-checked at teardown: the
+  fixture's `Drop` tears down all clients and asserts `debug-counters` return to
+  the construction-time baseline (opt out with `skip_baseline_check`).
 
 ## Rules
 

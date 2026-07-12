@@ -62,6 +62,11 @@ struct VirtualKeyboard {
 const MAX_KEYMAP_SIZE: usize = 8 * 1024 * 1024;
 
 impl VirtualKeyboardBindings {
+    /// Number of tracked virtual keyboards (for leak diagnostics).
+    pub fn keyboard_count(&self) -> usize {
+        self.keyboards.len()
+    }
+
     fn track_keymap(&mut self, id: ObjectId, format: u32, fd: &OwnedFd, size: usize) {
         if format != KeymapFormat::XkbV1 as u32 {
             return;

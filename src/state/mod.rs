@@ -1890,6 +1890,71 @@ impl DriftWm {
         self.display_handle.flush_clients().ok();
     }
 
+    /// Sizes of every unbounded, window/surface/client/output-name-keyed
+    /// collection, keyed by field name. Exposed over IPC (`debug-counters`) and
+    /// snapshotted by the test fixture at teardown, so a collection that grows
+    /// without draining becomes an assertable regression instead of an invisible
+    /// slow leak. Bounded maps and ones keyed by live hardware handles
+    /// (DPMS sets, vblank timers) are deliberately omitted so they don't add
+    /// baseline noise; the keys are implementation detail, not a stable
+    /// interface.
+    pub fn debug_counters(&self) -> BTreeMap<String, usize> {
+        [
+            ("stage_entries", self.stage.windows().len()),
+            ("stage_focus_history", self.stage.focus_history().len()),
+            ("stage_fullscreen", self.stage.fullscreen_entries().count()),
+            ("stage_pinned", self.stage.pinned_windows().count()),
+            ("decorations", self.decorations.len()),
+            ("pending_ssd", self.pending_ssd.len()),
+            ("pending_center", self.pending_center.len()),
+            ("pending_size", self.pending_size.len()),
+            ("pending_fit", self.pending_fit.len()),
+            ("pending_fullscreen", self.pending_fullscreen.len()),
+            ("auto_anchor_snapshot", self.auto_anchor_snapshot.len()),
+            ("pending_recenter", self.pending_recenter.len()),
+            ("stable_snap_rects", self.stable_snap_rects.len()),
+            (
+                "idle_inhibiting_surfaces",
+                self.idle_inhibiting_surfaces.len(),
+            ),
+            ("canvas_layers", self.canvas_layers.len()),
+            ("lock_surfaces", self.lock_surfaces.len()),
+            ("pending_screencopies", self.pending_screencopies.len()),
+            ("pending_captures", self.pending_captures.len()),
+            ("ipc_subscribers", self.ipc_subscribers.len()),
+            (
+                "virtual_kb_bindings",
+                self.virtual_kb_bindings.keyboard_count(),
+            ),
+            ("state_file_cameras", self.state_file_cameras.len()),
+            ("disconnected_outputs", self.disconnected_outputs.len()),
+            ("pending_mode_changes", self.pending_mode_changes.len()),
+            ("blur_cache", self.render.blur_cache.len()),
+            ("shared_blur", self.render.shared_blur.len()),
+            ("shadow_cache", self.render.shadow_cache.len()),
+            ("border_cache", self.render.border_cache.len()),
+            ("cached_bg", self.render.cached_bg.len()),
+            ("capture_state", self.render.capture_state.len()),
+            ("cached_tile_chunks", self.render.cached_tile_chunks.len()),
+            (
+                "cached_shader_chunks",
+                self.render.cached_shader_chunks.len(),
+            ),
+            ("cached_error_bar", self.render.cached_error_bar.len()),
+            (
+                "blur_camera_generation",
+                self.render.blur_camera_generation.len(),
+            ),
+            (
+                "background_last_animate",
+                self.render.background_last_animate.len(),
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
     /// Debug-only end-of-tick check: the stage's own structural invariants
     /// hold; the two halves of the fullscreen split (stage membership and
     /// per-output viewport-return) cover the same outputs; and every SSD
