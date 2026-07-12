@@ -232,9 +232,11 @@ impl<W: StageElement> Stage<W> {
     }
 
     /// Advance the MRU cycle one step (first step jumps to the previous
-    /// window), skipping fullscreen windows. Returns the window to navigate
-    /// to, or `None` when the history is empty or all-fullscreen.
-    pub fn cycle_step(&mut self, backward: bool) -> Option<W> {
+    /// window), skipping fullscreen windows. `focused` is the window holding
+    /// keyboard focus, which decides where a fresh cycle starts. Returns the
+    /// window to navigate to, or `None` when the history is empty or
+    /// all-fullscreen.
+    pub fn cycle_step(&mut self, backward: bool, focused: Option<&W>) -> Option<W> {
         if self.focus_history.is_empty() {
             return None;
         }
@@ -248,6 +250,11 @@ impl<W: StageElement> Stage<W> {
         };
         let mut idx = match self.cycle_state {
             Some(cur) => step(cur),
+            // The head is normally the focused window, so a fresh cycle steps
+            // past it. But focus can sit on a window the history never records
+            // (pinned, widget), and then the head is already the window the
+            // user wants back.
+            None if focused.is_some_and(|f| self.focus_history.first() != Some(f)) => 0,
             None => 1 % len,
         };
         // Bounded by `len` so an all-fullscreen history can't loop.

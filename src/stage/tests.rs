@@ -1,7 +1,7 @@
 use smithay::utils::{Point, Size};
 
 use super::mock::TestWindow;
-use super::{ElementId, Stage, StageElement, subtree_raise_order};
+use super::{ElementId, PinnedSite, Stage, StageElement, subtree_raise_order};
 
 fn stage_with(n: u64) -> (Stage<TestWindow>, Vec<TestWindow>) {
     let mut stage = Stage::new();
@@ -14,6 +14,13 @@ fn stage_with(n: u64) -> (Stage<TestWindow>, Vec<TestWindow>) {
 
 fn z_labels(stage: &Stage<TestWindow>) -> Vec<u64> {
     stage.windows().map(|w| w.label()).collect()
+}
+
+/// Step the cycle with focus where the history says it is (the head) — the
+/// ordinary case, as opposed to focus parked on a window the history skips.
+fn cycle_step(stage: &mut Stage<TestWindow>, backward: bool) -> Option<TestWindow> {
+    let focused = stage.focus_history().first().cloned();
+    stage.cycle_step(backward, focused.as_ref())
 }
 
 #[test]
@@ -86,8 +93,8 @@ fn remove_purges_everywhere_and_clamps_cycle() {
         stage.push_focus(w);
     }
     // History (MRU): [2, 1, 0]. Point the cycle at the last entry.
-    stage.cycle_step(false);
-    stage.cycle_step(false);
+    cycle_step(&mut stage, false);
+    cycle_step(&mut stage, false);
     assert_eq!(stage.cycle_state(), Some(2));
 
     stage.set_fullscreen(
@@ -110,7 +117,7 @@ fn remove_purges_everywhere_and_clamps_cycle() {
 fn remove_last_history_entry_cancels_cycle() {
     let (mut stage, windows) = stage_with(1);
     stage.push_focus(&windows[0]);
-    stage.cycle_step(false);
+    cycle_step(&mut stage, false);
     assert_eq!(stage.cycle_state(), Some(0));
 
     stage.remove(&windows[0]);
@@ -136,16 +143,47 @@ fn cycle_first_step_goes_to_previous_window() {
         stage.push_focus(w);
     }
     // History: [2, 1, 0]; first Tab jumps to index 1.
-    let target = stage.cycle_step(false).unwrap();
+    let target = cycle_step(&mut stage, false).unwrap();
     assert_eq!(target.label(), 1);
     assert_eq!(stage.cycle_state(), Some(1));
 
-    let target = stage.cycle_step(false).unwrap();
+    let target = cycle_step(&mut stage, false).unwrap();
     assert_eq!(target.label(), 0);
 
     // Wraps around.
-    let target = stage.cycle_step(false).unwrap();
+    let target = cycle_step(&mut stage, false).unwrap();
     assert_eq!(target.label(), 2);
+}
+
+#[test]
+fn cycle_from_a_window_outside_the_history_starts_at_its_head() {
+    let (mut stage, windows) = stage_with(3);
+    stage.push_focus(&windows[0]);
+    stage.push_focus(&windows[1]);
+    // History: [1, 0]. Focus sits on a pinned window, which never enters it, so
+    // the head is the window to go back to — not one to step over.
+    stage.set_pin(
+        &windows[2],
+        PinnedSite {
+            output: "DP-1".to_string(),
+            screen_pos: Point::from((0, 0)),
+        },
+    );
+    let target = stage.cycle_step(false, Some(&windows[2])).unwrap();
+    assert_eq!(target.label(), 1);
+    assert_eq!(stage.cycle_state(), Some(0));
+}
+
+#[test]
+fn cycle_from_a_window_at_the_history_head_steps_past_it() {
+    let (mut stage, windows) = stage_with(3);
+    for w in &windows {
+        stage.push_focus(w);
+    }
+    // History: [2, 1, 0] with focus on the head — a modal dialog over window 2
+    // resolves to window 2 (`cycle_anchor`), so Tab must still step past it.
+    let target = stage.cycle_step(false, Some(&windows[2])).unwrap();
+    assert_eq!(target.label(), 1);
 }
 
 #[test]
@@ -156,9 +194,9 @@ fn cycle_backward_wraps_to_oldest() {
     }
     // History: [2, 1, 0]; the first step with no cycle state is always
     // index 1, regardless of direction.
-    let target = stage.cycle_step(true).unwrap();
+    let target = cycle_step(&mut stage, true).unwrap();
     assert_eq!(target.label(), 1);
-    let target = stage.cycle_step(true).unwrap();
+    let target = cycle_step(&mut stage, true).unwrap();
     assert_eq!(target.label(), 2);
 }
 
@@ -175,7 +213,7 @@ fn cycle_skips_fullscreen_windows() {
         Point::from((0, 0)),
         Size::from((100, 100)),
     );
-    let target = stage.cycle_step(false).unwrap();
+    let target = cycle_step(&mut stage, false).unwrap();
     assert_eq!(target.label(), 0);
 }
 
@@ -197,7 +235,7 @@ fn cycle_all_fullscreen_yields_none() {
         Point::from((0, 0)),
         Size::from((100, 100)),
     );
-    assert!(stage.cycle_step(false).is_none());
+    assert!(cycle_step(&mut stage, false).is_none());
     assert_eq!(stage.cycle_state(), None);
 }
 
@@ -207,8 +245,8 @@ fn end_cycle_commits_selection_to_front() {
     for w in &windows {
         stage.push_focus(w);
     }
-    stage.cycle_step(false);
-    stage.cycle_step(false); // now pointing at label 0 (index 2)
+    cycle_step(&mut stage, false);
+    cycle_step(&mut stage, false); // now pointing at label 0 (index 2)
     stage.end_cycle();
     assert_eq!(stage.cycle_state(), None);
     let labels: Vec<u64> = stage.focus_history().iter().map(|w| w.label()).collect();
@@ -232,7 +270,7 @@ fn drop_from_focus_history_clamps_cycle_index() {
     for w in &windows {
         stage.push_focus(w);
     }
-    stage.cycle_step(false);
+    cycle_step(&mut stage, false);
     // Pin-style removal: an in-bounds index survives...
     stage.drop_from_focus_history(&windows[2]);
     assert_eq!(stage.cycle_state(), Some(1));
@@ -354,8 +392,8 @@ fn remove_from_history_matching_clamps_cycle() {
     for w in &windows {
         stage.push_focus(w);
     }
-    stage.cycle_step(false);
-    stage.cycle_step(false);
+    cycle_step(&mut stage, false);
+    cycle_step(&mut stage, false);
     assert_eq!(stage.cycle_state(), Some(2));
 
     let target = windows[0].clone();
@@ -546,6 +584,9 @@ mod harness {
         stage: Stage<TestWindow>,
         /// Every window ever created, including closed/crashed ones.
         windows: Vec<TestWindow>,
+        /// The keyboard-focused window; tracked separately since not every
+        /// focus target enters the history.
+        focused: Option<TestWindow>,
         /// Expected pre-fit size per window label, for the restore assertion.
         fit_expect: HashMap<u64, Size<i32, Logical>>,
         /// Pin site saved when a pinned window fullscreens, restored on exit —
@@ -589,6 +630,19 @@ mod harness {
             && b.y_low < a.y_high - EPS
     }
 
+    /// Mirrors the modal walk in `DriftWm::cycle_anchor`.
+    fn cycle_anchor(focused: &TestWindow) -> TestWindow {
+        let mut window = focused.clone();
+        for _ in 0..10 {
+            if !window.is_modal() {
+                break;
+            }
+            let Some(parent) = window.parent() else { break };
+            window = parent;
+        }
+        window
+    }
+
     /// True when following parent links from `w` loops back onto itself.
     /// `subtree_raise_order` tolerates such cycles by construction, but
     /// "child above parent" is unsatisfiable inside one, so the stacking
@@ -628,6 +682,7 @@ mod harness {
             Sim {
                 stage: Stage::new(),
                 windows: Vec::new(),
+                focused: None,
                 fit_expect: HashMap::new(),
                 pin_return: HashMap::new(),
                 next_label: 0,
@@ -741,6 +796,15 @@ mod harness {
                 && !self.stage.is_pinned(&focused)
             {
                 self.stage.push_focus(&focused);
+            }
+            self.focused = Some(cycle_anchor(&focused));
+        }
+
+        /// A dead window loses focus; production then refocuses the history
+        /// head, which is where a fresh cycle starts from anyway.
+        fn clear_focus_if(&mut self, dead: &TestWindow) {
+            if self.focused.as_ref() == Some(dead) {
+                self.focused = None;
             }
         }
 
@@ -913,6 +977,7 @@ mod harness {
                     w.kill();
                     self.stage.remove(&w);
                     self.fit_expect.remove(&w.label());
+                    self.clear_focus_if(&w);
                 }
                 Op::CrashWindow { idx } => {
                     // Crash path: the destroy handlers purge the history and
@@ -927,6 +992,7 @@ mod harness {
                         self.pin_return.remove(&out);
                     }
                     self.stage.retain_alive();
+                    self.clear_focus_if(&w);
                 }
                 Op::SetParent { child, parent } => {
                     let (Some(c), Some(p)) = (self.pick(*child), self.pick(*parent)) else {
@@ -1010,7 +1076,8 @@ mod harness {
                     self.stage.map(w, Point::from(pos));
                 }
                 Op::Cycle { backward } => {
-                    if let Some(target) = self.stage.cycle_step(*backward) {
+                    let focused = self.focused.clone();
+                    if let Some(target) = self.stage.cycle_step(*backward, focused.as_ref()) {
                         // navigate_to_window → raise_and_focus; the history
                         // push is skipped while cycling (focus_changed guard).
                         self.raise_and_focus(&target);

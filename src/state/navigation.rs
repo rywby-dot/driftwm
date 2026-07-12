@@ -146,6 +146,33 @@ impl DriftWm {
         })
     }
 
+    /// The window a fresh Alt-Tab cycle should treat as current — what
+    /// `update_focus_history` would have recorded: keyboard focus (popup
+    /// grabs included), with a focused modal standing in for its parent,
+    /// since neither ever enters the focus history. `None` if focus isn't on
+    /// a window. Capped against circular parents, like `topmost_modal_child`.
+    pub fn cycle_anchor(&self) -> Option<Window> {
+        let focus = self.seat.get_keyboard()?.current_focus()?;
+        let mut window = self
+            .stage
+            .windows()
+            .find(|w| focus_belongs_to_window(&focus.0, w))
+            .cloned()?;
+        for _ in 0..10 {
+            if !window.is_modal() {
+                break;
+            }
+            let Some(parent) = window
+                .parent_surface()
+                .and_then(|s| self.window_for_surface(&s))
+            else {
+                break;
+            };
+            window = parent;
+        }
+        Some(window)
+    }
+
     /// Dynamic minimum zoom based on the current window layout.
     /// Allows zooming out far enough to see all windows.
     pub fn min_zoom(&self) -> f64 {

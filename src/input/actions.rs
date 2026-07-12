@@ -223,7 +223,8 @@ impl DriftWm {
                 // allowlisted), so any fullscreen entry the stage skips is on
                 // another output — shown only on its own monitor, never a
                 // target here.
-                let Some(window) = self.stage.cycle_step(*backward) else {
+                let anchor = self.cycle_anchor();
+                let Some(window) = self.stage.cycle_step(*backward, anchor.as_ref()) else {
                     return;
                 };
                 self.navigate_to_window(&window, false);
