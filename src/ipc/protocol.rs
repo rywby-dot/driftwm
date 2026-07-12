@@ -440,6 +440,18 @@ mod tests {
         }
     }
 
+    /// docs/ipc.md promises the pushed `State` event payload is identical to
+    /// the `state` reply's. The inner `StateInfo` is shared by construction,
+    /// but the `State` wire key comes from two independently-named enum
+    /// variants — pin them together.
+    #[test]
+    fn event_payload_matches_state_reply() {
+        let response = serde_json::to_value(Response::State(sample_state())).unwrap();
+        let event = serde_json::to_value(Event::State(sample_state())).unwrap();
+        assert_eq!(response.get("State"), event.get("State"));
+        assert!(response.get("State").is_some());
+    }
+
     /// A reply from a compositor without the `layout`/`layout_short`/`outputs`
     /// fields still parses — that's what their `#[serde(default)]`s are for
     /// (a newer `driftwm msg` against an older compositor).
