@@ -7,7 +7,7 @@ driftwm — a trackpad-first infinite canvas Wayland compositor written in Rust.
 Actively developed and released — a public, multi-contributor project, so match existing conventions carefully. Guidelines live next to the code, read them before working:
 
 - `CONTRIBUTING.md` — PR/issue conventions.
-- `dev/docs/CAVEATS.md` — architectural rules and pitfalls (the big one: never touch `Space` window APIs — go through the stage; a clippy lint enforces it).
+- `dev/docs/caveats.md` — architectural rules and pitfalls (the big one: never touch `Space` window APIs — go through the stage; a clippy lint enforces it).
 - `dev/docs/testing.md` — the test-suite map and testing rules (config-reference workflow, proptest conventions).
 - `dev/docs/` also holds profiling setup, the `config.reference.toml` grammar, accumulated smithay API notes, and container build recipes.
 

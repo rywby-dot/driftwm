@@ -2,7 +2,7 @@
 
 The B1–B14 perf push shipped (see `git log`). What's left, in priority order.
 Line numbers predate the push — re-verify on pickup. Profiling tooling:
-[PROFILING.md](PROFILING.md).
+[profiling.md](profiling.md).
 
 ## Blur (B5 + S1 + edge-fade + fullscreen cull)
 

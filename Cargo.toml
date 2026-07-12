@@ -60,7 +60,7 @@ opt-level = 3
 
 [lints.clippy]
 # A guard locked in a scrutinee outlives the body — re-locking inside deadlocks
-# the event loop (see dev/docs/CAVEATS.md).
+# the event loop (see dev/docs/caveats.md).
 significant_drop_in_scrutinee = "warn"
 
 [features]

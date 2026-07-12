@@ -6,14 +6,7 @@ Thanks for your interest! driftwm is experimental and primarily an AI-assisted l
 
 **Open an issue first for non-trivial changes.** Anything beyond a quick fix — features, refactors, multi-file changes — should start as an issue so we can align on the approach before you invest time. Small fixes can go straight to PR.
 
-## Development docs
-
-Internal docs live in `dev/docs/`; the two to read before touching code:
-
-- [`dev/docs/CAVEATS.md`](dev/docs/CAVEATS.md) — architectural rules and pitfalls (the big one: never touch `Space` window APIs, go through the stage — a clippy lint enforces it).
-- [`dev/docs/testing.md`](dev/docs/testing.md) — the test-suite map and testing rules (config-reference workflow, proptest conventions).
-
-Also there: [`PROFILING.md`](dev/docs/PROFILING.md) (Tracy setup), [`reference-config-format.md`](dev/docs/reference-config-format.md) (the `config.reference.toml` grammar), [`smithay-api.md`](dev/docs/smithay-api.md) (accumulated smithay API notes), and [`cross-distro-builds.md`](dev/docs/cross-distro-builds.md) (podman recipes).
+**Read the internal docs in [`dev/docs/`](dev/docs/) before touching code** — architectural rules ([`caveats.md`](dev/docs/caveats.md)) and testing conventions ([`testing.md`](dev/docs/testing.md)) especially.
 
 ## Pull requests
 

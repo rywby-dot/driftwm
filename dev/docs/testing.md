@@ -8,7 +8,7 @@ under plain `cargo test` — no display, GPU, or root — and CI runs exactly th
 - **Unit tests** — `#[cfg(test)]` modules across `src/` (canvas math, config
   parsing, membership, persistence change detection, …). Pure logic; smithay
   glue (handlers, delegates) is deliberately untested — see
-  [CAVEATS.md](CAVEATS.md).
+  [caveats.md](caveats.md).
 - **Integration tests** — `tests/*.rs`, linking the lib crate: config
   parse/docs-sync gates, canvas transforms, snap, window-rule matching.
 - **Stage proptest harness** — `src/stage/tests.rs` (`mod harness`): random
@@ -46,7 +46,7 @@ and the generated doc must be current.
 rejects every `Space` element read and write via `disallowed-methods`; the
 stage is the sole window store and `Space` is output-registry only. Applies to
 tests too: drive `DriftWm` methods or the fixture. Details in
-[CAVEATS.md](CAVEATS.md).
+[caveats.md](caveats.md).
 
 **Proptests run 256 cases in CI; go deeper before merging.** Plain
 `cargo test` uses proptest's default 256 cases per property. Work that touches
