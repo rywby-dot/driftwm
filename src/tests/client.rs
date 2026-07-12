@@ -23,11 +23,18 @@ use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 use wayland_protocols::wp::single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_token_v1::{
+    self, XdgActivationTokenV1,
+};
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
+use wayland_protocols::xdg::shell::client::xdg_popup::{self, XdgPopup};
+use wayland_protocols::xdg::shell::client::xdg_positioner::XdgPositioner;
 use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
@@ -59,9 +66,15 @@ pub struct State {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
+    pub seat: Option<WlSeat>,
+    pub xdg_activation: Option<XdgActivationV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
+    pub popups: Vec<Popup>,
+
+    /// The token string from the most recent `xdg_activation_token_v1.done`.
+    pub activation_token: Option<String>,
 }
 
 pub struct Window {
@@ -92,6 +105,22 @@ pub struct LayerSurface {
     pub configures_looked_at: usize,
 }
 
+pub struct Popup {
+    pub qh: QueueHandle<State>,
+    pub spbm: WpSinglePixelBufferManagerV1,
+    pub seat: WlSeat,
+
+    pub surface: WlSurface,
+    pub xdg_surface: XdgSurface,
+    pub xdg_popup: XdgPopup,
+    pub pending_configure: PopupConfigure,
+    pub configures_received: Vec<(u32, PopupConfigure)>,
+    /// Set once the compositor dismisses the popup (`xdg_popup.popup_done`).
+    pub popup_done: bool,
+
+    pub configures_looked_at: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Configure {
     pub size: (i32, i32),
@@ -102,6 +131,12 @@ pub struct Configure {
 #[derive(Debug, Clone, Copy)]
 pub struct LayerConfigure {
     pub size: (u32, u32),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PopupConfigure {
+    pub pos: (i32, i32),
+    pub size: (i32, i32),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -159,6 +194,17 @@ impl fmt::Display for LayerConfigure {
     }
 }
 
+impl fmt::Display for PopupConfigure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "pos: {} , {}, size: {} × {}",
+            self.pos.0, self.pos.1, self.size.0, self.size.1
+        )?;
+        Ok(())
+    }
+}
+
 impl Client {
     pub fn new(stream: UnixStream) -> Self {
         let id = ClientId::next();
@@ -185,8 +231,12 @@ impl Client {
             layer_shell: None,
             spbm: None,
             viewporter: None,
+            seat: None,
+            xdg_activation: None,
             windows: Vec::new(),
             layers: Vec::new(),
+            popups: Vec::new(),
+            activation_token: None,
         };
 
         Self {
@@ -235,6 +285,28 @@ impl Client {
 
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {
         self.state.layer(surface)
+    }
+
+    /// Create an xdg popup whose parent is the toplevel backing `parent`.
+    pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
+        self.state.create_popup(parent)
+    }
+
+    pub fn popup(&mut self, surface: &WlSurface) -> &mut Popup {
+        self.state.popup(surface)
+    }
+
+    /// Build an activation token and commit it. `with_serial` decides whether
+    /// the token carries a seat serial (an input-driven request) or not (a
+    /// spontaneous attention request). The token string arrives asynchronously
+    /// via `done`; roundtrip before calling [`Client::activate`].
+    pub fn request_activation_token(&mut self, requester: &WlSurface, with_serial: bool) {
+        self.state.request_activation_token(requester, with_serial);
+    }
+
+    /// Activate `target` with the most recently received token string.
+    pub fn activate(&mut self, target: &WlSurface) {
+        self.state.activate(target);
     }
 
     pub fn output(&mut self, name: &str) -> WlOutput {
@@ -322,6 +394,75 @@ impl State {
             .iter_mut()
             .find(|w| w.surface == *surface)
             .unwrap()
+    }
+
+    pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
+        let compositor = self.compositor.as_ref().unwrap();
+        let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
+        let seat = self.seat.clone().unwrap();
+
+        let parent_xdg = self
+            .windows
+            .iter()
+            .find(|w| w.surface == *parent)
+            .unwrap()
+            .xdg_surface
+            .clone();
+
+        // The positioner is only consumed by get_popup, so destroy it right
+        // after. Anchor rect must be non-empty; size drives the popup geometry.
+        let positioner = xdg_wm_base.create_positioner(&self.qh, ());
+        positioner.set_size(200, 100);
+        positioner.set_anchor_rect(0, 0, 1, 1);
+
+        let surface = compositor.create_surface(&self.qh, ());
+        let xdg_surface = xdg_wm_base.get_xdg_surface(&surface, &self.qh, ());
+        let xdg_popup = xdg_surface.get_popup(Some(&parent_xdg), &positioner, &self.qh, ());
+        positioner.destroy();
+
+        let popup = Popup {
+            qh: self.qh.clone(),
+            spbm: self.spbm.clone().unwrap(),
+            seat,
+
+            surface,
+            xdg_surface,
+            xdg_popup,
+            pending_configure: PopupConfigure::default(),
+            configures_received: Vec::new(),
+            popup_done: false,
+
+            configures_looked_at: 0,
+        };
+
+        self.popups.push(popup);
+        self.popups.last_mut().unwrap()
+    }
+
+    pub fn popup(&mut self, surface: &WlSurface) -> &mut Popup {
+        self.popups
+            .iter_mut()
+            .find(|p| p.surface == *surface)
+            .unwrap()
+    }
+
+    pub fn request_activation_token(&mut self, requester: &WlSurface, with_serial: bool) {
+        let activation = self.xdg_activation.as_ref().unwrap();
+        let token = activation.get_activation_token(&self.qh, ());
+        if with_serial {
+            let seat = self.seat.as_ref().unwrap();
+            token.set_serial(1, seat);
+        }
+        token.set_surface(requester);
+        token.commit();
+
+        self.activation_token = None;
+    }
+
+    pub fn activate(&mut self, target: &WlSurface) {
+        let activation = self.xdg_activation.as_ref().unwrap();
+        let token = self.activation_token.clone().unwrap();
+        activation.activate(token, target);
     }
 }
 
@@ -492,6 +633,59 @@ impl LayerSurface {
     }
 }
 
+impl Popup {
+    pub fn commit(&self) {
+        self.surface.commit();
+    }
+
+    /// Tear down the popup role and surface in protocol order (popup →
+    /// xdg_surface → wl_surface).
+    pub fn destroy(&self) {
+        self.xdg_popup.destroy();
+        self.xdg_surface.destroy();
+        self.surface.destroy();
+    }
+
+    /// Request a popup grab with `serial`. Must be sent before the popup is
+    /// mapped (before it attaches a buffer), or the compositor raises
+    /// `invalid_grab`. Tests pass stale/bogus serials here on purpose.
+    pub fn grab(&self, serial: u32) {
+        self.xdg_popup.grab(&self.seat, serial);
+    }
+
+    pub fn ack_last(&self) {
+        let serial = self.configures_received.last().unwrap().0;
+        self.xdg_surface.ack_configure(serial);
+    }
+
+    pub fn ack_last_and_commit(&self) {
+        self.ack_last();
+        self.commit();
+    }
+
+    pub fn attach_new_buffer(&self) {
+        let buffer = self.spbm.create_u32_rgba_buffer(0, 0, 0, 0, &self.qh, ());
+        self.surface.attach(Some(&buffer), 0, 0);
+    }
+
+    pub fn recent_configures(&mut self) -> impl Iterator<Item = &PopupConfigure> {
+        let start = self.configures_looked_at;
+        self.configures_looked_at = self.configures_received.len();
+        self.configures_received[start..].iter().map(|(_, c)| c)
+    }
+
+    pub fn format_recent_configures(&mut self) -> String {
+        let mut buf = String::new();
+        for configure in self.recent_configures() {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            write!(buf, "{configure}").unwrap();
+        }
+        buf
+    }
+}
+
 impl Dispatch<WlCallback, Arc<SyncData>> for State {
     fn event(
         _state: &mut Self,
@@ -538,6 +732,12 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WpViewporter::interface().name {
                     let version = min(version, WpViewporter::interface().version);
                     state.viewporter = Some(registry.bind(name, version, qh, ()));
+                } else if interface == WlSeat::interface().name {
+                    let version = min(version, WlSeat::interface().version);
+                    state.seat = Some(registry.bind(name, version, qh, ()));
+                } else if interface == XdgActivationV1::interface().name {
+                    let version = min(version, XdgActivationV1::interface().version);
+                    state.xdg_activation = Some(registry.bind(name, version, qh, ()));
                 } else if interface == WlOutput::interface().name {
                     let version = min(version, WlOutput::interface().version);
                     let output = registry.bind(name, version, qh, ());
@@ -654,13 +854,26 @@ impl Dispatch<XdgSurface, ()> for State {
     ) {
         match event {
             xdg_surface::Event::Configure { serial } => {
-                let window = state
+                if let Some(window) = state
                     .windows
                     .iter_mut()
                     .find(|w| w.xdg_surface == *xdg_surface)
-                    .unwrap();
-                let configure = window.pending_configure.clone();
-                window.configures_received.push((serial, configure));
+                {
+                    let configure = window.pending_configure.clone();
+                    window.configures_received.push((serial, configure));
+                } else if let Some(popup) = state
+                    .popups
+                    .iter_mut()
+                    .find(|p| p.xdg_surface == *xdg_surface)
+                {
+                    let configure = popup.pending_configure;
+                    popup.configures_received.push((serial, configure));
+                } else {
+                    // Entries are never removed, so an unmatched xdg_surface is
+                    // a harness bug; a swallowed configure would surface later
+                    // as an opaque hang.
+                    unreachable!();
+                }
             }
             _ => unreachable!(),
         }
@@ -793,5 +1006,101 @@ impl Dispatch<WpViewport, ()> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         unreachable!()
+    }
+}
+
+impl Dispatch<WlSeat, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSeat,
+        event: <WlSeat as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_seat::Event::Capabilities { .. } => (),
+            wl_seat::Event::Name { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<XdgPositioner, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgPositioner,
+        _event: <XdgPositioner as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<XdgPopup, ()> for State {
+    fn event(
+        state: &mut Self,
+        xdg_popup: &XdgPopup,
+        event: <XdgPopup as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let popup = state
+            .popups
+            .iter_mut()
+            .find(|p| p.xdg_popup == *xdg_popup)
+            .unwrap();
+
+        match event {
+            xdg_popup::Event::Configure {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                popup.pending_configure.pos = (x, y);
+                popup.pending_configure.size = (width, height);
+            }
+            xdg_popup::Event::PopupDone => popup.popup_done = true,
+            xdg_popup::Event::Repositioned { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<XdgActivationV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgActivationV1,
+        _event: <XdgActivationV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<XdgActivationTokenV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &XdgActivationTokenV1,
+        event: <XdgActivationTokenV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            xdg_activation_token_v1::Event::Done { token } => {
+                state.activation_token = Some(token);
+                // The token object is single-use; the protocol expects destroy
+                // after done.
+                proxy.destroy();
+            }
+            _ => unreachable!(),
+        }
     }
 }
