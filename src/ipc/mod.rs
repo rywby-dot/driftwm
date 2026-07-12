@@ -372,11 +372,7 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     // Widgets are only reachable by id (the app_id search skips them) and can't
     // take focus.
     if window.is_widget() {
-        let id = state
-            .stage
-            .id_of(&window)
-            .expect("window from the stage has an id")
-            .0;
+        let id = focused_window_info(state, &window).id;
         return Err(format!("window #{id} is a widget and cannot be focused"));
     }
     let info = focused_window_info(state, &window);
@@ -734,7 +730,7 @@ pub(crate) fn broadcast_state_event(state: &mut DriftWm) {
 
 /// Retry buffered event writes for subscribers whose socket was full, so a
 /// stalled-then-recovered subscriber converges even when no new change fires a
-/// broadcast. Called from the same throttled tick as the state file.
+/// broadcast. Called per rendered frame while any subscriber exists.
 pub(crate) fn flush_subscriber_outboxes(state: &mut DriftWm) {
     if state
         .ipc_subscribers
