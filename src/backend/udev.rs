@@ -42,8 +42,8 @@ use crate::backend::Backend;
 use crate::backend::cvt;
 use crate::backend::gamma::{GammaProps, set_gamma_for_crtc_legacy};
 use crate::render::OutputRenderElements;
-use crate::state::{DriftWm, init_output_state};
-use driftwm::config::{OutputMode as ConfigOutputMode, OutputPosition};
+use crate::state::DriftWm;
+use driftwm::config::OutputMode as ConfigOutputMode;
 use smithay::wayland::seat::WaylandFocus;
 
 const SUPPORTED_COLOR_FORMATS: &[Fourcc] = &[
@@ -595,16 +595,10 @@ pub fn init_udev(
                     crtc,
                 );
                 let dh = data.display_handle.clone();
-                if let Some(surface_data) = create_surface(
-                    &mut drm,
-                    &gbm,
-                    &render_formats,
-                    &connector,
-                    crtc,
-                    &dh,
-                    data,
-                    &saved_output_state,
-                ) {
+                if let Some(surface_data) =
+                    create_surface(&mut drm, &gbm, &render_formats, &connector, crtc, &dh, data)
+                {
+                    data.output_connected(&surface_data.output, &saved_output_state);
                     device_surfaces.insert(crtc, surface_data);
                 }
             }
@@ -797,37 +791,10 @@ pub fn init_udev(
                                         connector_type_name(&connector),
                                         connector.interface_id()
                                     );
-                                    // Replace any virtual placeholder outputs. The unmap-to-
-                                    // create_surface sequence is synchronous within this
-                                    // connector handler, so active_output() is never None.
-                                    if !data.disconnected_outputs.is_empty() {
-                                        let virtual_outputs: Vec<_> = data
-                                            .space
-                                            .outputs()
-                                            .filter(|o| {
-                                                data.disconnected_outputs.contains(&o.name())
-                                            })
-                                            .cloned()
-                                            .collect();
-                                        for old in &virtual_outputs {
-                                            // A window can have entered fullscreen while headless
-                                            // (the placeholder is a normal space output); exit it
-                                            // like teardown_output does, or the stage entry
-                                            // outlives its output.
-                                            data.exit_fullscreen_on(old);
-                                            // Windows never enter placeholder outputs (membership
-                                            // refresh excludes them), but a layer-shell surface
-                                            // created while headless still gets entered on the
-                                            // placeholder by the layer map; drain those enters so
-                                            // clients see the old output's leave before the new
-                                            // output's enter.
-                                            old.leave_all();
-                                            data.space.unmap_output(old);
-                                            data.render.remove_output(&old.name());
-                                        }
-                                        data.disconnected_outputs.clear();
-                                        data.focused_output = None;
-                                    }
+                                    // Placeholders are retired inside output_connected,
+                                    // after create_surface — the sequence is synchronous
+                                    // within this handler, so active_output() never
+                                    // observes a gap.
                                     let saved = crate::state::read_all_per_output_state();
                                     let dh = data.display_handle.clone();
                                     if let Some(sd) = create_surface(
@@ -838,20 +805,12 @@ pub fn init_udev(
                                         crtc,
                                         &dh,
                                         data,
-                                        &saved,
                                     ) {
                                         surfaces.insert(crtc, sd);
-                                        data.active_outputs.insert(surfaces[&crtc].output.clone());
-                                        // Pin any windows orphaned by the virtual-output swap to
-                                        // the freshly connected monitor.
                                         let new_output = surfaces[&crtc].output.clone();
-                                        data.reassign_orphaned_pinned(&new_output);
+                                        data.output_connected(&new_output, &saved);
+                                        data.active_outputs.insert(new_output);
                                         let surface = surfaces.get_mut(&crtc).unwrap();
-                                        // Notify existing toplevels about the new output
-                                        driftwm::protocols::foreign_toplevel::send_output_enter_all(
-                                            &mut data.foreign_toplevel_state,
-                                            &surface.output,
-                                        );
                                         render_frame(
                                             data,
                                             &mut surface.compositor,
@@ -1070,10 +1029,6 @@ fn create_surface(
     crtc: crtc::Handle,
     dh: &smithay::reexports::wayland_server::DisplayHandle,
     state: &mut DriftWm,
-    saved_output_state: &std::collections::HashMap<
-        String,
-        (smithay::utils::Point<f64, smithay::utils::Logical>, f64),
-    >,
 ) -> Option<SurfaceData> {
     let connector_name = format!(
         "{}-{}",
@@ -1155,30 +1110,10 @@ fn create_surface(
     let transform = output_cfg
         .and_then(|c| c.transform)
         .unwrap_or(Transform::Normal);
-    // Compute layout position from config
-    let layout_position: smithay::utils::Point<i32, smithay::utils::Logical> =
-        match output_cfg.map(|c| &c.position) {
-            Some(OutputPosition::Fixed(x, y)) => {
-                tracing::info!("Output {connector_name}: layout position ({x}, {y}) from config");
-                (*x, *y).into()
-            }
-            _ => {
-                // Auto: place left-to-right by connection order
-                let auto_x: i32 = state
-                    .space
-                    .outputs()
-                    .map(|o| crate::state::output_logical_size(o).w)
-                    .sum();
-                tracing::info!("Output {connector_name}: auto layout position ({auto_x}, 0)");
-                (auto_x, 0).into()
-            }
-        };
-    output.change_current_state(
-        Some(output_mode),
-        Some(transform),
-        Some(scale),
-        Some(layout_position),
-    );
+    // Mode/scale/transform are set here; the layout position and per-output
+    // viewport state are owned by DriftWm::output_connected, called after this
+    // returns.
+    output.change_current_state(Some(output_mode), Some(transform), Some(scale), None);
     output.set_preferred(output_mode);
     let global = output.create_global::<DriftWm>(dh);
 
@@ -1242,55 +1177,6 @@ fn create_surface(
         }
     };
 
-    // Each new output gets its own camera centered on its viewport
-    let logical_size = transform
-        .transform_size(output_mode.size)
-        .to_f64()
-        .to_logical(scale_val)
-        .to_i32_ceil::<i32>();
-    let camera = smithay::utils::Point::from((
-        -(logical_size.w as f64) / 2.0,
-        -(logical_size.h as f64) / 2.0,
-    ));
-
-    init_output_state(&output, camera, state.config.drift, layout_position);
-
-    // Restore per-output camera/zoom from state file if available
-    if let Some(&(saved_cam, saved_zoom)) = saved_output_state.get(&connector_name) {
-        let mut os = crate::state::output_state(&output);
-        os.camera = saved_cam;
-        os.zoom = saved_zoom;
-        tracing::info!(
-            "Output {connector_name}: restored camera ({:.0}, {:.0}) zoom {:.3}",
-            saved_cam.x,
-            saved_cam.y,
-            saved_zoom
-        );
-    }
-
-    // Set focused_output to the first output created
-    if state.focused_output.is_none() {
-        state.focused_output = Some(output.clone());
-        // Center pointer on first output
-        let size = crate::state::output_logical_size(&output);
-        let (cam, zoom) = {
-            let os = crate::state::output_state(&output);
-            (os.camera, os.zoom)
-        };
-        let center = smithay::utils::Point::from((
-            cam.x + size.w as f64 / (2.0 * zoom),
-            cam.y + size.h as f64 / (2.0 * zoom),
-        ));
-        state.warp_pointer(center);
-    }
-
-    // Use potentially-restored camera for output mapping
-    let effective_camera = crate::state::output_state(&output).camera;
-    state
-        .space
-        .map_output(&output, effective_camera.to_i32_round());
-    state.recompute_decoration_scale();
-
     let gamma_props = GammaProps::new(drm, crtc);
     if gamma_props.is_none() {
         tracing::info!(
@@ -1337,123 +1223,17 @@ fn remove_output_global(data: &mut DriftWm, global: GlobalId) {
 
 /// Drop everything bound to a disconnected output.
 ///
-/// Runs whether the output is the last surviving one or not. The "last output"
-/// path keeps the [`Output`] in the [`Space`] as a virtual placeholder (so
-/// `active_output()` stays `Some` while a USB monitor is replugged) but still
-/// needs the grab/gesture/focus cleanup — otherwise a move grab pinned to the
-/// dying output keeps mutating its stale per-output state on every cursor event.
+/// The backend-independent policy (client leaves, capture/grab/fullscreen
+/// cleanup, placeholder-vs-drop split) lives in [`DriftWm::output_disconnected`].
+/// Here we own the two udev-side pieces: the `wl_output` global teardown, run
+/// *after* the policy so every client-facing leave is sent while the global is
+/// still valid, and the `active_outputs` removal, symmetric with its insert.
 fn teardown_output(data: &mut DriftWm, surface: SurfaceData, is_last: bool) {
     let SurfaceData { output, global, .. } = surface;
 
-    // Send wl_surface.leave while clients' wl_output proxies are still valid.
-    // Once the global is disabled below, clients destroy their proxy on
-    // global_remove — a leave sent after that (normally by the next
-    // Space::refresh) arrives in libwayland with a NULL wl_output argument and
-    // segfaults clients that don't null-check it. leave_all also clears
-    // smithay's enter tracking, so the later refresh-driven leave is a no-op.
-    output.leave_all();
-
-    driftwm::protocols::foreign_toplevel::send_output_leave_all(
-        &mut data.foreign_toplevel_state,
-        &output,
-    );
-    data.image_copy_capture_state.remove_output(&output);
-    data.screencopy_state.remove_output(&output);
-    data.gamma_control_manager_state.output_removed(&output);
-
-    // Fail + drop pending captures that can no longer render — a stranded entry
-    // hangs the client and leaks its buffer fd. Toplevel captures drain on any
-    // output's render path, but when this was the *last* output no CRTC remains
-    // to run them (the virtual placeholder is never rendered), so they're dead.
-    // Screencopy's Drop sends failed() itself; ext-image-copy frames must be
-    // failed explicitly.
-    data.pending_screencopies.retain(|s| s.output() != &output);
-    {
-        use driftwm::protocols::image_copy_capture::PendingCaptureKind;
-        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
-        let mut i = 0;
-        while i < data.pending_captures.len() {
-            let dead = match &data.pending_captures[i].kind {
-                PendingCaptureKind::Output(o) => o == &output,
-                PendingCaptureKind::Toplevel(_) => is_last,
-            };
-            if dead {
-                data.pending_captures
-                    .swap_remove(i)
-                    .frame
-                    .failed(FailureReason::Unknown);
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    // Disable the wl_output global before any further state mutation so clients
-    // (wf-recorder, swayosd, etc.) see the removal first.
+    data.output_disconnected(&output, is_last);
     remove_output_global(data, global);
-
-    // Close layer surfaces hosted on this output. They'll re-anchor against
-    // remaining outputs on their next configure round-trip.
-    for layer in smithay::desktop::layer_map_for_output(&output).layers() {
-        layer.layer_surface().send_close();
-    }
-
-    // Grabs (move/resize/pan/navigate) clone the Output and keep mutating its
-    // per-output state on every motion. Cancel before the output goes away.
-    if let Some(pointer) = data.seat.get_pointer() {
-        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-        pointer.unset_grab(data, serial, 0);
-    }
-    if data.gesture_output.as_ref().is_some_and(|go| go == &output) {
-        data.gesture_output = None;
-        data.gesture_state = None;
-    }
-
-    data.exit_fullscreen_on(&output);
-    data.render.remove_output(&output.name());
-    data.lock_surfaces.remove(&output);
     data.active_outputs.remove(&output);
-    data.redraws_needed.remove(&output);
-
-    if is_last {
-        // Keep the Output mapped as a virtual placeholder so active_output()
-        // and other queries stay Some while no monitor is attached. The DRM
-        // surface and wl_output global are already gone, so it's purely an
-        // input-routing/coordinate-system anchor.
-        tracing::warn!(
-            "Last output disconnected — keeping virtual output '{}'",
-            output.name()
-        );
-        data.disconnected_outputs.insert(output.name());
-    } else {
-        data.space.unmap_output(&output);
-        // Reassign screen-pinned windows on the gone output to a survivor.
-        let pin_target = data.space.outputs().next().cloned();
-        if let Some(target) = pin_target {
-            data.reassign_orphaned_pinned(&target);
-        }
-        data.recompute_decoration_scale();
-        crate::state::output_state(&output).fullscreen_return = None;
-        data.stage.take_fullscreen(&output.name());
-        data.dpms_off_outputs.remove(&output);
-        data.pending_dpms.remove(&output);
-
-        if data.focused_output.as_ref().is_some_and(|fo| fo == &output) {
-            data.focused_output = data.space.outputs().next().cloned();
-            if let Some(ref new_out) = data.focused_output {
-                let (cam, zoom, size) = {
-                    let os = crate::state::output_state(new_out);
-                    let sz = crate::state::output_logical_size(new_out);
-                    (os.camera, os.zoom, sz)
-                };
-                let center = smithay::utils::Point::from((
-                    cam.x + size.w as f64 / (2.0 * zoom),
-                    cam.y + size.h as f64 / (2.0 * zoom),
-                ));
-                data.warp_pointer(center);
-            }
-        }
-    }
 }
 
 /// Render a single frame and queue it to the DRM compositor.

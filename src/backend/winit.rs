@@ -8,13 +8,13 @@ use smithay::{
         EventLoop,
         timer::{TimeoutAction, Timer},
     },
-    utils::{Point, Transform},
+    utils::Transform,
 };
 use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::render::build_cursor_elements;
-use crate::state::{DriftWm, init_output_state};
+use crate::state::DriftWm;
 use smithay::wayland::seat::WaylandFocus;
 
 /// Initialize the winit backend: create a window, set up the output, and
@@ -70,25 +70,11 @@ pub fn init_winit(
         data.backend = Some(backend);
     }
 
-    // Centre the viewport so canvas origin (0, 0) is in the middle of the screen
-    let logical_size = size.to_logical(1);
-    let initial_camera = Point::from((
-        -(logical_size.w as f64) / 2.0,
-        -(logical_size.h as f64) / 2.0,
-    ));
-
-    // Initialize per-output state for this output
-    init_output_state(
-        &output,
-        initial_camera,
-        data.config.drift,
-        Point::from((0, 0)),
-    );
-    data.focused_output = Some(output.clone());
-
-    // Map the output into the space at the initial camera position
-    data.space
-        .map_output(&output, initial_camera.to_i32_round());
+    // Position (auto-summed to (0, 0) as the sole output, unless a config
+    // [[outputs]] rule for "winit" overrides it), per-output viewport state,
+    // focus + pointer bootstrap, and Space mapping. Shared with the real
+    // backends.
+    data.output_connected(&output, &std::collections::HashMap::new());
 
     // Notify output management clients about the winit output
     {

@@ -9,6 +9,7 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{
     EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
 };
+use smithay::reexports::wayland_server::backend::GlobalId;
 
 use driftwm::config::Config;
 
@@ -29,6 +30,9 @@ pub struct Fixture {
     /// nested client loop before dropping the client (whose callback would
     /// otherwise fire against a missing client).
     client_tokens: HashMap<ClientId, RegistrationToken>,
+    /// `wl_output` global per output name, stashed by `add_output` so
+    /// `remove_output` can disable then remove it like the udev backend does.
+    output_globals: HashMap<String, GlobalId>,
     /// Counter snapshot taken at construction; `Drop` asserts every counter
     /// returns here once the clients are torn down.
     baseline: BTreeMap<String, usize>,
@@ -75,6 +79,7 @@ impl Fixture {
             handle,
             state,
             client_tokens: HashMap::new(),
+            output_globals: HashMap::new(),
             baseline,
             skip_baseline: false,
         }
@@ -120,7 +125,25 @@ impl Fixture {
     }
 
     pub fn add_output(&mut self, n: u8, size: (u16, u16)) -> Output {
-        headless::add_output(self.state(), n, size)
+        let (output, global) = headless::add_output(self.state(), n, size);
+        self.output_globals.insert(output.name(), global);
+        output
+    }
+
+    /// Disconnect an output the way the udev backend does: run the backend-
+    /// independent disconnect policy, then disable and remove its `wl_output`
+    /// global. udev delays the removal 10s for in-flight binds; the fixture pumps
+    /// a few rounds between disable and remove so clients observe the disable
+    /// deterministically.
+    pub fn remove_output(&mut self, output: &Output) {
+        let is_last = self.state().space.outputs().count() == 1;
+        let dh = self.state().display_handle.clone();
+        self.state().output_disconnected(output, is_last);
+        let global = self.output_globals.remove(&output.name()).unwrap();
+        dh.disable_global::<DriftWm>(global.clone());
+        self.pump(3);
+        dh.remove_global::<DriftWm>(global);
+        self.pump(3);
     }
 
     pub fn add_client(&mut self) -> ClientId {

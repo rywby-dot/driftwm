@@ -190,13 +190,13 @@ impl DriftWm {
     /// Re-apply per-output rules (mode/scale/transform/position). Mode
     /// changes go through `pending_mode_changes`; everything else applies
     /// in-place via `Output::change_current_state`. Same lookup as
-    /// `create_surface` so reload and startup compute identically.
+    /// `output_connected` so reload and startup compute identically.
     fn apply_output_rules_after_reload(&mut self) {
         use driftwm::config::{OutputMode as ConfigOutputMode, OutputPosition};
         use smithay::utils::Transform;
 
         let outputs: Vec<smithay::output::Output> = self.space.outputs().cloned().collect();
-        // Cumulative width for auto-positioning, mirroring `create_surface`.
+        // Cumulative width for auto-positioning, mirroring `output_connected`.
         // Widths read post-change_current_state so a scale change affects
         // subsequent outputs' auto positions.
         let mut auto_x: i32 = 0;

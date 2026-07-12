@@ -8,6 +8,7 @@ mod fullscreen;
 mod init;
 mod membership;
 mod navigation;
+mod output;
 pub mod persistence;
 mod placement;
 mod reload;
