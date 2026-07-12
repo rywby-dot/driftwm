@@ -134,8 +134,12 @@ margin).
 
 `subscribe` turns the connection into a live feed instead of polling. The client
 sends one request, the server acks it, then pushes an **event** line for the
-current state immediately and again on every change — throttled to ~10/sec,
-piggybacking on the [state file](#state-file)'s change detection. Changes to
+current state immediately and again on every change, piggybacking on the
+[state file](#state-file)'s change detection but **not** on its ~10 Hz throttle:
+while something is changing, an event is pushed per rendered frame, so a camera
+pan or window drag streams at the compositor's frame rate (smooth enough to
+animate a minimap from). Nothing is pushed while nothing changes — render from
+the latest received snapshot rather than in lockstep with events. Changes to
 camera/zoom, the window inventory, focus, window **titles**, keyboard layout, and
 per-output viewports all trigger a push.
 

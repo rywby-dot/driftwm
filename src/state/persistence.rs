@@ -232,10 +232,15 @@ impl DriftWm {
     /// Write viewport center + zoom to `$XDG_RUNTIME_DIR/driftwm/state` if changed.
     /// Atomic: writes to .tmp then renames.
     pub fn write_state_file_if_dirty(&mut self) {
-        // Throttle to ~10/sec (100ms between writes), checked before the
-        // allocating window_inventory() + with_states locks so the frequent
-        // sub-throttle calls during pans/drags stay cheap.
-        if self.state_file_last_write.elapsed() < std::time::Duration::from_millis(100) {
+        // Subscribers get an event per rendered frame while something changes —
+        // a client animating from snapshots (a minimap) can't work from the
+        // file's ~10 Hz. Only the file write itself stays on the 100ms
+        // throttle: the tmp-write + rename is the expensive part here. With no
+        // subscribers, keep the old cheap sub-throttle early-out before the
+        // allocating window_inventory() + with_states locks.
+        let throttle_elapsed =
+            self.state_file_last_write.elapsed() >= std::time::Duration::from_millis(100);
+        if !throttle_elapsed && self.ipc_subscribers.is_empty() {
             return;
         }
 
@@ -363,7 +368,6 @@ impl DriftWm {
             && !active_dirty
         {
             if titles_dirty {
-                self.state_file_last_write = Instant::now();
                 crate::ipc::broadcast_state_event(self);
                 // Cache the new titles or this re-fires every tick; the file
                 // itself deliberately stays stale on title-only changes.
@@ -371,8 +375,15 @@ impl DriftWm {
             }
             return;
         }
-        self.state_file_last_write = Instant::now();
         crate::ipc::broadcast_state_event(self);
+
+        // The file and the caches that gate the dirty flags wait for the
+        // throttle. Sub-throttle frames where the snapshot didn't actually
+        // change are deduped by the event-bytes hash in the broadcast.
+        if !throttle_elapsed {
+            return;
+        }
+        self.state_file_last_write = Instant::now();
 
         let z = self.zoom();
         let vp = self.get_viewport_size();
