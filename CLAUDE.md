@@ -4,12 +4,17 @@
 
 driftwm — a trackpad-first infinite canvas Wayland compositor written in Rust. Windows float on an unbounded 2D plane navigated via trackpad gestures (pan, zoom, pinch). No workspaces, no tiling. Built on [smithay](https://github.com/Smithay/smithay).
 
-Actively developed and released — a public, multi-contributor project, so match existing conventions carefully. See `dev/docs/CAVEATS.md` for architectural pitfalls and `dev/docs/testing.md` for the test-suite map and testing rules.
+Actively developed and released — a public, multi-contributor project, so match existing conventions carefully. Guidelines live next to the code, read them before working:
+
+- `CONTRIBUTING.md` — PR/issue conventions.
+- `dev/docs/CAVEATS.md` — architectural rules and pitfalls (the big one: never touch `Space` window APIs — go through the stage; a clippy lint enforces it).
+- `dev/docs/testing.md` — the test-suite map and testing rules (config-reference workflow, proptest conventions).
+- `dev/docs/` also holds profiling setup, the `config.reference.toml` grammar, accumulated smithay API notes, and container build recipes.
 
 ## Conventions
 
 - Documentation splits by audience: user-facing docs (shaders, window rules, IPC, gigapixel wallpapers) live in `docs/`; internal dev/architecture notes and profiling tooling live in `dev/docs/` and `dev/scripts/`. `README.md` stays at the repo root.
-- Config path: `~/.config/driftwm/config.toml` (respects `XDG_CONFIG_HOME`).
+- Config path: `~/.config/driftwm/config.toml` (respects `XDG_CONFIG_HOME`). `config.reference.toml` is the canonical option reference; `docs/config.md` is generated from it — never hand-edit (see `dev/docs/testing.md`).
 
 ## Code Style
 
@@ -19,6 +24,7 @@ Actively developed and released — a public, multi-contributor project, so matc
 - Brief doc comments (`///`) on public functions are fine when the signature isn't self-explanatory.
 - Inline comments for non-obvious logic (smithay quirks, coordinate space tricks) are good.
 - Formatting is automated: run `cargo fmt` (rustfmt stable defaults, no `rustfmt.toml`). CI gates on `cargo fmt --check`.
+- Rust edition **2024** — be aware of edition-specific language features and defaults.
 
 ## Build & Run
 
@@ -26,7 +32,7 @@ Actively developed and released — a public, multi-contributor project, so matc
 cargo build              # build
 cargo run                # run nested in existing Wayland session (winit backend)
 cargo run -- --backend udev   # run on real hardware (from TTY)
-cargo test               # run tests
+cargo test               # run tests (all of them — no display/GPU needed)
 cargo test test_name     # run a single test
 cargo clippy             # lint
 cargo fmt                # format (CI runs cargo fmt --check)
@@ -34,58 +40,30 @@ cargo fmt                # format (CI runs cargo fmt --check)
 
 Use `RUST_LOG=debug cargo run` for smithay/libinput event traces.
 
-Udev backend build deps (Fedora): `libseat-devel libdisplay-info-devel libinput-devel mesa-libgbm-devel`.
-
-### Cross-distro build testing (containers)
-
-Use podman to test builds on other distros (Docker Desktop is flaky on Fedora):
-
-```bash
-# Arch Linux
-podman run --rm -it --security-opt label=disable -v ~/Documents/work/scripts/driftwm:/src archlinux:latest bash
-pacman -Syu --noconfirm rust cargo pkg-config libdisplay-info libinput seatd mesa libxkbcommon
-cd /src && cargo build
-```
-
-Notes:
-- `--security-opt label=disable` is required on Fedora (SELinux blocks libc inside container otherwise).
-- Use `cargo build` (not `--release`) for faster dep checking — release optimizations are slow and unnecessary for verifying deps.
-- Don't copy the repo inside the container — `target/` is huge. Mount directly without `:ro` so cargo can write to `target/`.
+Udev backend build deps (Fedora): `libseat-devel libdisplay-info-devel libinput-devel mesa-libgbm-devel`. Cross-distro build checks: `dev/docs/cross-distro-builds.md`.
 
 ## Architecture
 
 The compositor uses a **camera/viewport** model: the screen is a viewport onto an infinite 2D plane. Each window has absolute `(x, y)` canvas coordinates. The viewport has a camera `(cx, cy)` and zoom `z`. Screen position = `(wx - cx) * z`. Multiple monitors = multiple independent viewports on the same canvas.
 
-Current source layout:
+The crate splits into a **lib** (pure, testable logic: `canvas`, `config`, `layout`, `stage`, `protocols`, `text`, `window_ext`) and a **bin** (everything holding compositor state: `state/`, `backend/`, `render/`, `handlers/`, `input/`, `grabs/`, `ipc/`, plus the in-process test fixture under `src/tests/`). Orientation points, stable ones only — explore the tree for current detail:
 
-- `main.rs` — entry point (CLI args, backend selection), `lib.rs` — crate root (module declarations)
-- `backend/` — `mod.rs` (Backend enum: Winit/Udev + renderer accessor), `winit.rs` (winit backend init + ~60fps timer render loop), `udev.rs` (udev/DRM backend init + VBlank-driven render loop, libseat session, libinput, hotplug), `cvt.rs` (VESA CVT modeline synthesis via libdisplay-info), `gamma.rs` (per-CRTC gamma LUT: atomic GAMMA_LUT blob + legacy ioctl fallback)
-- `state/` — `mod.rs` (DriftWm struct, FullscreenState, ClientState), `init.rs` (DriftWm constructor: wires every protocol state, seat, runtime fields), `animation.rs` (camera/zoom/momentum/edge-pan animation, key repeat), `navigation.rs` (navigate_to_window, focus history, MRU cycle), `fullscreen.rs` (enter/exit fullscreen, pointer remap), `fit.rs` (per-window fit-to-viewport toggle, pre-fit size restore), `focus.rs` (FocusTarget(WlSurface) newtype with KeyboardTarget/PointerTarget/TouchTarget impls), `cursor.rs` (cursor state), `render_cache.rs` (cached render state), `cluster_snapshot.rs` (cluster membership + per-member offsets captured at drag/resize grab start), `errors.rs` (on-screen error-bar state, errors keyed by source), `persistence.rs` (state file under `$XDG_RUNTIME_DIR/driftwm/state` for external tools to read camera/zoom/inventory), `reload.rs` (config hot-reload; a bad edit keeps the old config and never crashes)
-- `config/` — `mod.rs` (Config struct, load/parse, context-aware lookup methods), `types.rs` (Action, Direction, Modifiers, KeyCombo, MouseBinding/MouseTrigger/MouseAction, GestureBinding/GestureTrigger, ContinuousAction/ThresholdAction, ContextBindings, BindingContext), `parse.rs` (string→type parsers for combos/actions/gestures), `parse_helpers.rs` (raw serde structs → processed types: defaults, clamping, validation), `defaults.rs` (default key/mouse/gesture bindings per context, terminal/launcher detection), `toml.rs` (serde structs, config path)
-- `canvas.rs` — coordinate transforms (ScreenPos/CanvasPos), camera math, cone search, zoom helpers (zoom_to_fit, zoom_anchor_camera, snap_zoom, dynamic_min_zoom)
-- `decorations.rs` — per-window SSD state, CPU-rendered title bar, hit-testing helpers
-- `text.rs` — SSD title-bar text: shaping/measurement/tail-ellipsis truncation + cosmic-text rasterization onto a CPU buffer (shared FontSystem warmed off-thread)
-- `render/` — `mod.rs` (compose_frame, post_render, OutputRenderElements), `elements.rs` (tile/cursor/layer rendering helpers), `layers.rs`, `cursor.rs`, `blur.rs` (blur pipeline helpers), `capture.rs` (screencopy/capture helpers), `screenshot.rs` (off-screen canvas→PNG for `driftwm msg screenshot`; tiles + stitches captures larger than GPU max texture), `capture_background.rs` (fresh per-tile background for off-screen captures), `background.rs`, `error_bar.rs` (bottom-edge error-bar render element — internal chrome, input passes through), `lifecycle.rs`, `shaders.rs`, `shader_chunks.rs` (GPU-bakes static `u_camera`-only shaders into canvas-aligned texture chunks so panning samples cached textures), `tile_chunks.rs`/`tile_chunks_tiff.rs`/`tile_worker.rs` (gigapixel wallpaper: pyramidal-TIFF LOD source, on-demand chunk decode/upload, off-thread decoder pool)
-- `shaders/` — GLSL shader source files (dot_grid, shadow, blur_down/blur_up/blur_mask, corner_clip, border, tile_bg, chunk_bg, wallpaper_bg)
-- `region.rs` — decompose a `RegionAttributes` (additive/subtractive rects) into a non-overlapping rect list
-- `signals.rs` — graceful shutdown via SIGINT/SIGTERM/SIGHUP
-- `surface_tree.rs` — test whether a focused surface (incl. popups) belongs to a given toplevel window
-- `layout/` — window position relationships on the canvas. `snap.rs` (magnetic edge alignment during drag, defines `SnapRect`), `cluster.rs` (BFS over snap-adjacency graph for the focused window's connected component, computed on-demand), `auto_placement.rs` (smart placement of a new window adjacent to the focused window's cluster)
-- `window_ext.rs` — `WindowExt` trait for window operations (close, app_id, title, configure)
-- `xwayland.rs` — eager `xwayland-satellite` spawn at compositor startup; vanilla mode (satellite binds its own X11 socket). niri's on-demand `-listenfd` pattern races with multi-layout XKB configs under Xwayland 24.x — see `dev/docs/CAVEATS.md`.
-- `input/` — `mod.rs` (pointer motion absolute+relative, surface_under hit-testing), `keyboard.rs` (key events: VT-switch, session-lock forwarding, action lookup + execution, key-repeat), `actions.rs` (execute_action dispatch for all keybindings), `pointer.rs` (context-aware mouse dispatch, button/axis handling, compositor resize/pan grabs), `gestures.rs` + `gestures/` (`device_config.rs`, `swipe.rs`, `pinch.rs`, `hold.rs` — table-driven continuous/threshold gesture state machine, libinput device config, client forwarding)
-- `grabs/` — `mod.rs`, `move_grab.rs` (MoveSurfaceGrab), `resize_grab.rs` (ResizeSurfaceGrab, ResizeState), `pan_grab.rs` (PanGrab for viewport panning), `navigate_grab.rs` (NavigateGrab for directional window navigation)
-- `handlers/` — `compositor.rs` (commit, resize repositioning, dmabuf, layer commit), `layer_shell.rs` (wlr-layer-shell handler), `xdg_shell.rs` (CSD move/resize, window centering, fullscreen, popup grabs), `background_effect.rs` (background-effect handler), `mod.rs` (seat, data device, output, cursor_shape, foreign toplevel, session lock, xdg-decoration, output management, protocol delegates)
-- `protocols/` — `mod.rs`, `foreign_toplevel.rs` (zwlr-foreign-toplevel-management-v1), `output_management.rs` (zwlr-output-management-v1), `screencopy.rs` (wlr-screencopy), `image_copy_capture.rs` (ext-image-copy-capture-v1), `image_capture_source.rs` (ext-image-capture-source-v1), `gamma_control.rs` (zwlr-gamma-control-unstable-v1), `output_power.rs` (zwlr-output-power-management-v1)
-- `ipc/` — `mod.rs` (compositor-side IPC server on a `$XDG_RUNTIME_DIR` Unix socket; backs `driftwm msg`), `client.rs` (the `driftwm msg` client: connect, send one request, print reply — same binary, never starts a compositor), `protocol.rs` (shared line-delimited-JSON `Request`/`Reply` wire types; debuggable with `socat`)
+- `stage/` — the smithay-free source of truth for windows: list, z-order, positions, focus history, fullscreen/pin/fit membership. Everything window-related routes through it.
+- `state/` — the `DriftWm` struct and compositor policy (navigation, fullscreen, fit, persistence, config hot-reload).
+- `canvas.rs` + `layout/` — coordinate math, snapping, clustering, auto-placement.
+- `backend/` — winit (nested) and udev/DRM (bare metal); render loops live with their backends.
+- `render/` — frame composition, shaders (`shaders/` for GLSL), capture/screenshot paths.
+- `handlers/` + `protocols/` — Wayland protocol implementations and delegates.
+- `input/` + `grabs/` — keyboard/pointer/gesture/touch dispatch and compositor-side grabs.
+- `ipc/` — the `driftwm msg` Unix-socket server/client (user docs: `docs/ipc.md`).
 
 ## Key Design Decisions
 
-- **CSD-first**: compositor advertises only `close` and `fullscreen` capabilities (no maximize/minimize). SSD fallback: 25px title bar (rounded corners, radius 10), × close button, Gaussian shadow shader (radius 14), invisible resize borders (8px). Configurable `bg_color`/`fg_color` via `[decorations]`.
-- **Gesture-driven**: configurable gesture and mouse bindings with context-awareness (on-window/on-canvas/anywhere). Defaults: 2-finger pinch for viewport zoom, 3-finger swipe for pan, 4-finger for navigation. Mouse equivalents use Mod+click modifiers. Unbound gestures forward to apps.
-- **Canvas background**: scrolls with viewport (not fixed to screen). Default is a GLSL dot-grid shader; static shaders are cached and only re-render on viewport changes.
-- **Widgets**: layer-shell surfaces or xdg-toplevel windows placed at canvas positions via window rules (`app_id` glob matching, `position` field). Canvas layers bypass the layer map and render at fixed canvas coordinates.
-- **External tools**: launcher, lock screen, and on-screen screenshots are external programs (bemenu-run, swaylock, grim) — not built into the compositor. Exception: a built-in *canvas/DPI* screenshot (`driftwm msg screenshot`) captures off-screen canvas regions at arbitrary resolution, which grim structurally can't do; grim remains the default for plain on-screen captures.
+- **CSD-first**: the compositor advertises only `close` and `fullscreen` capabilities (no maximize/minimize). SSD fallback is a minimal title bar + shadow + invisible resize borders, configurable via `[decorations]`.
+- **Gesture-driven**: configurable gesture and mouse bindings with context-awareness (on-window/on-canvas/anywhere); unbound gestures forward to apps.
+- **Canvas background**: scrolls with the viewport (not fixed to screen); default is a GLSL dot-grid shader, static shaders are cached and only re-render on viewport changes.
+- **Widgets**: layer-shell surfaces or xdg-toplevel windows placed at canvas positions via window rules. Canvas layers bypass the layer map and render at fixed canvas coordinates.
+- **External tools**: launcher, lock screen, and on-screen screenshots are external programs (bemenu-run, swaylock, grim) — not built into the compositor. Exception: the built-in *canvas/DPI* screenshot (`driftwm msg screenshot`) captures off-screen canvas regions at arbitrary resolution, which grim structurally can't do.
 
 ## Reference Codebases
 
@@ -95,7 +73,3 @@ Current source layout:
 ## Smithay API Reference
 
 When you discover smithay API signatures by reading source in `~/.cargo/registry/src/`, document them in `dev/docs/smithay-api.md` so you don't need to re-read the source next time. Include trait signatures, key type definitions, and how pieces fit together.
-
-## Rust Edition
-
-Uses Rust edition **2024** — be aware of edition-specific language features and defaults.
