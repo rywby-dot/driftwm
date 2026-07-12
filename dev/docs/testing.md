@@ -57,17 +57,19 @@ the stage, layout, or config parsing deserves a deeper local pass:
 counterexample it writes a seed under `proptest-regressions/` — commit it;
 seeds replay first on every subsequent run, pinning the bug forever.
 
-**Slow tests are opt-in.** The soak/leak scenario (`src/tests/soak.rs`) churns
-hundreds of windows through map, state transitions, and both teardown paths,
-asserting the counters, file descriptors, and RSS all plateau; it is gated
-behind `RUN_SLOW_TESTS=1` so the default `cargo test` lane stays fast. Run it
-alone with `RUN_SLOW_TESTS=1 cargo test --bin driftwm soak` — the fd/RSS
-assertions are process-wide, so a concurrent full suite adds noise the slack has
-to absorb. The real-client scenario (`src/tests/real_clients.rs`) rides the same
-`RUN_SLOW_TESTS=1` lane but additionally needs `foot` or `weston-terminal`
-installed: it spawns a real client binary against a private wayland + IPC socket and
-drives it over the wire, self-skipping when neither is on `PATH`. Gate any
-future slow test (wlcs, deeper soaks) the same way.
+**Non-hermetic tests are `#[ignore]`d, not env-gated.** The default
+`cargo test` lane stays hermetic and deterministic; anything that steps
+outside it carries `#[ignore = "reason"]` and runs via
+`cargo test -- --include-ignored` (or `-- --ignored` for just those). CI runs
+the full include-ignored lane. Two exist today: the soak/leak scenario
+(`src/tests/soak.rs`) churns hundreds of windows and asserts counters, file
+descriptors, and RSS all plateau — the fd/RSS assertions are process-wide, so
+prefer running it alone (`cargo test --bin driftwm soak -- --ignored`) when
+debugging a failure; and the real-client scenario
+(`src/tests/real_clients.rs`) spawns an actual `foot`/`weston-terminal`
+against a private wayland + IPC socket and drives it over the wire,
+self-skipping when neither is on `PATH`. Mark any future non-hermetic or
+genuinely slow test the same way.
 
 **Fixture tests never touch the real session.** Construct configs with
 `Config::from_toml` + `Fixture::with_config` — never read

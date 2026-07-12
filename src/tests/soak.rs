@@ -4,7 +4,8 @@
 //! entry fails inside the cycle that introduced it, not at some distant Drop.
 //! Process-wide fd and RSS plateaus catch leaks that don't touch a counter.
 //!
-//! Gated behind `RUN_SLOW_TESTS=1` so the default lane stays fast.
+//! `#[ignore]`d out of the default lane: the fd/RSS assertions are
+//! process-wide and noise-sensitive. Run with `cargo test -- --include-ignored`.
 
 use std::collections::BTreeMap;
 
@@ -118,11 +119,8 @@ fn run_cycle(f: &mut Fixture, tag: usize, settle_target: &BTreeMap<String, usize
 /// Churn hundreds of windows and assert the compositor holds no per-window
 /// state, file descriptors, or memory across cycles.
 #[test]
+#[ignore = "process-wide fd/RSS assertions; run with --include-ignored"]
 fn soak_cycles_hold_no_state() {
-    if std::env::var_os("RUN_SLOW_TESTS").is_none() {
-        return;
-    }
-
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 

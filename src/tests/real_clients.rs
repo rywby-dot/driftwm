@@ -2,8 +2,9 @@
 //! the fixture's live wayland socket, drive it over the IPC wire, then kill it
 //! and assert the crash-teardown path drains back to baseline.
 //!
-//! Gated behind `RUN_SLOW_TESTS=1` and self-skips when neither `foot` nor
-//! `weston-terminal` is installed.
+//! `#[ignore]`d out of the default lane (spawns a real process against real
+//! sockets — not hermetic); run with `cargo test -- --include-ignored`. Also
+//! self-skips when neither `foot` nor `weston-terminal` is installed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -86,10 +87,8 @@ fn ipc_request(f: &mut Fixture, ipc_path: &Path, request: &Request) -> Reply {
 }
 
 #[test]
+#[ignore = "spawns a real client binary; needs foot or weston-terminal installed"]
 fn real_client_over_ipc() {
-    if std::env::var_os("RUN_SLOW_TESTS").is_none() {
-        return;
-    }
     let Some(bin) = find_client() else {
         eprintln!(
             "skipping real_client_over_ipc: neither foot nor weston-terminal found on PATH \
