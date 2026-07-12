@@ -66,13 +66,6 @@ driftwm doesn't embed XWayland directly. X11 apps reach the compositor via [`xwa
 - **Clipboard works through standard Wayland data-device protocol.** xwayland-satellite owns selections as a normal Wayland client; the compositor doesn't bridge clipboards manually.
 - **No respawn-on-crash.** If satellite dies mid-session (rare), X11 stays dead until driftwm restart. Future enhancement.
 
-## What to unit test
+## What to test where
 
-Smithay glue code (handlers, delegates) is not worth testing — it's framework boilerplate. Write tests for **your** logic:
-
-- **Canvas/viewport math** (milestone 3): coordinate transforms, screen↔canvas conversion, viewport clipping. Pure functions, very testable.
-- **Gesture state machine** (milestone 5): feed event sequences, assert state transitions and emitted commands.
-- **Keybinding lookup** (when data-driven): binding table resolution, modifier matching, conflict detection.
-- **Config parsing** (milestone 12): TOML deserialization, defaults, validation.
-
-Manual testing is fine for everything else until you have a headless backend for integration tests.
+Smithay glue code (handlers, delegates) is not worth unit testing — it's framework boilerplate. Pure logic (canvas math, config parsing, gesture/binding resolution) gets unit tests; stage policy gets the proptest harness; the protocol↔policy wiring gets the in-process headless fixture (`src/tests/`), where a real `DriftWm` serves real wayland clients with no display. The full map and the testing rules live in [testing.md](testing.md).

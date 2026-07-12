@@ -4,7 +4,7 @@
 
 driftwm — a trackpad-first infinite canvas Wayland compositor written in Rust. Windows float on an unbounded 2D plane navigated via trackpad gestures (pan, zoom, pinch). No workspaces, no tiling. Built on [smithay](https://github.com/Smithay/smithay).
 
-Actively developed and released (currently v0.11.x) — a public, multi-contributor project, so match existing conventions carefully. See `dev/docs/CAVEATS.md` for architectural pitfalls.
+Actively developed and released — a public, multi-contributor project, so match existing conventions carefully. See `dev/docs/CAVEATS.md` for architectural pitfalls and `dev/docs/testing.md` for the test-suite map and testing rules.
 
 ## Conventions
 
