@@ -324,7 +324,9 @@ fn print_response(response: Response) {
         Response::Camera { x, y } => println!("camera {x} {y}"),
         Response::Zoom(zoom) => println!("zoom {zoom}"),
         Response::Layout(layout) => println!("{layout}"),
-        Response::Focused(Some(app_id)) => println!("{app_id}"),
+        Response::Focused(Some(w)) => {
+            println!("#{} {}", w.id, w.app_id.as_deref().unwrap_or("(no app_id)"))
+        }
         Response::Focused(None) => println!("(none)"),
         Response::Position { x, y } => println!("{x} {y}"),
         Response::Screenshot { path, .. } => println!("{path}"),

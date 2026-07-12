@@ -100,7 +100,7 @@ pub enum Response {
     Zoom(f64),
     Layout(String),
     State(StateInfo),
-    Focused(Option<String>),
+    Focused(Option<FocusedWindow>),
     /// Window-center, Y-up coordinates.
     Position {
         x: i32,
@@ -117,6 +117,13 @@ pub enum Response {
 
 /// The result of a request: `Ok(Response)` or a human-readable error string.
 pub type Reply = Result<Response, String>;
+
+/// The focused window in a [`Response::Focused`] reply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FocusedWindow {
+    pub id: u64,
+    pub app_id: Option<String>,
+}
 
 /// The full compositor state snapshot: the payload of a [`Response::State`]
 /// reply and of a subscription [`Event::State`]. Whole-state, so a subscriber
@@ -391,6 +398,10 @@ mod tests {
             Ok(Response::Zoom(1.5)),
             Ok(Response::State(sample_state())),
             Ok(Response::Focused(None)),
+            Ok(Response::Focused(Some(FocusedWindow {
+                id: 5,
+                app_id: Some("foot".into()),
+            }))),
             Ok(Response::Ok),
             Err("no focused window".into()),
         ];

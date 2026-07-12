@@ -16,7 +16,7 @@ when given no arguments and writes when given arguments.
 | `camera <x> <y>` | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                           |
 | `zoom`           | `driftwm msg zoom`            | Print the zoom level                                                                                 |
 | `zoom <level>`   | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                   |
-| `focus`          | `driftwm msg focus`           | Print the focused window's `app_id`                                                                  |
+| `focus`          | `driftwm msg focus`           | Print the focused window's `id` and `app_id` (e.g. `#5 alacritty`)                                   |
 | `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive), or `--id <n>` (from `state`); navigates to it only if it's off-screen |
 | `move`           | `driftwm msg move`            | Print the focused window's position (or `--id <n>`'s)                                                |
 | `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window, or `--id <n>`                                                               |
@@ -174,7 +174,8 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 > [!NOTE]
 > The `Move` request and the `Window` screenshot target changed shape in this
 > release: the old `{"Move":[x,y]}` tuple and bare `"Window"` string forms are
-> gone (replaced by the object forms below).
+> gone (replaced by the object forms below). The `Focused` reply also grew from
+> a bare app_id string to `{"id":…,"app_id":…}`.
 
 ### Requests
 
@@ -198,7 +199,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Camera":{"x":500.0,"y":300.0}}}
 {"Ok":{"Zoom":0.5}}
 {"Ok":{"Layout":"English (US)"}}    // or "us" for {"Layout":{"short":true}}
-{"Ok":{"Focused":"alacritty"}}      // or {"Ok":{"Focused":null}}
+{"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}   // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
 {"Ok":"Ok"}                          // action / close
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",

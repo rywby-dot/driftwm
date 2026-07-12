@@ -363,7 +363,9 @@ fn window_by_selector(
 fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let Some(selector) = arg else {
         return Ok(Response::Focused(
-            state.focused_window().and_then(|w| w.app_id_or_class()),
+            state
+                .focused_window()
+                .map(|w| focused_window_info(state, &w)),
         ));
     };
     let window = window_by_selector(state, Some(&selector))?;
@@ -377,7 +379,7 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
             .0;
         return Err(format!("window #{id} is a widget and cannot be focused"));
     }
-    let app_id = window.app_id_or_class();
+    let info = focused_window_info(state, &window);
     // Already on screen: just raise + focus, don't move the camera. Pinned
     // windows are always on screen and have no canvas position to navigate to.
     if state.is_pinned(&window) || state.window_fully_in_viewport(&window) {
@@ -385,7 +387,21 @@ fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     } else {
         state.navigate_to_window(&window, state.config.zoom_reset_on_activation);
     }
-    Ok(Response::Focused(app_id))
+    Ok(Response::Focused(Some(info)))
+}
+
+fn focused_window_info(
+    state: &DriftWm,
+    window: &smithay::desktop::Window,
+) -> protocol::FocusedWindow {
+    protocol::FocusedWindow {
+        id: state
+            .stage
+            .id_of(window)
+            .expect("window from the stage has an id")
+            .0,
+        app_id: window.app_id_or_class(),
+    }
 }
 
 /// Reuses the config-file parser so the IPC `action` command stays in lockstep
