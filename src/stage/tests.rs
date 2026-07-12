@@ -491,6 +491,12 @@ mod harness {
         RaiseAndFocus {
             idx: usize,
         },
+        HoverFocus {
+            idx: usize,
+        },
+        ClickFocus {
+            idx: usize,
+        },
         MoveWindow {
             idx: usize,
             dx: i32,
@@ -556,6 +562,8 @@ mod harness {
             1 => idx.clone().prop_map(|idx| Op::MakeWidget { idx }),
             1 => idx.clone().prop_map(|idx| Op::MakeModal { idx }),
             3 => idx.clone().prop_map(|idx| Op::RaiseAndFocus { idx }),
+            3 => idx.clone().prop_map(|idx| Op::HoverFocus { idx }),
+            2 => idx.clone().prop_map(|idx| Op::ClickFocus { idx }),
             2 => (idx.clone(), -300..300i32, -300..300i32)
                 .prop_map(|(idx, dx, dy)| Op::MoveWindow { idx, dx, dy }),
             3 => (idx.clone(), idx.clone(), 0..4usize)
@@ -765,7 +773,8 @@ mod harness {
         }
 
         /// Mirrors `DriftWm::raise_and_focus` + the `focus_changed` history push.
-        fn raise_and_focus(&mut self, w: &TestWindow) {
+        /// Returns the window pushed to the MRU, if any.
+        fn raise_and_focus(&mut self, w: &TestWindow) -> Option<TestWindow> {
             let order = self.stage.raise_with_children(w);
             self.stage.enforce_stacking();
 
@@ -789,15 +798,28 @@ mod harness {
                 }
             }
 
+            self.push_focus_as_focus_changed_would(w)
+        }
+
+        /// Mirror of the `focus_changed` → `update_focus_history` chain. Pushes
+        /// to the real stage and returns the pushed window, if any; keyboard
+        /// focus (the cycle anchor) moves regardless of push eligibility.
+        ///
+        /// Focus-*change* gating is not modeled — the real chain only pushes
+        /// when keyboard focus actually changes — but the push is idempotent
+        /// at the MRU head, so the difference is unobservable here.
+        fn push_focus_as_focus_changed_would(&mut self, w: &TestWindow) -> Option<TestWindow> {
             let focused = topmost_modal_child(&self.stage, w).unwrap_or_else(|| w.clone());
-            if self.stage.cycle_state().is_none()
+            let eligible = self.stage.cycle_state().is_none()
                 && !focused.is_widget()
                 && !focused.is_modal()
-                && !self.stage.is_pinned(&focused)
-            {
+                && !self.stage.is_pinned(&focused);
+            let pushed = eligible.then(|| {
                 self.stage.push_focus(&focused);
-            }
+                focused.clone()
+            });
             self.focused = Some(cycle_anchor(&focused));
+            pushed
         }
 
         /// A dead window loses focus; production then refocuses the history
@@ -1020,6 +1042,60 @@ mod harness {
                         return;
                     }
                     self.raise_and_focus(&w.clone());
+                }
+                Op::HoverFocus { idx } => {
+                    // maybe_hover_focus (focus-follows-mouse): sloppy focus that
+                    // never raises. idx is the hit-test result — "this window
+                    // is under the cursor" — because the harness models focus
+                    // policy, not canvas geometry. The only push Op that
+                    // leaves the z-stack untouched outside cycling.
+                    let Some(w) = self.pick(*idx) else { return };
+                    if !self.stage.contains(&w) || w.is_widget() {
+                        return;
+                    }
+                    let z_before: Vec<TestWindow> = self.stage.windows().cloned().collect();
+                    if let Some(target) = self.push_focus_as_focus_changed_would(&w.clone()) {
+                        assert_eq!(
+                            self.stage.focus_history().first(),
+                            Some(&target),
+                            "hover-focus left the hovered window off the MRU head"
+                        );
+                    }
+                    assert_eq!(
+                        z_before,
+                        self.stage.windows().cloned().collect::<Vec<_>>(),
+                        "hover-focus reordered the z-stack"
+                    );
+                }
+                Op::ClickFocus { idx } => {
+                    // on_pointer_button click-to-focus: unlike HoverFocus, this
+                    // raises the target to z-top in addition to pushing the MRU.
+                    // A widget click is focus-only: keyboard focus (the cycle
+                    // anchor) moves, but there is no raise and no MRU entry.
+                    let Some(w) = self.pick(*idx) else { return };
+                    if !self.stage.contains(&w) {
+                        return;
+                    }
+                    if w.is_widget() {
+                        self.focused = Some(cycle_anchor(&w));
+                        return;
+                    }
+                    let history_before: Vec<TestWindow> = self.stage.focus_history().to_vec();
+                    match self.raise_and_focus(&w.clone()) {
+                        Some(target) => assert_eq!(
+                            self.stage.focus_history().first(),
+                            Some(&target),
+                            "click-focus left the clicked window off the MRU head"
+                        ),
+                        // The raise machinery (subtree raise, enforce_stacking,
+                        // pinned re-sync) must not touch the history when the
+                        // target is ineligible for a push.
+                        None => assert_eq!(
+                            history_before,
+                            self.stage.focus_history().to_vec(),
+                            "click-focus of an ineligible target mutated the MRU"
+                        ),
+                    }
                 }
                 Op::MoveWindow { idx, dx, dy } => {
                     // NudgeWindow: canvas windows only.
