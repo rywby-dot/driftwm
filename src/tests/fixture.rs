@@ -101,17 +101,27 @@ impl Fixture {
         self.state().debug_counters()
     }
 
-    /// Pump until the counters return to `target`, capped so a genuine leak
+    /// Pump until the counters return to `target`, bounded so a genuine leak
     /// leaves the caller's following assertion to fail instead of spinning
-    /// forever. The disconnect cascade (resource destroy handlers plus the
-    /// idle work they defer) settles over several dispatch rounds, and on a
-    /// loaded machine a single zero-timeout pump makes little progress — so
-    /// pump one round at a time and re-check.
+    /// forever. The disconnect cascade settles over several dispatch rounds,
+    /// so pump one round at a time and re-check. A burst of zero-timeout pumps
+    /// completes in microseconds, which is useless against work that lands a
+    /// moment later from another thread (a fixture shares its process with
+    /// detached threads and 190+ sibling tests) — so after the burst, fall
+    /// back to sleep-then-pump until a wall-clock deadline.
     pub fn settle_to(&mut self, target: &BTreeMap<String, usize>) {
-        for _ in 0..1000 {
+        for _ in 0..200 {
             if self.state().debug_counters() == *target {
-                break;
+                return;
             }
+            self.pump(1);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if self.state().debug_counters() == *target {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
             self.pump(1);
         }
     }
@@ -197,6 +207,11 @@ impl Fixture {
         let data = client.send_sync();
         while !data.done.load(Ordering::Relaxed) {
             self.dispatch();
+            // Also pump both endpoints directly: progress must never depend on
+            // readiness propagating through the nested epoll chain, which can
+            // (rarely) miss an edge.
+            self.state.server.dispatch();
+            self.state.client(id).dispatch();
         }
     }
 
