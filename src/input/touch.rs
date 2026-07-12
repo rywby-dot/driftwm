@@ -505,7 +505,16 @@ impl DriftWm {
                 root = parent;
             }
             if let Some(window) = self.window_for_surface(&root) {
-                self.raise_and_focus(&window, serial);
+                // Mirror the pointer click branch: a widget takes keyboard
+                // focus without a raise (or MRU entry).
+                if window.is_widget() {
+                    self.set_window_focus(
+                        window.wl_surface().map(|s| FocusTarget(s.into_owned())),
+                        serial,
+                    );
+                } else {
+                    self.raise_and_focus(&window, serial);
+                }
             } else {
                 // Layer surface: mirror the pointer path — keyboard focus only
                 // if it asks (on-demand). A `none` layer (e.g. an OSK) must not

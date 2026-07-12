@@ -566,7 +566,16 @@ impl DriftWm {
             }
         }
         if let Some(ref window) = pinned_window {
-            self.raise_and_focus(window, serial);
+            // Same policy as the unpinned click branch: a widget takes keyboard
+            // focus without a raise (or MRU entry).
+            if window.is_widget() {
+                self.set_window_focus(
+                    window.wl_surface().map(|s| FocusTarget(s.into_owned())),
+                    serial,
+                );
+            } else {
+                self.raise_and_focus(window, serial);
+            }
         }
         pointer.button(
             self,
