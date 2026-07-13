@@ -16,6 +16,7 @@ mod headless;
 mod real;
 mod server;
 
+mod auto_navigate_click;
 mod client_teardown;
 mod config_reload;
 mod configure_sequences;

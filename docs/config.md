@@ -272,6 +272,12 @@ Default: `true`
 
 on close, pan to the newly focused window if off-screen false = camera stays put; focus only moves to a visible window
 
+### `auto_navigate_on_click`
+
+Default: `false`
+
+completed click on a partially off-screen window also pans it in fully visible → focus only
+
 ### `nudge_step`
 
 Default: `20`

@@ -1,14 +1,25 @@
+use std::time::Duration;
+
 use crate::surface_tree::focus_belongs_to_window;
+use driftwm::canvas::{CanvasPos, canvas_to_screen};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
     output::Output,
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
-    utils::{Logical, Point},
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    },
+    utils::{IsAlive, Logical, Point},
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, output_state};
+use super::{DriftWm, PendingClickNavigate, output_state};
+
+/// Max pointer travel (screen px) between press and release for a click to
+/// still count as a click rather than a drag. Beyond it, no auto-navigate — a
+/// text selection or slow drag inside a client never slides the canvas.
+const CLICK_NAVIGATE_SLOP: f64 = 5.0;
 
 /// Skip the activation pan only when the window is already fully inside its
 /// home output's viewport. Any clipping → pan that output to bring it fully
@@ -95,6 +106,125 @@ impl DriftWm {
         os.zoom_animation_center = Some(window_center);
         os.camera_target = Some(target);
         os.zoom_target = Some(target_zoom);
+    }
+
+    /// Arm a completed-click auto-navigate for `window` at press time. No-op
+    /// unless `auto_navigate_on_click` is enabled; the decision runs on release
+    /// (see `resolve_click_navigate`). `press_pos` is in canvas coords. `defer`
+    /// waits out the double-click window before panning (see
+    /// `PendingClickNavigate::defer`).
+    pub fn arm_click_navigate(
+        &mut self,
+        window: &Window,
+        press_pos: Point<f64, Logical>,
+        button: u32,
+        defer: bool,
+    ) {
+        if !self.config.auto_navigate_on_click {
+            return;
+        }
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let press_screen_pos = canvas_to_screen(CanvasPos(press_pos), self.camera(), self.zoom()).0;
+        self.pending_click_navigate = Some(PendingClickNavigate {
+            window: window.clone(),
+            press_screen_pos,
+            button,
+            output,
+            defer,
+        });
+    }
+
+    /// Resolve a click armed by `arm_click_navigate` at button release. When the
+    /// armed button lifts within the click slop on the same output, pan to the
+    /// window. A `defer` pending waits out the double-click window first (see
+    /// `PendingClickNavigate::defer` and `fire_click_navigate`); otherwise the
+    /// pan runs immediately. `release_pos` is in canvas coords.
+    pub fn resolve_click_navigate(&mut self, button: u32, release_pos: Point<f64, Logical>) {
+        let Some(pending) = self.pending_click_navigate.take() else {
+            return;
+        };
+        // A different button lifted before the armed one — keep waiting for it.
+        if pending.button != button {
+            self.pending_click_navigate = Some(pending);
+            return;
+        }
+        // A different output's screen coords aren't comparable to the press
+        // (see `PendingClickNavigate::output`).
+        if self.active_output().as_ref() != Some(&pending.output) {
+            return;
+        }
+        if !pending.window.alive() {
+            return;
+        }
+        let release_screen_pos =
+            canvas_to_screen(CanvasPos(release_pos), self.camera(), self.zoom()).0;
+        let dx = release_screen_pos.x - pending.press_screen_pos.x;
+        let dy = release_screen_pos.y - pending.press_screen_pos.y;
+        if dx * dx + dy * dy > CLICK_NAVIGATE_SLOP * CLICK_NAVIGATE_SLOP {
+            return;
+        }
+        // Content clicks pan on release; only the SSD title bar defers, because
+        // that's the sole target where the compositor owns a competing
+        // double-click (fit). Deferring content clicks would slow every one to
+        // protect a gesture the compositor doesn't own.
+        if !pending.defer {
+            self.fire_click_navigate(&pending.window);
+            return;
+        }
+        // Defer the pan past the double-click window rather than panning now: a
+        // pan on release #1 would slide the window out from under the title
+        // bar's double-click-fit at click #2. Press #2 lands inside the delay
+        // and cancels this. Visibility is deliberately re-checked at fire time —
+        // it can change during the delay.
+        if let Some(token) = self.click_navigate_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let window = pending.window;
+        let timer = Timer::from_duration(Duration::from_millis(
+            crate::input::gestures::DOUBLE_TAP_WINDOW_MS,
+        ));
+        self.click_navigate_timer = self
+            .loop_handle
+            .insert_source(timer, move |_, _, data: &mut DriftWm| {
+                data.click_navigate_timer = None;
+                data.fire_click_navigate(&window);
+                TimeoutAction::Drop
+            })
+            .ok();
+    }
+
+    /// Fire a deferred click-navigate scheduled by `resolve_click_navigate`. The
+    /// double-click window has elapsed, so re-check the world before panning: the
+    /// window must still be alive, still hold keyboard focus (a focus move during
+    /// the delay — Alt-Tab, say — means the user went elsewhere; don't yank them
+    /// back), and still be clipped.
+    pub fn fire_click_navigate(&mut self, window: &Window) {
+        if !window.alive() {
+            return;
+        }
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .is_some_and(|focus| focus_belongs_to_window(&focus.0, window));
+        if !focused {
+            return;
+        }
+        if !self.window_fully_in_viewport(window) {
+            self.navigate_to_window(window, false);
+        }
+    }
+
+    /// Cancel any armed or deferred click-navigate. Clearing the deferred timer
+    /// here is what makes double-click work — the second press lands inside the
+    /// deferral and stops the pan before it starts.
+    pub fn cancel_click_navigate(&mut self) {
+        self.pending_click_navigate = None;
+        if let Some(token) = self.click_navigate_timer.take() {
+            self.loop_handle.remove(token);
+        }
     }
 
     /// Reveal and focus `window` on the output it already lives on, without

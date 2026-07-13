@@ -127,6 +127,28 @@ pub struct PendingMiddleClick {
     pub timer_token: RegistrationToken,
 }
 
+/// A click armed for auto-navigate: a normal window was pressed with
+/// `auto_navigate_on_click` enabled. On release — if the pointer barely moved
+/// and the window is still clipped — the camera pans to it like activation does.
+pub struct PendingClickNavigate {
+    pub window: Window,
+    /// Press position in screen space, so the click/drag slop is measured in
+    /// physical pixels regardless of zoom.
+    pub press_screen_pos: Point<f64, Logical>,
+    pub button: u32,
+    /// Active output at press time. `canvas_to_screen` and the pan both follow
+    /// the active output, so a release on a different output would compare
+    /// incompatible screen coords — resolve drops the pending instead.
+    pub output: Output,
+    /// Wait out the double-click window before panning. Only the SSD title bar
+    /// hosts the compositor's own double-click (fit), so its pan must defer —
+    /// otherwise release #1 slides the window out from under click #2. Content
+    /// clicks pan immediately: protecting a *client's* double-click isn't the
+    /// compositor's job, and a deferral there would put a dead beat on every
+    /// click.
+    pub defer: bool,
+}
+
 /// Session lock state machine: Unlocked → Pending → Locked → Unlocked.
 pub enum SessionLock {
     Unlocked,
@@ -644,6 +666,14 @@ pub struct DriftWm {
         Instant,
         smithay::reexports::wayland_server::backend::ObjectId,
     )>,
+
+    /// Click armed for auto-navigate on release (see `auto_navigate_on_click`).
+    pub pending_click_navigate: Option<PendingClickNavigate>,
+
+    /// Timer for the deferred click-navigate pan. The pan waits out the
+    /// double-click window so a second click can cancel it; a fresh press clears
+    /// this via `cancel_click_navigate`.
+    pub click_navigate_timer: Option<RegistrationToken>,
 
     /// Compositor-generated errors shown in the on-screen error bar, keyed by
     /// source. Empty = no bar. Use [`Self::set_error`]/[`Self::clear_error`].

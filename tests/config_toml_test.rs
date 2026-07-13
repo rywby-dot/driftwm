@@ -426,6 +426,22 @@ fn toml_auto_navigate_on_close_can_be_disabled() {
 }
 
 #[test]
+fn toml_auto_navigate_on_click_defaults_false() {
+    let config = Config::from_toml("").unwrap();
+    assert!(!config.auto_navigate_on_click);
+}
+
+#[test]
+fn toml_auto_navigate_on_click_can_be_enabled() {
+    let toml = r#"
+        [navigation]
+        auto_navigate_on_click = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert!(config.auto_navigate_on_click);
+}
+
+#[test]
 fn toml_resize_on_border_defaults_true() {
     let config = Config::from_toml("").unwrap();
     assert!(config.resize_on_border);

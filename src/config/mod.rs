@@ -76,6 +76,9 @@ pub struct Config {
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
     pub auto_navigate_on_close: bool,
+    /// On a completed click on a partially off-screen window, pan the camera to
+    /// bring it fully into view (true). A fully visible window keeps focus-only.
+    pub auto_navigate_on_click: bool,
     /// Modifiers held during Alt-Tab window cycling, derived from the
     /// `cycle-windows forward` binding. Releasing them commits the selection.
     pub cycle_hold: Modifiers,
@@ -822,6 +825,7 @@ impl Config {
             ),
             animation_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
+            auto_navigate_on_click: raw.navigation.auto_navigate_on_click.unwrap_or(false),
             cycle_hold,
             zoom_step: non_negative(raw.zoom.step.unwrap_or(1.1), "zoom.step", &mut errors),
             zoom_touch_speed: non_negative(

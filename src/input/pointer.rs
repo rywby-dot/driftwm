@@ -91,6 +91,11 @@ impl DriftWm {
         }
 
         if button_state == ButtonState::Pressed {
+            // A new press is a fresh interaction, so drop any armed/deferred
+            // navigate unconditionally — unlike resolve's button-mismatch branch,
+            // which keeps the pending because another held button lifting isn't
+            // a new interaction.
+            self.cancel_click_navigate();
             self.set_last_scroll_pan(None);
             self.with_output_state(|os| os.momentum.stop());
 
@@ -271,6 +276,12 @@ impl DriftWm {
                                 // cluster drag is a separate explicit action
                                 // (`MoveSnappedWindows`, default Alt+Shift+Left).
                                 self.raise_and_focus(&window, serial);
+                                // A clean press-release here is still a focus click
+                                // (a bottom-clipped SSD window may show only its
+                                // title bar); a real title-bar drag exceeds the slop.
+                                // Defer: the title bar's own double-click-fit must
+                                // beat the pan.
+                                self.arm_click_navigate(&window, pos, button, true);
                                 let Some(initial_window_location) = self.stage.position_of(&window)
                                 else {
                                     return;
@@ -440,6 +451,11 @@ impl DriftWm {
                 if !is_widget {
                     // Normal window: raise + focus (with modal redirect)
                     self.raise_and_focus(window, serial);
+                    // Arm auto-navigate; resolved on this button's release so a
+                    // click-drag inside the client never slides the canvas. No
+                    // defer: content clicks pan immediately (protecting a client's
+                    // double-click isn't the compositor's job).
+                    self.arm_click_navigate(window, pos, button, false);
                 } else if let Some((focus, _)) = self.canvas_layer_under(pos) {
                     // Widget window but a canvas layer is above it: grant the
                     // layer keyboard focus only if it requests it (on-demand).
@@ -466,6 +482,12 @@ impl DriftWm {
             },
         );
         pointer.frame(self);
+
+        // Resolve only after the release forwards to the client, so the app
+        // still sees the click.
+        if button_state == ButtonState::Released {
+            self.resolve_click_navigate(button, pointer.current_location());
+        }
     }
 
     /// Dispatch a left/other button press over a screen-pinned window in screen
