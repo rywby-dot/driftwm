@@ -362,7 +362,7 @@ driftwm runs standalone — none of these are required — but each enables or
 improves a feature:
 
 - `xwayland-satellite` (≥ 0.7) — X11 app support (see below).
-- `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting. wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
+- `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting, and screenshot apps that go through the portal (e.g. Flameshot). wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
 - `grim` + `slurp` — screenshots (+ cropping to region). driftwm also has a built-in canvas/DPI capture: see [IPC › Screenshots](docs/ipc.md#screenshots).
 - `adwaita-fonts` — renders SSD title bars in `Adwaita Sans` to match GTK apps; without it a generic sans-serif is substituted. Font, size, weight, and alignment are configurable under `[decorations]`.
 - A cursor theme — most desktops set one up already; on a bare install driftwm falls back to a basic built-in arrow.
