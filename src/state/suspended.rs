@@ -284,10 +284,12 @@ impl DriftWm {
     }
 
     /// Decide whether a destroying `window` converts into a suspended window,
-    /// returning the stand-in's identity + geometry + title if so. An explicit
-    /// real close wins over everything (both marks are consumed either way);
-    /// otherwise a live suspend mark converts, or an eligible client-initiated
-    /// close converts when `suspend_on_close` resolves true.
+    /// returning the stand-in's identity + geometry + title if so. Marks decide
+    /// first: with both a suspend and a real-close mark live (two conflicting
+    /// commands on a close-refusing window), the later one wins — deadlines are
+    /// set-time plus a shared TTL, so comparing them compares set order. With
+    /// no live mark, an eligible client-initiated close converts when
+    /// `suspend_on_close` resolves true.
     ///
     /// `suspend_on_close` eligibility: not a widget, not a dialog (no parent —
     /// dead or alive — and not modal), resolves to a `.desktop` entry, and the
@@ -301,15 +303,19 @@ impl DriftWm {
         // honor them only while unexpired — an idle event loop may dispatch this
         // destroy before the per-frame sweep culls a lapsed mark.
         let now = Instant::now();
-        let real_close = self
+        let real_close_deadline = self
             .real_close_marks
             .remove(&surface.id())
-            .is_some_and(|deadline| deadline > now);
+            .filter(|deadline| *deadline > now);
         let suspend_mark = self
             .suspend_marks
             .remove(&surface.id())
             .filter(|mark| mark.deadline > now);
-        if real_close {
+        if let Some(real) = real_close_deadline
+            && suspend_mark
+                .as_ref()
+                .is_none_or(|mark| mark.deadline < real)
+        {
             return None;
         }
         if let Some(mark) = suspend_mark {

@@ -287,6 +287,52 @@ fn real_close_mark_expires_allowing_conversion() {
     f.state().dismiss_suspended(sid);
 }
 
+/// With both marks live on a close-refusing window, the later command wins:
+/// suspend-window escalated to close-window closes for real, and the reverse
+/// order converts.
+#[test]
+fn later_mark_wins_when_both_are_live() {
+    // suspend-window, refused, then close-window → real close.
+    {
+        let tmp = TempDir::new();
+        let mut f = Fixture::with_config(config_with(""));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &tmp, &["myapp"]);
+        let id = f.add_client();
+        let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (300, 300));
+        origin_view(&mut f);
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state().raise_and_focus(&target, serial);
+
+        f.state().execute_action(&Action::SuspendWindow);
+        f.state().execute_action(&Action::CloseWindow);
+        client_close(&mut f, id, &surface);
+        assert!(
+            suspended_id(&mut f).is_none(),
+            "the later close-window wins over the refused suspend"
+        );
+        assert_eq!(f.state().stage.windows().count(), 0);
+    }
+    // close-window, refused, then suspend-window → converts.
+    {
+        let tmp = TempDir::new();
+        let mut f = Fixture::with_config(config_with(""));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &tmp, &["myapp"]);
+        let id = f.add_client();
+        let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (300, 300));
+        origin_view(&mut f);
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state().raise_and_focus(&target, serial);
+
+        f.state().execute_action(&Action::CloseWindow);
+        f.state().execute_action(&Action::SuspendWindow);
+        client_close(&mut f, id, &surface);
+        let sid = suspended_id(&mut f).expect("the later suspend-window wins");
+        f.state().dismiss_suspended(sid);
+    }
+}
+
 /// `suspend_on_close` converts a client-initiated close (CSD X, in-app quit)
 /// into a stand-in.
 #[test]
