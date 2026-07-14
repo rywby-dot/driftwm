@@ -20,10 +20,17 @@ use smithay::{
 
 use smithay::wayland::seat::WaylandFocus;
 
+use std::rc::Rc;
+
 use crate::decorations::DecorationHit;
-use crate::grabs::{MoveSurfaceGrab, NavigateGrab, PanGrab, ResizeState, ResizeSurfaceGrab};
+use crate::grabs::{
+    MoveSurfaceGrab, NavigateGrab, PanGrab, ResizeState, ResizeSurfaceGrab, SuspendedMoveGrab,
+    SuspendedResizeGrab,
+};
+use crate::input::DecoTarget;
 use crate::state::{
-    ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick, ZoomAnimationAnchor,
+    ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick, StageWindow, SuspendedWindow,
+    ZoomAnimationAnchor,
 };
 use driftwm::canvas::{self, CanvasPos, canvas_to_screen};
 use driftwm::config::{self, BindingContext, MouseAction};
@@ -248,12 +255,22 @@ impl DriftWm {
                 return;
             }
 
+            // Suspended windows are opaque: any button over one is consumed here
+            // (chrome interactions, window move/resize, else focus + swallow),
+            // never leaking to a window/layer beneath. Modifier bindings that
+            // aren't window move/resize pass through (bindings beat chrome).
+            if self.try_suspended_button(&pointer, pos, button, serial, mods) {
+                return;
+            }
+
             // `modifier_binding` gates the chrome paths below.
             let context = self.pointer_context(pos);
             let (binding, modifier_binding) = self.modifier_button_binding(&mods, button, context);
 
             // SSD decoration clicks: title bar → move, close button → close, resize border → resize
-            if !modifier_binding && let Some((window, hit)) = self.decoration_under(pos) {
+            if !modifier_binding
+                && let Some((DecoTarget::Client(window), hit)) = self.decoration_under(pos)
+            {
                 // Decoration interactions must only apply to the topmost window.
                 // Otherwise a lower SSD title bar/border can steal clicks through
                 // an overlapping window.
@@ -560,6 +577,112 @@ impl DriftWm {
             screen_loc,
         };
         pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Keep);
+    }
+
+    /// Dispatch a button press over a suspended window. Suspended windows are
+    /// opaque, so this consumes every button over one (returning `true`) unless
+    /// a non-move/resize modifier binding should beat the chrome, in which case
+    /// it defers to normal dispatch.
+    fn try_suspended_button(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        mods: smithay::input::keyboard::ModifiersState,
+    ) -> bool {
+        let Some((DecoTarget::Suspended(s), hit)) = self.decoration_under(pos) else {
+            return false;
+        };
+        let id = s.id;
+
+        let (binding, modifier_binding) =
+            self.modifier_button_binding(&mods, button, BindingContext::OnWindow);
+        match binding {
+            Some(MouseAction::MoveWindow | MouseAction::MoveSnappedWindows) => {
+                self.focus_and_raise_suspended(id);
+                self.start_suspended_move(pointer, &s, pos, button, serial);
+                return true;
+            }
+            Some(MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped) => {
+                self.focus_and_raise_suspended(id);
+                self.start_suspended_resize(pointer, &s, pos, button, serial, None);
+                return true;
+            }
+            // Non-move/resize modifier bindings beat chrome — defer to dispatch.
+            Some(_) if modifier_binding => return false,
+            _ => {}
+        }
+
+        if button == config::BTN_LEFT {
+            match hit {
+                DecorationHit::CloseButton => self.dismiss_suspended(id),
+                DecorationHit::Label => {
+                    self.focus_and_raise_suspended(id);
+                    self.relaunch_suspended(id);
+                }
+                DecorationHit::TitleBar => {
+                    self.focus_and_raise_suspended(id);
+                    self.start_suspended_move(pointer, &s, pos, button, serial);
+                }
+                DecorationHit::ResizeBorder(edge) => {
+                    self.focus_and_raise_suspended(id);
+                    self.start_suspended_resize(pointer, &s, pos, button, serial, Some(edge));
+                }
+                DecorationHit::Body => self.focus_and_raise_suspended(id),
+            }
+            return true;
+        }
+
+        // Any other button over the opaque frame: focus + swallow so nothing
+        // beneath receives it.
+        self.focus_and_raise_suspended(id);
+        true
+    }
+
+    fn start_suspended_move(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) {
+        let Some(origin) = self.stage.position_of(&StageWindow::Suspended(s.clone())) else {
+            return;
+        };
+        let start_data = GrabStartData {
+            focus: None,
+            button,
+            location: pos,
+        };
+        let grab = SuspendedMoveGrab::new(start_data, s.id, origin, pos);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+    }
+
+    fn start_suspended_resize(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        explicit_edge: Option<xdg_toplevel::ResizeEdge>,
+    ) {
+        let Some(origin) = self.stage.position_of(&StageWindow::Suspended(s.clone())) else {
+            return;
+        };
+        let size = s.size.get();
+        let edges = explicit_edge.unwrap_or_else(|| edges_from_position(pos, origin, size));
+        self.cursor.grab_cursor = true;
+        self.cursor.cursor_status = CursorImageStatus::Named(resize_cursor(edges));
+        let start_data = GrabStartData {
+            focus: None,
+            button,
+            location: pos,
+        };
+        let grab = SuspendedResizeGrab::new(start_data, s.id, edges, origin, size, pos);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     /// Dispatch a left/other button press over a screen-pinned window in screen
@@ -882,6 +1005,18 @@ impl DriftWm {
         let pointer = self.seat.get_pointer().unwrap();
         let mut pos = pointer.current_location();
         let source = event.source();
+
+        // Scroll over an opaque suspended window is swallowed: there's no client
+        // to forward it to, and it must not pan/zoom the canvas beneath.
+        if matches!(
+            self.decoration_under(pos),
+            Some((DecoTarget::Suspended(_), _))
+        ) {
+            let frame = AxisFrame::new(Event::time_msec(&event));
+            pointer.axis(self, frame);
+            pointer.frame(self);
+            return;
+        }
 
         // Discrete wheel-notch bindings (wheel-up / wheel-down) run any
         // action once per notch — volume on mod+shift+scroll and the like.

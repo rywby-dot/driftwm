@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::decorations::DecorationHit;
 use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab, TouchGestureGrab};
+use crate::input::DecoTarget;
 use crate::state::{DriftWm, FocusTarget, SessionLock, output_state};
 use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
@@ -480,11 +481,11 @@ impl DriftWm {
 
         // Fresh interaction. The first finger hit-tests SSD decorations.
         match self.decoration_under(canvas_pos) {
-            Some((window, DecorationHit::TitleBar)) => {
+            Some((DecoTarget::Client(window), DecorationHit::TitleBar)) => {
                 self.start_touch_move(&window, slot, canvas_pos, serial, output);
                 return;
             }
-            Some((window, DecorationHit::CloseButton)) => {
+            Some((DecoTarget::Client(window), DecorationHit::CloseButton)) => {
                 self.touch_state.pending_close = Some(PendingClose {
                     slot,
                     window,
@@ -492,6 +493,21 @@ impl DriftWm {
                     last_screen: screen_pos,
                     pinned: false,
                 });
+                return;
+            }
+            // Suspended windows are opaque: a tap focuses + raises, the label
+            // relaunches, the close button dismisses. Touch move/resize of a
+            // suspended window is not wired in pass 1 — those taps focus + raise.
+            Some((DecoTarget::Suspended(s), hit)) => {
+                let id = s.id;
+                match hit {
+                    DecorationHit::CloseButton => self.dismiss_suspended(id),
+                    DecorationHit::Label => {
+                        self.focus_and_raise_suspended(id);
+                        self.relaunch_suspended(id);
+                    }
+                    _ => self.focus_and_raise_suspended(id),
+                }
                 return;
             }
             // Resize borders aren't touch-draggable (8px ≪ a fingertip); fall
@@ -719,7 +735,7 @@ impl DriftWm {
                 } else {
                     matches!(
                         self.decoration_under(pc.last_canvas),
-                        Some((ref w, DecorationHit::CloseButton)) if *w == pc.window
+                        Some((DecoTarget::Client(ref w), DecorationHit::CloseButton)) if *w == pc.window
                     )
                 };
                 if still_inside {

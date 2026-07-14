@@ -24,11 +24,22 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::utils::Logical;
 use smithay::wayland::compositor::RegionAttributes;
 
+use std::rc::Rc;
+
 use crate::decorations::{DecorationHit, DecorationKey};
-use crate::state::{DriftWm, FocusTarget};
+use crate::state::{DriftWm, FocusTarget, StageWindow, SuspendedWindow};
 use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
 use driftwm::config::HotCorner;
 use driftwm::protocols::output_power::OutputPowerHandler;
+
+/// What a decoration hit-test landed on: a live client window, or a suspended
+/// window (routed through the same decoration channel — see the suspended hit
+/// contract).
+#[derive(Clone)]
+pub(crate) enum DecoTarget {
+    Client(Window),
+    Suspended(Rc<SuspendedWindow>),
+}
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of an edge of the *usable* area
@@ -343,7 +354,7 @@ impl DriftWm {
     /// `pointer.relative_motion()` / `pointer.frame()` and calling
     /// `update_decoration_cursor()` so that absolute and relative motion events
     /// agree on the same target surface.
-    fn pointer_focus_under(
+    pub(crate) fn pointer_focus_under(
         &mut self,
         screen_pos: Point<f64, smithay::utils::Logical>,
         canvas_pos: Point<f64, smithay::utils::Logical>,
@@ -373,6 +384,20 @@ impl DriftWm {
             self.pointer_over_layer = false;
             self.pointer_over_screen_space = true;
             return Some(hit);
+        }
+
+        // A suspended window is an opaque canvas element that sits with normal
+        // windows. When one is the topmost element here it terminates the
+        // cascade: it owns no surface (no pointer focus), and nothing beneath —
+        // wallpaper, canvas layer, widget, or window — is reachable. Its clicks
+        // are routed through the decoration channel, not surface focus.
+        if matches!(
+            self.decoration_under(canvas_pos),
+            Some((DecoTarget::Suspended(_), _))
+        ) {
+            self.pointer_over_layer = false;
+            self.pointer_over_screen_space = false;
+            return None;
         }
 
         // Non-widget canvas windows (visually above canvas layers)
@@ -416,7 +441,7 @@ impl DriftWm {
 
     /// Sloppy focus: when enabled, focus the non-widget window under the pointer
     /// without raising it. Skips layers, widgets, and empty canvas.
-    fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
+    pub(crate) fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
         if !self.config.focus_follows_mouse || self.pointer_over_layer {
             return;
         }
@@ -448,11 +473,39 @@ impl DriftWm {
             self.zoom(),
         )
         .0;
-        let window = match self.pinned_window_under(screen_pos, canvas_pos) {
-            Some((focus, _)) => self.window_for_surface(&focus.0),
-            None => self.element_under(canvas_pos).map(|(w, _)| w.clone()),
+        if let Some((focus, _)) = self.pinned_window_under(screen_pos, canvas_pos) {
+            let Some(window) = self.window_for_surface(&focus.0) else {
+                return;
+            };
+            self.hover_focus_window(window);
+            return;
+        }
+
+        // A suspended window is above normal canvas windows: hovering one sets
+        // the focus intent (it holds no seat keyboard focus).
+        if let Some((DecoTarget::Suspended(s), _)) = self.decoration_under(canvas_pos) {
+            let id = s.id;
+            let already = matches!(
+                self.window_focus,
+                Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
+            );
+            if !already {
+                let serial = SERIAL_COUNTER.next_serial();
+                self.set_suspended_focus(id, serial);
+            }
+            return;
+        }
+
+        let Some(window) = self.element_under(canvas_pos).map(|(w, _)| w.clone()) else {
+            return;
         };
-        let Some(window) = window else { return };
+        self.hover_focus_window(window);
+    }
+
+    /// Sloppy-focus a client window under the pointer (skipping widgets),
+    /// redirecting to its innermost modal child, without re-running when the
+    /// intent already points there.
+    fn hover_focus_window(&mut self, window: Window) {
         let is_widget = window
             .wl_surface()
             .and_then(|s| driftwm::config::applied_rule(&s))
@@ -1320,52 +1373,60 @@ impl DriftWm {
             self.zoom(),
         )
         .0;
-        let hit = self
-            .pinned_decoration_under(screen_pos)
-            .or_else(|| self.decoration_under(canvas_pos));
+        // Resolve the decoration key + region from a pinned window (screen
+        // space, always a client) or the canvas hit-test (client or suspended).
+        let hit: Option<(DecorationKey, DecorationHit)> =
+            if let Some((window, h)) = self.pinned_decoration_under(screen_pos) {
+                window
+                    .wl_surface()
+                    .map(|s| (DecorationKey::Surface(s.id()), h))
+            } else {
+                self.decoration_under(canvas_pos)
+                    .and_then(|(target, h)| match target {
+                        DecoTarget::Client(w) => {
+                            w.wl_surface().map(|s| (DecorationKey::Surface(s.id()), h))
+                        }
+                        DecoTarget::Suspended(s) => Some((DecorationKey::Suspended(s.id), h)),
+                    })
+            };
+        use smithay::input::pointer::{CursorIcon, CursorImageStatus};
         match hit {
-            Some((ref window, DecorationHit::CloseButton)) => {
+            Some((key, DecorationHit::CloseButton)) => {
                 self.cursor.decoration_cursor = true;
-                self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::Named(
-                    smithay::input::pointer::CursorIcon::Pointer,
-                );
-                self.set_close_hovered(window, true);
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Pointer);
+                self.set_close_hovered_key(&key, true);
             }
-            Some((ref window, DecorationHit::ResizeBorder(edge))) => {
-                self.cursor.decoration_cursor = true;
-                self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::Named(
-                    crate::input::pointer::resize_cursor(edge),
-                );
-                self.set_close_hovered(window, false);
-            }
-            Some((
-                ref window,
-                DecorationHit::TitleBar | DecorationHit::Body | DecorationHit::Label,
-            )) => {
+            Some((key, DecorationHit::ResizeBorder(edge))) => {
                 self.cursor.decoration_cursor = true;
                 self.cursor.cursor_status =
-                    smithay::input::pointer::CursorImageStatus::default_named();
-                self.set_close_hovered(window, false);
+                    CursorImageStatus::Named(crate::input::pointer::resize_cursor(edge));
+                self.set_close_hovered_key(&key, false);
+            }
+            // The label relaunches on click — a pointer cursor advertises it.
+            Some((key, DecorationHit::Label)) => {
+                self.cursor.decoration_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Pointer);
+                self.set_close_hovered_key(&key, false);
+            }
+            Some((key, DecorationHit::TitleBar | DecorationHit::Body)) => {
+                self.cursor.decoration_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::default_named();
+                self.set_close_hovered_key(&key, false);
             }
             None => {
                 if self.cursor.decoration_cursor {
                     self.cursor.decoration_cursor = false;
-                    self.cursor.cursor_status =
-                        smithay::input::pointer::CursorImageStatus::default_named();
+                    self.cursor.cursor_status = CursorImageStatus::default_named();
                     self.clear_all_close_hovered();
                 }
             }
         }
     }
 
-    /// Set the close button hover state for a specific window's decoration.
-    fn set_close_hovered(&mut self, window: &Window, hovered: bool) {
-        let Some(wl_surface) = window.wl_surface() else {
-            return;
-        };
-        if let Some(deco) = self
-            .decorations
-            .get_mut(&DecorationKey::Surface(wl_surface.id()))
+    /// Set the close button hover state for a decoration entry (client surface
+    /// or suspended window), re-rendering the title bar if it changed.
+    fn set_close_hovered_key(&mut self, key: &DecorationKey, hovered: bool) {
+        if let Some(deco) = self.decorations.get_mut(key)
             && deco.close_hovered != hovered
         {
             deco.close_hovered = hovered;
@@ -1399,18 +1460,31 @@ impl DriftWm {
         }
     }
 
-    /// Check if a canvas position hits a decoration area (SSD chrome, or the
-    /// compositor-side CSD resize margin).
-    pub fn decoration_under(
+    /// Check if a canvas position hits a decoration area (SSD chrome, the
+    /// compositor-side CSD resize margin, or a suspended window's whole frame).
+    /// Scans clients and suspended windows interleaved by z-order so a higher
+    /// element's opaque extent occludes a lower one's chrome.
+    pub(crate) fn decoration_under(
         &self,
         pos: Point<f64, smithay::utils::Logical>,
-    ) -> Option<(Window, DecorationHit)> {
+    ) -> Option<(DecoTarget, DecorationHit)> {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active = self.active_output();
 
         // Iterate in z-order (topmost first, matching stage.windows().rev())
-        for window in self.stage.windows().rev().filter_map(|w| w.client()) {
+        for element in self.stage.windows().rev() {
+            let window = match element {
+                StageWindow::Suspended(s) => {
+                    if let Some(hit) = self.suspended_decoration_hit(s, pos) {
+                        return Some((DecoTarget::Suspended(s.clone()), hit));
+                    }
+                    // Outside this suspended window's frame — a lower element
+                    // may still be hit.
+                    continue;
+                }
+                StageWindow::Client(w) => w,
+            };
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1435,16 +1509,22 @@ impl DriftWm {
                 .contains_key(&DecorationKey::Surface(wl_surface.id()))
             {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
-                    return Some((window.clone(), DecorationHit::CloseButton));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::CloseButton,
+                    ));
                 }
                 if crate::decorations::title_bar_contains(pos, loc, size.w, bar_height) {
-                    return Some((window.clone(), DecorationHit::TitleBar));
+                    return Some((DecoTarget::Client(window.clone()), DecorationHit::TitleBar));
                 }
                 if self.config.resize_on_border
                     && let Some(edge) =
                         crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
                 {
-                    return Some((window.clone(), DecorationHit::ResizeBorder(edge)));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::ResizeBorder(edge),
+                    ));
                 }
             } else {
                 // CSD: only the outer resize margin (see surface_under).
@@ -1457,7 +1537,10 @@ impl DriftWm {
                     && let Some(edge) =
                         crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)
                 {
-                    return Some((window.clone(), DecorationHit::ResizeBorder(edge)));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::ResizeBorder(edge),
+                    ));
                 }
             }
 
@@ -1471,6 +1554,57 @@ impl DriftWm {
             {
                 return None;
             }
+        }
+        None
+    }
+
+    /// Which region of a suspended window's frame `pos` lands in, or `None` if
+    /// outside the frame entirely. The whole content+chrome is an opaque hit
+    /// target (Body / Label / TitleBar / CloseButton); the outer margin is a
+    /// resize border. Pure geometry — suspended windows are never pinned or
+    /// fullscreen.
+    fn suspended_decoration_hit(
+        &self,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<DecorationHit> {
+        let loc = self.stage.position_of(&StageWindow::Suspended(s.clone()))?;
+        let size = s.size.get();
+        let bar = self.config.decorations.title_bar_height;
+        let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+
+        if crate::decorations::close_button_contains(pos, loc, size.w, bar) {
+            return Some(DecorationHit::CloseButton);
+        }
+        if crate::decorations::title_bar_contains(pos, loc, size.w, bar) {
+            return Some(DecorationHit::TitleBar);
+        }
+        // Body: the content rect below the title bar. A centered label sub-rect
+        // relaunches; the rest focuses + raises.
+        let in_body = pos.x >= loc.x as f64
+            && pos.x < (loc.x + size.w) as f64
+            && pos.y >= loc.y as f64
+            && pos.y < (loc.y + size.h) as f64;
+        if in_body {
+            let label = s.chrome.borrow().label_rect;
+            if let Some(r) = label {
+                let lx = (loc.x + r.loc.x) as f64;
+                let ly = (loc.y + r.loc.y) as f64;
+                if pos.x >= lx
+                    && pos.x < lx + r.size.w as f64
+                    && pos.y >= ly
+                    && pos.y < ly + r.size.h as f64
+                {
+                    return Some(DecorationHit::Label);
+                }
+            }
+            return Some(DecorationHit::Body);
+        }
+        if self.config.resize_on_border
+            && let Some(edge) =
+                crate::decorations::resize_edge_at(pos, loc, size, bar, border_width)
+        {
+            return Some(DecorationHit::ResizeBorder(edge));
         }
         None
     }

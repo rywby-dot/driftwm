@@ -625,9 +625,12 @@ impl DriftWm {
         // `element_under` misses it; fall back to a decoration hit-test.
         self.element_under(pos)
             .map(|(w, l)| (w.clone(), l))
-            .or_else(|| {
-                self.decoration_under(pos)
-                    .and_then(|(w, _)| self.stage.position_of(&w).map(|l| (w, l)))
+            .or_else(|| match self.decoration_under(pos) {
+                // Suspended windows have no client to forward a gesture to.
+                Some((crate::input::DecoTarget::Client(w), _)) => {
+                    self.stage.position_of(&w).map(|l| (w, l))
+                }
+                _ => None,
             })
     }
 
