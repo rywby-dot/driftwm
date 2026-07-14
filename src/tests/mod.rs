@@ -31,6 +31,7 @@ mod popups;
 mod real_clients;
 mod send_to_output;
 mod soak;
+mod suspended;
 mod window_opening;
 mod window_rules;
 
