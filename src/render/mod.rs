@@ -10,6 +10,7 @@ mod lifecycle;
 mod screenshot;
 mod shader_chunks;
 mod shaders;
+mod suspended;
 mod tile_chunks;
 mod tile_chunks_tiff;
 mod tile_worker;
@@ -56,6 +57,7 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use crate::decorations::DecorationKey;
+use crate::state::StageWindow;
 use driftwm::canvas;
 use driftwm::window_ext::WindowExt;
 
@@ -201,15 +203,45 @@ pub(crate) fn compose_capture_elements(
     let mut widgets: Vec<OutputRenderElements> = Vec::new();
 
     // Collect first: the surface-tree calls borrow `state`, which would conflict
-    // with an in-flight `state.stage.windows()` iterator. Windows are Arc-backed.
-    let windows: Vec<smithay::desktop::Window> = state
-        .stage
-        .windows()
-        .rev()
-        .filter_map(|w| w.client())
-        .cloned()
-        .collect();
-    for window in &windows {
+    // with an in-flight `state.stage.windows()` iterator. Elements are ref-counted.
+    let elements: Vec<StageWindow> = state.stage.windows().rev().cloned().collect();
+    for element in &elements {
+        let window = match element {
+            StageWindow::Client(w) => w,
+            // Isolation (`msg screenshot window`) targets a specific client;
+            // suspended windows only appear in whole-canvas / `all` captures.
+            StageWindow::Suspended(s) => {
+                if isolate.is_some() {
+                    continue;
+                }
+                let Some(loc) = state.stage.position_of(element) else {
+                    continue;
+                };
+                let focused = state.gated_suspended_focus() == Some(s.id);
+                let launching = state.is_suspended_launching(s.id);
+                let border_shader = state.render.border_shader.clone();
+                let shadow_shader = state.render.shadow_shader.clone();
+                suspended::push_suspended_element(
+                    renderer,
+                    s,
+                    loc,
+                    focused,
+                    launching,
+                    &state.config.decorations,
+                    state.decoration_scale,
+                    &mut state.decorations,
+                    &mut state.render.border_cache,
+                    &mut state.render.shadow_cache,
+                    border_shader.as_ref(),
+                    shadow_shader.as_ref(),
+                    camera,
+                    zoom,
+                    scale,
+                    &mut normal,
+                );
+                continue;
+            }
+        };
         if isolate.is_some_and(|target| target != window) {
             continue;
         }
@@ -644,7 +676,53 @@ pub fn compose_frame(
     let _windows_span = tracy_client::span!("compose::windows");
     #[cfg(feature = "profile-with-tracy")]
     let (mut visible_windows, mut shadow_elems) = (0u32, 0u32);
-    for window in state.stage.windows().rev().filter_map(|w| w.client()) {
+    for element in state.stage.windows().rev() {
+        let window = match element {
+            StageWindow::Client(w) => w,
+            StageWindow::Suspended(s) => {
+                // A fullscreen output shows only its fullscreen window.
+                if output_fullscreen {
+                    continue;
+                }
+                let Some(loc) = state.stage.position_of(element) else {
+                    continue;
+                };
+                let bar = state.config.decorations.title_bar_height;
+                let bw = state.default_border_width();
+                let pad = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32 + bw;
+                let size = s.size.get();
+                let bbox = Rectangle::new(
+                    Point::<i32, Logical>::from((loc.x - pad, loc.y - bar - pad)),
+                    Size::<i32, Logical>::from((size.w + 2 * pad, size.h + bar + 2 * pad)),
+                );
+                if !visible_rect.overlaps(bbox) {
+                    continue;
+                }
+                let focused = state.gated_suspended_focus() == Some(s.id);
+                let launching = state.is_suspended_launching(s.id);
+                let border_shader = state.render.border_shader.clone();
+                let shadow_shader = state.render.shadow_shader.clone();
+                suspended::push_suspended_element(
+                    renderer,
+                    s,
+                    loc,
+                    focused,
+                    launching,
+                    &state.config.decorations,
+                    state.decoration_scale,
+                    &mut state.decorations,
+                    &mut state.render.border_cache,
+                    &mut state.render.shadow_cache,
+                    border_shader.as_ref(),
+                    shadow_shader.as_ref(),
+                    camera,
+                    zoom,
+                    scale,
+                    &mut zoomed_normal,
+                );
+                continue;
+            }
+        };
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
