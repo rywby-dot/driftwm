@@ -3,7 +3,8 @@ pub mod compositor;
 pub mod layer_shell;
 pub mod xdg_shell;
 
-use crate::state::{DriftWm, FocusTarget};
+use crate::decorations::DecorationKey;
+use crate::state::{DriftWm, FocusIntent, FocusTarget};
 use driftwm::window_ext::WindowExt;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
@@ -131,7 +132,7 @@ impl SeatHandler for DriftWm {
         if let Some(focus) = focused
             && self.window_for_surface(&focus.0).is_some()
         {
-            self.window_focus = Some(focus.clone());
+            self.window_focus = Some(FocusIntent::Surface(focus.clone()));
         }
     }
 }
@@ -438,16 +439,19 @@ impl driftwm::protocols::virtual_keyboard::VirtualKeyboardBindingHandler for Dri
             return false;
         }
         // Respect the focused window's pass_keys rule, as the physical path
-        // does: a combo the window claims forwards even when bound.
-        let pass_keys = self.focused_window().and_then(|w| {
-            let app_id = w.app_id_or_class().unwrap_or_default();
-            let title = w.window_title().unwrap_or_default();
-            self.config
-                .resolve_window_rules(&app_id, &title)
-                .map(|r| r.pass_keys)
-        });
-        if pass_keys.is_some_and(|pk| pk.allows_raw(modifiers, sym)) {
-            return false;
+        // does: a combo the window claims forwards even when bound. Skipped
+        // when a suspended window holds the gated focus — no client to claim.
+        if self.gated_suspended_focus().is_none() {
+            let pass_keys = self.focused_window().and_then(|w| {
+                let app_id = w.app_id_or_class().unwrap_or_default();
+                let title = w.window_title().unwrap_or_default();
+                self.config
+                    .resolve_window_rules(&app_id, &title)
+                    .map(|r| r.pass_keys)
+            });
+            if pass_keys.is_some_and(|pk| pk.allows_raw(modifiers, sym)) {
+                return false;
+            }
         }
         let Some(action) = self.config.lookup(modifiers, sym) else {
             return false;
@@ -614,21 +618,31 @@ impl XdgDecorationHandler for DriftWm {
             let window = self.window_for_surface(&wl_surface);
             if let Some(window) = window {
                 let geo = window.geometry();
-                if geo.size.w > 0 && !self.decorations.contains_key(&wl_surface.id()) {
+                if geo.size.w > 0
+                    && !self
+                        .decorations
+                        .contains_key(&DecorationKey::Surface(wl_surface.id()))
+                {
                     let deco = crate::decorations::WindowDecoration::new(
                         geo.size.w,
                         true,
                         &self.config.decorations,
                     );
-                    self.decorations.insert(wl_surface.id(), deco);
+                    self.decorations
+                        .insert(DecorationKey::Surface(wl_surface.id()), deco);
                 }
             }
         } else if mode == Mode::ClientSide {
             // Client switching back to CSD: drop any stale SSD chrome.
             self.pending_ssd.remove(&wl_surface.id());
-            self.decorations.remove(&wl_surface.id());
-            self.render.shadow_cache.remove(&wl_surface.id());
-            self.render.border_cache.remove(&wl_surface.id());
+            self.decorations
+                .remove(&DecorationKey::Surface(wl_surface.id()));
+            self.render
+                .shadow_cache
+                .remove(&DecorationKey::Surface(wl_surface.id()));
+            self.render
+                .border_cache
+                .remove(&DecorationKey::Surface(wl_surface.id()));
         }
     }
 

@@ -98,7 +98,7 @@ fn push_layer_chrome(
         super::shaders::push_border_element(
             target,
             &mut state.render.border_cache,
-            surface_id.clone(),
+            crate::decorations::DecorationKey::Surface(surface_id.clone()),
             bs,
             inner_logical,
             corner_radius as f32,
@@ -126,7 +126,7 @@ fn push_layer_chrome(
         super::shaders::push_shadow_element(
             target,
             &mut state.render.shadow_cache,
-            surface_id,
+            crate::decorations::DecorationKey::Surface(surface_id),
             ss,
             body_logical,
             (corner_radius + border_width) as f32,

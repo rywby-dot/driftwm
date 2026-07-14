@@ -11,6 +11,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::seat::WaylandFocus;
 
+use crate::decorations::DecorationKey;
 use crate::state::DriftWm;
 use driftwm::window_ext::WindowExt;
 
@@ -644,7 +645,10 @@ fn window_visual_rect(
     let wl_surface = window.wl_surface()?;
 
     let is_fullscreen = state.stage.is_fullscreen(window);
-    let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+    let has_ssd = !is_fullscreen
+        && state
+            .decorations
+            .contains_key(&DecorationKey::Surface(wl_surface.id()));
     let applied = driftwm::config::applied_rule(&wl_surface);
     let mode = driftwm::config::effective_decoration_mode(
         applied.as_ref().and_then(|r| r.decoration.as_ref()),

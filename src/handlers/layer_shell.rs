@@ -124,7 +124,7 @@ impl WlrLayerShellHandler for DriftWm {
         // Drop any chrome cache entries this layer accumulated. No-op for
         // screen-anchored layers — they never enter these caches — and for
         // canvas layers without chrome opted in via window rule.
-        let surface_id = surface.wl_surface().id();
+        let surface_id = crate::decorations::DecorationKey::Surface(surface.wl_surface().id());
         self.render.border_cache.remove(&surface_id);
         self.render.shadow_cache.remove(&surface_id);
 

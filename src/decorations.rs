@@ -26,6 +26,31 @@ pub enum DecorationHit {
     TitleBar,
     CloseButton,
     ResizeBorder(xdg_toplevel::ResizeEdge),
+    /// Suspended-window body outside the centered label — focus + raise.
+    Body,
+    /// Suspended-window centered label — relaunch the app.
+    Label,
+}
+
+/// Key for the SSD decoration + border + shadow caches. A client window keys on
+/// its surface id; a suspended window keys on its durable id (no surface). One
+/// map serves both so the chrome lifecycle stays single-path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DecorationKey {
+    Surface(smithay::reexports::wayland_server::backend::ObjectId),
+    Suspended(crate::state::SuspendedId),
+}
+
+impl From<smithay::reexports::wayland_server::backend::ObjectId> for DecorationKey {
+    fn from(id: smithay::reexports::wayland_server::backend::ObjectId) -> Self {
+        DecorationKey::Surface(id)
+    }
+}
+
+impl From<crate::state::SuspendedId> for DecorationKey {
+    fn from(id: crate::state::SuspendedId) -> Self {
+        DecorationKey::Suspended(id)
+    }
 }
 
 impl WindowDecoration {

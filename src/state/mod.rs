@@ -15,14 +15,15 @@ mod placement;
 mod reload;
 mod render_cache;
 mod stage_window;
+mod suspended;
 mod viewport;
 pub use cluster_snapshot::ClusterResizeSnapshot;
 pub use cursor::{CursorFrames, CursorState};
 pub use errors::ErrorSource;
-pub use focus::FocusTarget;
+pub use focus::{FocusIntent, FocusTarget};
 pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
-pub use stage_window::StageWindow;
+pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
 
 use smithay::{
     desktop::{PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window},
@@ -457,10 +458,8 @@ pub struct DriftWm {
     /// snapshot when a dirty tick didn't change what subscribers see.
     pub ipc_last_event_hash: Option<u64>,
     // -- global: SSD decorations --
-    pub decorations: HashMap<
-        smithay::reexports::wayland_server::backend::ObjectId,
-        crate::decorations::WindowDecoration,
-    >,
+    pub decorations:
+        HashMap<crate::decorations::DecorationKey, crate::decorations::WindowDecoration>,
     pub pending_ssd: HashSet<smithay::reexports::wayland_server::backend::ObjectId>,
     /// Supersample factor for SSD decoration buffers: `ceil` of the largest
     /// output scale. One buffer rendered at this density serves every output
@@ -576,8 +575,9 @@ pub struct DriftWm {
 
     /// Window-level keyboard-focus intent. The actual keyboard focus is
     /// derived from this plus any higher-priority owner (session lock,
-    /// exclusive / on-demand layer surface) in `update_keyboard_focus`.
-    pub window_focus: Option<FocusTarget>,
+    /// exclusive / on-demand layer surface) in `update_keyboard_focus`. A
+    /// `Suspended` intent derives to no seat keyboard focus.
+    pub window_focus: Option<FocusIntent>,
     /// Layer surface granted keyboard focus on click via `OnDemand`
     /// interactivity. Cleared when a window takes focus or it unmaps.
     pub on_demand_layer: Option<WlSurface>,
@@ -979,7 +979,8 @@ impl DriftWm {
     /// non-toplevel surfaces: the extra lookups just miss.
     pub fn cleanup_surface_state(&mut self, surface: &WlSurface) {
         let id = surface.id();
-        self.decorations.remove(&id);
+        self.decorations
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
         self.pending_ssd.remove(&id);
         self.pending_recenter.remove(&id);
         self.stable_snap_rects.remove(&id);
@@ -989,8 +990,12 @@ impl DriftWm {
         self.pending_fullscreen.remove(surface);
         // blur_cache is keyed per output, so drop every output's entry for this surface.
         self.render.blur_cache.retain(|(_, sid), _| sid != &id);
-        self.render.shadow_cache.remove(&id);
-        self.render.border_cache.remove(&id);
+        self.render
+            .shadow_cache
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
+        self.render
+            .border_cache
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
         // capture_state keys this surface's texture/damage tracker under "cap-tl:".
         self.render
             .capture_state
@@ -1065,10 +1070,45 @@ impl DriftWm {
         target: Option<FocusTarget>,
         serial: smithay::utils::Serial,
     ) {
-        self.window_focus = target;
+        self.window_focus = target.map(FocusIntent::Surface);
         // An explicit window focus supersedes any on-demand layer focus.
         self.on_demand_layer = None;
         self.update_keyboard_focus(serial);
+    }
+
+    /// Focus a suspended window: record the intent and clear seat keyboard
+    /// focus (a suspended window has no surface to hold it). Higher-priority
+    /// owners (lock / exclusive-or-on-demand layer) still win via
+    /// `update_keyboard_focus`, which is THE GATE for every suspended-focus
+    /// behavior.
+    pub fn set_suspended_focus(&mut self, id: SuspendedId, serial: smithay::utils::Serial) {
+        self.window_focus = Some(FocusIntent::Suspended(id));
+        self.on_demand_layer = None;
+        self.update_keyboard_focus(serial);
+    }
+
+    /// The surface-focus intent, if any (`None` while a suspended window is the
+    /// intended focus).
+    pub fn window_focus_surface(&self) -> Option<&FocusTarget> {
+        match &self.window_focus {
+            Some(FocusIntent::Surface(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The suspended window that currently holds focus *under THE GATE*: intent
+    /// is `Suspended` AND no higher-priority owner holds the derived seat
+    /// keyboard focus (lock / exclusive-or-on-demand layer / keyboard grab all
+    /// surface as a non-`None` seat focus). Intent alone is not authority.
+    pub fn gated_suspended_focus(&self) -> Option<SuspendedId> {
+        let FocusIntent::Suspended(id) = self.window_focus.as_ref()? else {
+            return None;
+        };
+        let seat_focus_empty = self
+            .seat
+            .get_keyboard()
+            .is_none_or(|kb| kb.current_focus().is_none());
+        seat_focus_empty.then_some(*id)
     }
 
     /// Derive and apply the authoritative keyboard focus from the current
@@ -1131,8 +1171,10 @@ impl DriftWm {
     fn focused_window_target(&self) -> Option<FocusTarget> {
         use smithay::utils::IsAlive;
         match &self.window_focus {
-            Some(t) if t.0.alive() => Some(t.clone()),
-            Some(_) => self
+            // A suspended window holds no seat keyboard focus.
+            Some(FocusIntent::Suspended(_)) => None,
+            Some(FocusIntent::Surface(t)) if t.0.alive() => Some(t.clone()),
+            Some(FocusIntent::Surface(_)) => self
                 .stage
                 .focus_history()
                 .iter()
@@ -2074,11 +2116,29 @@ impl DriftWm {
             .cloned()
     }
 
-    pub fn window_ssd_bar<W: WaylandFocus>(&self, window: &W) -> i32 {
+    pub fn window_ssd_bar<W: WaylandFocus + WindowExt>(&self, window: &W) -> i32 {
+        // Suspended windows always draw SSD chrome — they have no surface to
+        // resolve a `decorations` entry against, so key off the element kind.
+        if window.is_suspended() {
+            return self.config.decorations.title_bar_height;
+        }
         window
             .wl_surface()
-            .filter(|s| self.decorations.contains_key(&s.id()))
+            .filter(|s| {
+                self.decorations
+                    .contains_key(&crate::decorations::DecorationKey::Surface(s.id()))
+            })
             .map_or(0, |_| self.config.decorations.title_bar_height)
+    }
+
+    /// Border width for an element with no surface to resolve a per-rule
+    /// override against — a suspended window. Uses the global default mode's
+    /// width, matching what a relaunched client would get before its rule
+    /// re-applies.
+    pub fn default_border_width(&self) -> i32 {
+        let mode =
+            driftwm::config::effective_decoration_mode(None, &self.config.decorations.default_mode);
+        driftwm::config::effective_border_width(None, mode, &self.config.decorations)
     }
 
     /// Recompute `decoration_scale` from current outputs. Call after output
@@ -2272,13 +2332,18 @@ impl DriftWm {
             }
         }
 
-        for id in self.decorations.keys() {
-            assert!(
-                self.stage
+        for key in self.decorations.keys() {
+            let present = match key {
+                crate::decorations::DecorationKey::Surface(id) => self
+                    .stage
                     .windows()
                     .any(|w| w.wl_surface().is_some_and(|s| s.id() == *id)),
-                "decoration entry for a window not on the stage"
-            );
+                crate::decorations::DecorationKey::Suspended(sid) => self
+                    .stage
+                    .windows()
+                    .any(|w| w.suspended().is_some_and(|s| s.id == *sid)),
+            };
+            assert!(present, "decoration entry for a window not on the stage");
         }
     }
 }

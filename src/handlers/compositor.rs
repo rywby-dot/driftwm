@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 
+use crate::decorations::DecorationKey;
 use crate::grabs::{ResizeState, has_left, has_top};
 use crate::handlers::layer_shell::LayerDestroyedMarker;
 use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter};
@@ -130,14 +131,17 @@ impl CompositorHandler for DriftWm {
         // leaving black artifacts where damage tracking skips redraws.
         // ARGB only — XRGB is handled in RoundedCornerElement::opaque_regions.
         // Skipped for `decoration = "none"` (pass-through promise).
-        let csd_corner_carve = !self.decorations.contains_key(&surface.id()) && {
-            let applied = driftwm::config::applied_rule(surface);
-            let mode = driftwm::config::effective_decoration_mode(
-                applied.as_ref().and_then(|r| r.decoration.as_ref()),
-                &self.config.decorations.default_mode,
-            );
-            !matches!(mode, driftwm::config::DecorationMode::None)
-        };
+        let csd_corner_carve = !self
+            .decorations
+            .contains_key(&DecorationKey::Surface(surface.id()))
+            && {
+                let applied = driftwm::config::applied_rule(surface);
+                let mode = driftwm::config::effective_decoration_mode(
+                    applied.as_ref().and_then(|r| r.decoration.as_ref()),
+                    &self.config.decorations.default_mode,
+                );
+                !matches!(mode, driftwm::config::DecorationMode::None)
+            };
         if csd_corner_carve {
             with_states(surface, |states| {
                 if states.data_map.get::<XdgToplevelSurfaceData>().is_none() {
@@ -527,14 +531,17 @@ impl CompositorHandler for DriftWm {
                         // Minimal gets shadow + corner clip in the render path;
                         // None gets nothing; Client never has a widget.
                         if effective == driftwm::config::DecorationMode::Server
-                            && !self.decorations.contains_key(&root.id())
+                            && !self
+                                .decorations
+                                .contains_key(&DecorationKey::Surface(root.id()))
                         {
                             let deco = crate::decorations::WindowDecoration::new(
                                 geo.size.w,
                                 true,
                                 &self.config.decorations,
                             );
-                            self.decorations.insert(root.id(), deco);
+                            self.decorations
+                                .insert(DecorationKey::Surface(root.id()), deco);
                         }
                         if applied.as_ref().is_some_and(|a| a.fullscreen == Some(true)) {
                             self.pending_fullscreen.entry(root.clone()).or_insert(None);

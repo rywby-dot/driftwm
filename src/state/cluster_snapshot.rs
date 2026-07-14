@@ -13,7 +13,7 @@ use smithay::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::decorations::WindowDecoration;
+use crate::decorations::{DecorationKey, WindowDecoration};
 
 use super::DriftWm;
 
@@ -195,7 +195,10 @@ impl DriftWm {
         cluster_excludes: &HashSet<WlSurface>,
     ) -> (Vec<driftwm::layout::snap::SnapRect>, i32, i32) {
         let dc = &self.config.decorations;
-        let self_bar = if self.decorations.contains_key(&primary.id()) {
+        let self_bar = if self
+            .decorations
+            .contains_key(&DecorationKey::Surface(primary.id()))
+        {
             dc.title_bar_height
         } else {
             0
@@ -466,7 +469,7 @@ impl DriftWm {
 /// widgets / unmapped / surfaceless.
 fn window_snap_rect(
     stage: &driftwm::stage::Stage<crate::state::StageWindow>,
-    decorations: &HashMap<smithay::reexports::wayland_server::backend::ObjectId, WindowDecoration>,
+    decorations: &HashMap<DecorationKey, WindowDecoration>,
     decoration_config: &driftwm::config::DecorationConfig,
     w: &Window,
 ) -> Option<(WlSurface, driftwm::layout::snap::SnapRect)> {
@@ -477,7 +480,7 @@ fn window_snap_rect(
     }
     let loc = stage.position_of(w)?;
     let size = w.geometry().size;
-    let bar = if decorations.contains_key(&surface.id()) {
+    let bar = if decorations.contains_key(&DecorationKey::Surface(surface.id())) {
         decoration_config.title_bar_height
     } else {
         0

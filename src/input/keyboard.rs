@@ -65,6 +65,11 @@ impl DriftWm {
 
         let keyboard = self.seat.get_keyboard().unwrap();
 
+        // THE GATE for suspended-focus keyboard behavior, captured before the
+        // input closure borrows the keyboard: intent is `Suspended` AND no
+        // higher-priority owner holds the derived seat focus.
+        let suspended_gate = self.gated_suspended_focus();
+
         let action = keyboard.input(
             self,
             keycode,
@@ -124,19 +129,24 @@ impl DriftWm {
                 // PassKeys::Only — forward only the listed combos; rest stay active.
                 // VT-switching above is always handled regardless.
                 // Uses live config so a config-reload takes effect immediately.
-                let focused_pass_keys = state.focused_window().and_then(|w| {
-                    let app_id = w.app_id_or_class().unwrap_or_default();
-                    let title = w.window_title().unwrap_or_default();
-                    state
-                        .config
-                        .resolve_window_rules(&app_id, &title)
-                        .map(|r| r.pass_keys)
-                });
-                if focused_pass_keys
-                    .as_ref()
-                    .is_some_and(|pk| pk.allows_raw(modifiers, sym))
-                {
-                    return FilterResult::Forward;
+                // Skip pass_keys entirely when a suspended window holds the
+                // gated focus: it has no client, so a matching rule would only
+                // Forward bindings (and Enter) into a `None` seat focus.
+                if suspended_gate.is_none() {
+                    let focused_pass_keys = state.focused_window().and_then(|w| {
+                        let app_id = w.app_id_or_class().unwrap_or_default();
+                        let title = w.window_title().unwrap_or_default();
+                        state
+                            .config
+                            .resolve_window_rules(&app_id, &title)
+                            .map(|r| r.pass_keys)
+                    });
+                    if focused_pass_keys
+                        .as_ref()
+                        .is_some_and(|pk| pk.allows_raw(modifiers, sym))
+                    {
+                        return FilterResult::Forward;
+                    }
                 }
 
                 if let Some(action) = state.config.lookup(modifiers, sym) {
@@ -151,6 +161,19 @@ impl DriftWm {
                 {
                     state.suppressed_keys.insert(keycode_u32);
                     return FilterResult::Intercept(Some(action.clone()));
+                }
+
+                // Enter over a focused suspended window relaunches it (bindings
+                // above keep precedence). Suppress the release too so the
+                // adopted client never sees a stray key-up. (The release path
+                // returns above; the `Pressed` guard makes that explicit.)
+                if let Some(id) = suspended_gate
+                    && key_state == KeyState::Pressed
+                    && is_enter_keysym(sym.raw())
+                {
+                    state.suppressed_keys.insert(keycode_u32);
+                    state.relaunch_suspended(id);
+                    return FilterResult::Intercept(None);
                 }
 
                 FilterResult::Forward
@@ -188,6 +211,11 @@ impl DriftWm {
             self.execute_action(&tap_action);
         }
     }
+}
+
+/// Return or keypad-Enter — the relaunch key for a focused suspended window.
+fn is_enter_keysym(raw: u32) -> bool {
+    raw == keysyms::KEY_Return || raw == keysyms::KEY_KP_Enter
 }
 
 /// Tells a held chord modifier apart from a real key landing on top. The

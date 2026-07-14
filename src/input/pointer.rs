@@ -189,8 +189,9 @@ impl DriftWm {
                             .active_fullscreen_window()
                             .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())))
                         {
-                            let already =
-                                self.window_focus.as_ref().is_some_and(|f| f.0 == surface.0);
+                            let already = self
+                                .window_focus_surface()
+                                .is_some_and(|f| f.0 == surface.0);
                             if !already {
                                 let focus_serial = SERIAL_COUNTER.next_serial();
                                 self.set_window_focus(Some(surface), focus_serial);

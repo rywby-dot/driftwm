@@ -55,6 +55,7 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
+use crate::decorations::DecorationKey;
 use driftwm::canvas;
 use driftwm::window_ext::WindowExt;
 
@@ -221,7 +222,10 @@ pub(crate) fn compose_capture_elements(
             continue;
         };
         let is_fullscreen = state.stage.is_fullscreen(window);
-        let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+        let has_ssd = !is_fullscreen
+            && state
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()));
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
@@ -354,7 +358,10 @@ pub(crate) fn compose_capture_elements(
 
             // Reuse the buffer the live frame rasterized (no re-`update`): keeps
             // borrows simple, text is microseconds-stale at worst.
-            if let Some(deco) = state.decorations.get(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get(&DecorationKey::Surface(wl_surface.id()))
+            {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
@@ -419,7 +426,7 @@ pub(crate) fn compose_capture_elements(
                 push_border_element(
                     target,
                     &mut state.render.border_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     inner_logical,
                     effective_corner_radius as f32,
@@ -445,7 +452,7 @@ pub(crate) fn compose_capture_elements(
                 push_shadow_element(
                     target,
                     &mut state.render.shadow_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
@@ -483,7 +490,7 @@ pub(crate) fn compose_capture_elements(
                     push_border_element(
                         target,
                         &mut state.render.border_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &border_shader,
                         geometry,
                         radius,
@@ -509,7 +516,7 @@ pub(crate) fn compose_capture_elements(
                     push_shadow_element(
                         target,
                         &mut state.render.shadow_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,
@@ -650,7 +657,10 @@ pub fn compose_frame(
             continue;
         };
         let is_fullscreen = state.stage.is_fullscreen(window);
-        let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+        let has_ssd = !is_fullscreen
+            && state
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()));
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
@@ -806,7 +816,10 @@ pub fn compose_frame(
                 .window_title()
                 .or_else(|| window.app_id_or_class())
                 .unwrap_or_default();
-            if let Some(deco) = state.decorations.get_mut(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get_mut(&DecorationKey::Surface(wl_surface.id()))
+            {
                 deco.update(
                     geom_size.w,
                     is_focused,
@@ -817,7 +830,10 @@ pub fn compose_frame(
                 );
             }
 
-            if let Some(deco) = state.decorations.get(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get(&DecorationKey::Surface(wl_surface.id()))
+            {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
@@ -884,7 +900,7 @@ pub fn compose_frame(
                 push_border_element(
                     target,
                     &mut state.render.border_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     inner_logical,
                     effective_corner_radius as f32,
@@ -914,7 +930,7 @@ pub fn compose_frame(
                 push_shadow_element(
                     target,
                     &mut state.render.shadow_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
@@ -965,7 +981,7 @@ pub fn compose_frame(
                     push_border_element(
                         target,
                         &mut state.render.border_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &border_shader,
                         geometry,
                         radius,
@@ -993,7 +1009,7 @@ pub fn compose_frame(
                     push_shadow_element(
                         target,
                         &mut state.render.shadow_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,

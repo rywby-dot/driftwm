@@ -5,54 +5,88 @@
 //! `Suspended` arms answer "no surface" and existing guards do the right
 //! thing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::desktop::Window;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Logical, Rectangle, Size};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 
+use driftwm::desktop_entry::AppIdentity;
 use driftwm::stage::StageElement;
 use driftwm::window_ext::WindowExt;
 
 /// Durable session-record key for a suspended window. Distinct from the
 /// per-process stage `ElementId`: this one survives compositor restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub struct SuspendedId(pub u64);
 
-/// The `.desktop`-resolved identity of a suspended window's application.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct AppIdentity {
-    /// Original surface app_id — the matching key.
-    pub app_id: String,
-    /// Resolved `.desktop` id — the launch key.
-    pub desktop_id: String,
-    /// `Name=` from the entry.
-    pub display_name: String,
+/// Compositor-drawn body + centered label, cached across frames so the damage
+/// tracker sees stable element ids. Rebuilt only when size, scale, or the
+/// "launching…" flag change. Lives on the `Rc<SuspendedWindow>` (interior
+/// mutability) so the render pass can refresh it without a `&mut DriftWm`
+/// borrow while the stage iterator is live.
+#[derive(Debug, Default)]
+pub struct SuspendedChrome {
+    /// Solid body fill; resized in place (only bumps its commit on change).
+    pub body: Option<SolidColorBuffer>,
+    /// Centered app-name label (transparent background, foreground text).
+    pub label: Option<MemoryRenderBuffer>,
+    /// `(body_w, body_h, scale, launching)` the label buffer was built for.
+    pub label_key: Option<(i32, i32, i32, bool)>,
+    /// Label rect in body-local logical coords, for the `Label` hit region.
+    pub label_rect: Option<Rectangle<i32, Logical>>,
 }
 
 /// A window kept on the canvas after its client is gone: size and identity,
 /// no surface. Its canvas position lives in the stage entry, like any other
 /// element's.
-#[derive(Debug)]
-#[allow(dead_code)]
 pub struct SuspendedWindow {
     pub id: SuspendedId,
     pub size: Cell<Size<i32, Logical>>,
     pub identity: AppIdentity,
     /// Kept for IPC inventories only.
     pub last_title: String,
+    pub chrome: RefCell<SuspendedChrome>,
+}
+
+impl std::fmt::Debug for SuspendedWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuspendedWindow")
+            .field("id", &self.id)
+            .field("size", &self.size.get())
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SuspendedWindow {
+    // Constructed by the suspend/relaunch flows (chunks 4-5) and the test hook;
+    // no production caller exists yet in this chunk.
+    #[allow(dead_code)]
+    pub fn new(
+        id: SuspendedId,
+        size: Size<i32, Logical>,
+        identity: AppIdentity,
+        last_title: String,
+    ) -> Self {
+        Self {
+            id,
+            size: Cell::new(size),
+            identity,
+            last_title,
+            chrome: RefCell::new(SuspendedChrome::default()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum StageWindow {
     Client(Window),
-    /// Built by the suspend/resume flow, outside this crate's own call graph.
-    #[allow(dead_code)]
     Suspended(Rc<SuspendedWindow>),
 }
 
@@ -84,6 +118,14 @@ impl StageWindow {
         match self {
             Self::Client(w) => Some(w),
             Self::Suspended(_) => None,
+        }
+    }
+
+    /// The suspended stand-in, if this element is one.
+    pub fn suspended(&self) -> Option<&Rc<SuspendedWindow>> {
+        match self {
+            Self::Suspended(s) => Some(s),
+            Self::Client(_) => None,
         }
     }
 
@@ -199,6 +241,10 @@ impl WindowExt for StageWindow {
             Self::Client(w) => WindowExt::is_widget(w),
             Self::Suspended(_) => false,
         }
+    }
+
+    fn is_suspended(&self) -> bool {
+        matches!(self, Self::Suspended(_))
     }
 }
 

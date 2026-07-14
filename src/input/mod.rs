@@ -24,7 +24,7 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::utils::Logical;
 use smithay::wayland::compositor::RegionAttributes;
 
-use crate::decorations::DecorationHit;
+use crate::decorations::{DecorationHit, DecorationKey};
 use crate::state::{DriftWm, FocusTarget};
 use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
 use driftwm::config::HotCorner;
@@ -432,7 +432,7 @@ impl DriftWm {
             let focus_surface = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
             let already_focused = focus_surface
                 .as_ref()
-                .is_some_and(|t| self.window_focus.as_ref().is_some_and(|f| f.0 == t.0));
+                .is_some_and(|t| self.window_focus_surface().is_some_and(|f| f.0 == t.0));
             if !already_focused {
                 let serial = SERIAL_COUNTER.next_serial();
                 self.set_window_focus(focus_surface, serial);
@@ -471,7 +471,7 @@ impl DriftWm {
         // re-run the focus recompute on every motion event.
         let already_focused = focus_surface
             .as_ref()
-            .is_some_and(|target| self.window_focus.as_ref().is_some_and(|f| f.0 == target.0));
+            .is_some_and(|target| self.window_focus_surface().is_some_and(|f| f.0 == target.0));
         if already_focused {
             return;
         }
@@ -1092,7 +1092,10 @@ impl DriftWm {
 
             // Then check decoration areas for this window
             let size = window.geometry().size;
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height)
                     || crate::decorations::title_bar_contains(pos, loc, size.w, bar_height)
                     || crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
@@ -1169,7 +1172,10 @@ impl DriftWm {
             }
 
             let size = window.geometry().size;
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(
                     screen_pos,
                     p.screen_pos,
@@ -1255,7 +1261,10 @@ impl DriftWm {
             let loc = p.screen_pos;
             let size = window.geometry().size;
 
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(screen_pos, loc, size.w, bar_height) {
                     return Some((window.clone(), DecorationHit::CloseButton));
                 }
@@ -1329,7 +1338,10 @@ impl DriftWm {
                 );
                 self.set_close_hovered(window, false);
             }
-            Some((ref window, DecorationHit::TitleBar)) => {
+            Some((
+                ref window,
+                DecorationHit::TitleBar | DecorationHit::Body | DecorationHit::Label,
+            )) => {
                 self.cursor.decoration_cursor = true;
                 self.cursor.cursor_status =
                     smithay::input::pointer::CursorImageStatus::default_named();
@@ -1351,7 +1363,9 @@ impl DriftWm {
         let Some(wl_surface) = window.wl_surface() else {
             return;
         };
-        if let Some(deco) = self.decorations.get_mut(&wl_surface.id())
+        if let Some(deco) = self
+            .decorations
+            .get_mut(&DecorationKey::Surface(wl_surface.id()))
             && deco.close_hovered != hovered
         {
             deco.close_hovered = hovered;
@@ -1416,7 +1430,10 @@ impl DriftWm {
             };
             let size = window.geometry().size;
 
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
                     return Some((window.clone(), DecorationHit::CloseButton));
                 }

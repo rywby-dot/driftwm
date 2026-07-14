@@ -63,8 +63,7 @@ impl XdgShellHandler for DriftWm {
         // focused window (e.g. clicked empty canvas), so auto placement falls
         // back to center.
         let prev_focus_window = self
-            .window_focus
-            .as_ref()
+            .window_focus_surface()
             .and_then(|t| self.window_for_surface(&t.0));
         self.auto_anchor_snapshot
             .insert(wl_surface.clone(), prev_focus_window);
@@ -286,7 +285,17 @@ impl XdgShellHandler for DriftWm {
                 .focus_history()
                 .first()
                 .is_some_and(|last_focused| last_focused == window);
-            if focus_on_this_toplevel || was_last_focused || no_keyboard_focus {
+            // A focused suspended window holds no seat focus and isn't in
+            // history, so `no_keyboard_focus`/`was_last_focused` would otherwise
+            // fire and steal focus from it when any unrelated window is
+            // destroyed. The user is looking at the suspended window — leave it.
+            let focus_is_suspended = matches!(
+                self.window_focus,
+                Some(crate::state::FocusIntent::Suspended(_))
+            );
+            if !focus_is_suspended
+                && (focus_on_this_toplevel || was_last_focused || no_keyboard_focus)
+            {
                 if let Some(target) = follow {
                     // Pan only if the follow target isn't already fully on
                     // screen — set_focus alone is enough when the user can

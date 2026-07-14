@@ -172,10 +172,10 @@ fn shadow_uniforms_precise(
 pub(super) fn push_shadow_element(
     target: &mut Vec<OutputRenderElements>,
     cache: &mut std::collections::HashMap<
-        smithay::reexports::wayland_server::backend::ObjectId,
+        crate::decorations::DecorationKey,
         crate::state::ShadowCacheEntry,
     >,
-    surface_id: smithay::reexports::wayland_server::backend::ObjectId,
+    surface_id: crate::decorations::DecorationKey,
     shader: &GlesPixelProgram,
     body_logical: Rectangle<f64, Logical>,
     corner_radius_logical: f32,
@@ -357,10 +357,10 @@ fn border_uniforms_precise(
 pub(super) fn push_border_element(
     target: &mut Vec<OutputRenderElements>,
     cache: &mut std::collections::HashMap<
-        smithay::reexports::wayland_server::backend::ObjectId,
+        crate::decorations::DecorationKey,
         crate::state::BorderCacheEntry,
     >,
-    surface_id: smithay::reexports::wayland_server::backend::ObjectId,
+    surface_id: crate::decorations::DecorationKey,
     shader: &GlesPixelProgram,
     inner_logical: Rectangle<f64, Logical>,
     inner_radius_logical: f32,

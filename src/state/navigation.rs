@@ -284,7 +284,17 @@ impl DriftWm {
     /// grabs included), with a focused modal standing in for its parent,
     /// since neither ever enters the focus history. `None` if focus isn't on
     /// a window. Capped against circular parents, like `topmost_modal_child`.
-    pub fn cycle_anchor(&self) -> Option<Window> {
+    pub fn cycle_anchor(&self) -> Option<super::StageWindow> {
+        // A focused suspended window is the anchor even though it holds no seat
+        // keyboard focus and never enters history: it isn't the history head, so
+        // a fresh cycle returns to the head rather than stepping past it.
+        if let Some(id) = self.gated_suspended_focus() {
+            return self
+                .stage
+                .windows()
+                .find(|w| w.suspended().is_some_and(|s| s.id == id))
+                .cloned();
+        }
         let focus = self.seat.get_keyboard()?.current_focus()?;
         let mut window = self
             .stage
@@ -304,7 +314,7 @@ impl DriftWm {
             };
             window = parent;
         }
-        Some(window)
+        Some(super::StageWindow::Client(window))
     }
 
     /// Dynamic minimum zoom based on the current window layout.
