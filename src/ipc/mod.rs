@@ -12,7 +12,7 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::decorations::DecorationKey;
-use crate::state::DriftWm;
+use crate::state::{DriftWm, SuspendedId};
 use driftwm::window_ext::WindowExt;
 
 pub mod client;
@@ -374,15 +374,71 @@ fn window_by_selector(
     }
 }
 
+/// Resolve a selector to a suspended window's [`SuspendedId`], if it names one.
+/// `None` selector resolves to the gated-focused suspended window. Id matches
+/// the stage `ElementId` (the IPC handle, stable across suspend/relaunch);
+/// AppId is a case-insensitive substring match on the original app_id.
+fn suspended_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Option<SuspendedId> {
+    match selector {
+        None => state.gated_suspended_focus(),
+        Some(WindowSelector::Id(n)) => state
+            .stage
+            .window_by_id(driftwm::stage::ElementId(*n))
+            .and_then(|w| w.suspended())
+            .map(|s| s.id),
+        Some(WindowSelector::AppId(s)) => {
+            let needle = s.to_lowercase();
+            state
+                .stage
+                .windows()
+                .filter_map(|w| w.suspended())
+                .find(|s| s.identity.app_id.to_lowercase().contains(&needle))
+                .map(|s| s.id)
+        }
+    }
+}
+
+/// IPC handle + app_id for a suspended window (its stage `ElementId`), for the
+/// `Focused` reply.
+fn suspended_focused_info(state: &DriftWm, id: SuspendedId) -> Option<protocol::FocusedWindow> {
+    let element = state
+        .stage
+        .windows()
+        .find(|w| w.suspended().is_some_and(|s| s.id == id))?;
+    Some(protocol::FocusedWindow {
+        id: state.stage.id_of(element)?.0,
+        app_id: element.app_id_or_class(),
+    })
+}
+
 fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let Some(selector) = arg else {
-        return Ok(Response::Focused(
-            state
-                .focused_window()
-                .map(|w| focused_window_info(state, &w)),
-        ));
+        // Report the focused window, preferring a live client and falling back
+        // to a focused suspended stand-in.
+        if let Some(w) = state.focused_window() {
+            return Ok(Response::Focused(Some(focused_window_info(state, &w))));
+        }
+        let info = state
+            .gated_suspended_focus()
+            .and_then(|id| suspended_focused_info(state, id));
+        return Ok(Response::Focused(info));
     };
-    let window = window_by_selector(state, Some(&selector))?;
+    // A live client wins over a same-named suspended stand-in; a selector that
+    // resolves only to a stand-in navigates to it (focus + raise + pan).
+    let window = match window_by_selector(state, Some(&selector)) {
+        Ok(window) => window,
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, Some(&selector)) else {
+                return Err(e);
+            };
+            let info = suspended_focused_info(state, id);
+            state.navigate_to_suspended(id);
+            return Ok(Response::Focused(info));
+        }
+    };
     // Widgets are only reachable by id (the app_id search skips them) and can't
     // take focus.
     if window.is_widget() {
@@ -423,7 +479,33 @@ fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
 }
 
 fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
-    let window = window_by_selector(state, window.as_ref())?;
+    // A live client wins; a selector resolving only to a suspended stand-in
+    // reads or sets its canvas position in place (no client to reconfigure).
+    let window = match window_by_selector(state, window.as_ref()) {
+        Ok(window) => window,
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, window.as_ref()) else {
+                return Err(e);
+            };
+            let s = state
+                .find_suspended(id)
+                .ok_or_else(|| "suspended window is gone".to_string())?;
+            let element = crate::state::StageWindow::Suspended(s.clone());
+            let size = s.size.get();
+            return match to {
+                None => {
+                    let loc = state.stage.position_of(&element).unwrap_or_default();
+                    let (x, y) = driftwm::canvas::internal_to_rule(loc, size);
+                    Ok(Response::Position { x, y })
+                }
+                Some((x, y)) => {
+                    let loc = driftwm::canvas::rule_to_internal(x, y, size);
+                    state.stage.set_position(&element, loc);
+                    Ok(Response::Position { x, y })
+                }
+            };
+        }
+    };
     let size = window.geometry().size;
     match to {
         None => {
@@ -487,9 +569,24 @@ fn cmd_opacity(window: Option<WindowSelector>, value: Option<f64>, state: &mut D
 }
 
 fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
-    let window = window_by_selector(state, sel.as_ref())?;
-    window.send_close();
-    Ok(Response::Ok)
+    match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => {
+            // An explicit `msg close` is a real close — it must not convert
+            // under `suspend_on_close`.
+            state.mark_real_close(&window);
+            window.send_close();
+            Ok(Response::Ok)
+        }
+        // No live client — a suspended stand-in has none to close, so `msg
+        // close` dismisses it.
+        Err(e) => match suspended_by_selector(state, sel.as_ref()) {
+            Some(id) => {
+                state.dismiss_suspended(id);
+                Ok(Response::Ok)
+            }
+            None => Err(e),
+        },
+    }
 }
 
 /// Capture a screenshot synchronously to `path`.

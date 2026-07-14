@@ -97,8 +97,32 @@ impl DriftWm {
     /// both the state file and the IPC `state` response, so the two can't drift.
     pub fn window_inventory(&self) -> Vec<WindowInfo> {
         let focused = self.focused_window();
+        let focused_suspended = self.gated_suspended_focus();
         let mut windows: Vec<WindowInfo> = Vec::new();
         for window in self.stage.windows() {
+            // Suspended stand-ins have no surface; report them explicitly (they
+            // live on the canvas like any window, are `msg`-selectable by id,
+            // and a focused one is reported like a focused client).
+            if let Some(s) = window.suspended() {
+                let loc = self.stage.position_of(window).unwrap_or_default();
+                let size = s.size.get();
+                let (rx, ry) = driftwm::canvas::internal_to_rule(loc, size);
+                windows.push(WindowInfo {
+                    id: self
+                        .stage
+                        .id_of(window)
+                        .expect("window from stage.windows() has an id")
+                        .0,
+                    app_id: s.identity.app_id.clone(),
+                    title: s.last_title.clone(),
+                    position: [rx, ry],
+                    size: [size.w, size.h],
+                    is_focused: focused_suspended == Some(s.id),
+                    is_widget: false,
+                    suspended: true,
+                });
+                continue;
+            }
             let Some(surface) = window.wl_surface() else {
                 continue;
             };
@@ -130,6 +154,7 @@ impl DriftWm {
                 size: [size.w, size.h],
                 is_focused: focused.as_ref().is_some_and(|f| window == f),
                 is_widget: window.is_widget(),
+                suspended: false,
             });
         }
         // Focused window first, so consumers can read windows[0] as the focused one.
@@ -570,6 +595,7 @@ mod tests {
             size: [100, 100],
             is_focused: false,
             is_widget: false,
+            suspended: false,
         }
     }
 

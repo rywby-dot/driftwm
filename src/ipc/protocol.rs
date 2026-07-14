@@ -208,6 +208,11 @@ pub struct WindowInfo {
     pub size: [i32; 2],
     pub is_focused: bool,
     pub is_widget: bool,
+    /// A compositor-drawn stand-in for a suspended window (no live client).
+    /// `position`/`size` describe its canvas rect; the `id` selector focuses,
+    /// moves, or dismisses it.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 /// A fullscreen window in the IPC `state` reply — one per fullscreened output.
@@ -411,6 +416,7 @@ mod tests {
                 size: [640, 480],
                 is_focused: true,
                 is_widget: false,
+                suspended: false,
             }],
             fullscreen: vec![OutputFullscreen {
                 id: 2,
