@@ -1,5 +1,6 @@
 pub mod canvas;
 pub mod config;
+pub mod desktop_entry;
 pub mod layout;
 pub mod protocols;
 pub mod stage;
