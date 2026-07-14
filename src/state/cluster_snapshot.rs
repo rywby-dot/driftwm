@@ -252,6 +252,39 @@ impl DriftWm {
             .map(|(_, r)| r)
     }
 
+    /// Where an element's visible frame (border + SSD title bar + content) sits
+    /// on the canvas — the *navigation* rect, unlike surface-gated
+    /// [`Self::snap_rect_for`]. Includes suspended windows (they have no surface
+    /// but always draw SSD chrome; border falls back to the global default).
+    /// `None` for pinned / fullscreen (screen-space) and widgets (no viewport
+    /// relation).
+    pub fn visual_frame_rect(
+        &self,
+        w: &crate::state::StageWindow,
+    ) -> Option<driftwm::layout::snap::SnapRect> {
+        if self.is_pinned(w) || self.is_window_fullscreen(w) {
+            return None;
+        }
+        match w {
+            crate::state::StageWindow::Client(c) => {
+                window_snap_rect(&self.stage, &self.decorations, &self.config.decorations, c)
+                    .map(|(_, r)| r)
+            }
+            crate::state::StageWindow::Suspended(s) => {
+                let loc = self.stage.position_of(w)?;
+                let size = s.size.get();
+                let bar = self.config.decorations.title_bar_height as f64;
+                let bw = self.default_border_width() as f64;
+                Some(driftwm::layout::snap::SnapRect {
+                    x_low: loc.x as f64 - bw,
+                    x_high: loc.x as f64 + size.w as f64 + bw,
+                    y_low: loc.y as f64 - bar - bw,
+                    y_high: loc.y as f64 + size.h as f64 + bw,
+                })
+            }
+        }
+    }
+
     /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call on
     /// settled events: initial map, grab end, post-unfit recenter, fit/
     /// unfit-snapped cluster members. Fit/unfit primaries are cached by

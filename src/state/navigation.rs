@@ -368,8 +368,14 @@ impl DriftWm {
     /// output's usable area at the current camera and zoom? Returns `false`
     /// for widgets and unmapped windows — they have no meaningful viewport
     /// relation, so callers treat them as "needs movement" and skip them.
-    pub fn window_fully_in_viewport(&self, w: &Window) -> bool {
-        let Some(rect) = self.snap_rect_for(w) else {
+    pub fn window_fully_in_viewport<Q>(&self, w: &Q) -> bool
+    where
+        super::StageWindow: PartialEq<Q>,
+    {
+        let Some(elem) = self.stage.windows().find(|e| **e == *w) else {
+            return false;
+        };
+        let Some(rect) = self.visual_frame_rect(elem) else {
             return false;
         };
         let camera = self.camera();
@@ -395,8 +401,14 @@ impl DriftWm {
     /// Does the window's snap rect intersect `output`'s usable area at that
     /// output's camera and zoom? Partial overlap counts as visible. Returns
     /// `false` for unmapped windows and widgets (no snap rect).
-    pub fn window_intersects_viewport_on(&self, w: &Window, output: &Output) -> bool {
-        let Some(rect) = self.snap_rect_for(w) else {
+    pub fn window_intersects_viewport_on<Q>(&self, w: &Q, output: &Output) -> bool
+    where
+        super::StageWindow: PartialEq<Q>,
+    {
+        let Some(elem) = self.stage.windows().find(|e| **e == *w) else {
+            return false;
+        };
+        let Some(rect) = self.visual_frame_rect(elem) else {
             return false;
         };
         let (camera, zoom) = {
@@ -434,7 +446,7 @@ impl DriftWm {
         self.stage
             .windows()
             .filter_map(|w| w.client())
-            .filter(|w| *w != exclude && self.window_intersects_viewport_on(w, output))
+            .filter(|w| *w != exclude && self.window_intersects_viewport_on(*w, output))
             .min_by(|a, b| {
                 let dist = |w: &Window| {
                     self.window_visual_center(w)
