@@ -72,6 +72,9 @@
               allowBuiltinFetchGit = true;
             };
 
+            # Running the suite is CI's job — don't make every user's rebuild pay for it.
+            doCheck = false;
+
             nativeBuildInputs = nativeBuildInputsFor pkgs;
             buildInputs = buildInputsFor pkgs;
 

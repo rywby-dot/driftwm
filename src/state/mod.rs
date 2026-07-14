@@ -44,7 +44,7 @@ use smithay::{
     },
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Instant;
 
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -353,13 +353,11 @@ pub fn output_state(output: &Output) -> MutexGuard<'_, OutputState> {
         .get::<Mutex<OutputState>>()
         .expect("OutputState not initialized on output");
     // Only the main thread locks this, so contention can only be a re-entrant
-    // lock — fail loudly in dev builds instead of deadlocking.
-    if cfg!(debug_assertions) {
-        mutex
-            .try_lock()
-            .expect("output_state locked re-entrantly — this deadlocks in release builds")
-    } else {
-        mutex.lock().expect("OutputState mutex poisoned")
+    // lock — fail loudly instead of freezing the session on a deadlock.
+    match mutex.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => panic!("output_state locked re-entrantly"),
+        Err(TryLockError::Poisoned(err)) => panic!("OutputState mutex poisoned: {err}"),
     }
 }
 
