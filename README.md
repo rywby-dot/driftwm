@@ -7,7 +7,7 @@
 </p>
 <p align="center"><sub>Primary repository: <a href="https://github.com/malbiruk/driftwm">GitHub</a> · Mirror: <a href="https://codeberg.org/malbiruk/driftwm">Codeberg</a></sub></p>
 
-https://github.com/user-attachments/assets/ce868ecc-8542-4e4c-9414-e468fc4e6ff6
+https://github.com/user-attachments/assets/155511a6-0a6e-4681-9061-21be1e93e02a
 
 Traditional window managers arrange windows to fit your screen. Stacking compositors do so by piling windows on top of each other; tiling compositors do so by squeezing them to fit and utilizing workspaces.
 
@@ -24,7 +24,7 @@ Built on [smithay](https://github.com/Smithay/smithay). Inspired by [vxwm](https
 
 ### Pan & zoom
 
-https://github.com/user-attachments/assets/fbc9004a-f155-41b9-b03b-054521961d02
+https://github.com/user-attachments/assets/97c2ff83-acfa-40ec-ae02-b16ad9a47318
 
 Infinite 2D canvas with viewport panning, zoom, and scroll momentum. A quick
 flick carries the viewport smoothly until friction stops it.
@@ -47,7 +47,7 @@ flick carries the viewport smoothly until friction stops it.
 
 ### Window navigation
 
-https://github.com/user-attachments/assets/3920d24b-cde0-4222-a321-b94649b42ce7
+https://github.com/user-attachments/assets/ab80b545-817d-4d9f-beea-d332b3bb3dfa
 
 Jump to the nearest window in any direction via cone search. MRU cycling
 (`Alt-Tab`) with hold-to-commit. Zoom-to-fit shows all windows at once.
@@ -74,7 +74,7 @@ trackpads.
 
 ### Snapping
 
-https://github.com/user-attachments/assets/cfe1970a-ad30-4eca-8240-aea9f3d0390a
+https://github.com/user-attachments/assets/6bfc3458-664f-4746-a176-18f40337d94d
 
 Move window with 3-finger doubletap-swipe or `Alt` + drag. Resize with `Alt` + 3-finger swipe. Snapping kicks in as edges approach each other. Drag past the viewport edge and the canvas auto-pans.
 
@@ -136,7 +136,7 @@ trackpad.
 
 ### Infinite background
 
-https://github.com/user-attachments/assets/29e4fb39-2626-4a42-94a1-4ef9512950da
+https://github.com/user-attachments/assets/b1581182-5e21-45c8-8559-99ab54bb5093
 
 https://github.com/user-attachments/assets/fb1cd5a1-242c-45d7-b302-952a15aaa24d
 
@@ -167,7 +167,7 @@ path = "~/.config/driftwm/bg.glsl"
 
 ### Window rules
 
-https://github.com/user-attachments/assets/425f3824-2914-47ba-853a-d7e87ce33b70
+https://github.com/user-attachments/assets/e30e3821-1e84-4f6e-be60-adcb0ee58d3c
 
 Match windows by `app_id` and/or `title` (glob patterns) and control position,
 size, decorations, blur, opacity, key pass-through, and placement — fields
@@ -214,7 +214,7 @@ windows teleport to the target viewport's canvas position.
 
 ### Panels, docks & taskbars
 
-https://github.com/user-attachments/assets/2d6c540d-4658-4a65-ac22-3547046dcb01
+https://github.com/user-attachments/assets/31c235e6-baae-4843-bb43-aca749e41f04
 
 Layer shell surfaces (waybar, fuzzel, mako) work as expected. Foreign toplevel
 management means your dock/taskbar shows all windows — click one and the
