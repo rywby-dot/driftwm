@@ -3,6 +3,7 @@ pub mod config;
 pub mod desktop_entry;
 pub mod layout;
 pub mod protocols;
+pub mod session;
 pub mod stage;
 pub mod text;
 pub mod window_ext;
