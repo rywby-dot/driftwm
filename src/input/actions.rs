@@ -397,10 +397,39 @@ impl DriftWm {
                 }
             }
             Action::SendToOutput(dir) => {
-                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w))
-                    && let Some(from_output) = self.output_for_window(&window)
-                    && let Some(target_output) = self.output_in_direction(&from_output, dir)
-                {
+                let Some(window) = self.focused_window().filter(|w| !w.is_widget()) else {
+                    return;
+                };
+                let fullscreen = self.is_window_fullscreen(&window);
+                // A fullscreen window is parked at its output's camera origin, so
+                // the geometric output_for_window can mis-resolve it to another
+                // monitor whose independent camera shows the same canvas region —
+                // resolve it from the fullscreen entry instead. output_for_window
+                // already short-circuits to the pin site's output for a pin.
+                let from_output = if fullscreen {
+                    window
+                        .wl_surface()
+                        .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                } else {
+                    self.output_for_window(&window)
+                };
+                let Some(from_output) = from_output else {
+                    return;
+                };
+                let Some(target_output) = self.output_in_direction(&from_output, dir) else {
+                    return;
+                };
+
+                if fullscreen {
+                    // enter_fullscreen tears down the old output's fullscreen
+                    // (restoring its camera/zoom and any suspended pin) and
+                    // sets focus itself.
+                    self.enter_fullscreen(&window, Some(target_output));
+                } else if self.is_pinned(&window) {
+                    // Pinned windows live outside the MRU history and are
+                    // already focused.
+                    self.send_pinned_to_output(&window, &target_output);
+                } else {
                     // Compute target output's usable area center in canvas coords
                     let (target_cam, target_zoom) = {
                         let os = crate::state::output_state(&target_output);

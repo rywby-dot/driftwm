@@ -101,6 +101,7 @@ impl Action {
                 | Action::ReloadConfig
                 | Action::SwitchLayout(_)
                 | Action::ToggleCursorPan
+                | Action::SendToOutput(_)
         )
     }
 
@@ -1082,6 +1083,7 @@ mod tests {
         assert!(Action::ReloadConfig.runs_during_fullscreen());
         assert!(Action::SwitchLayout(LayoutSwitch::Next).runs_during_fullscreen());
         assert!(Action::ToggleCursorPan.runs_during_fullscreen());
+        assert!(Action::SendToOutput(Direction::Right).runs_during_fullscreen());
         assert!(!Action::CloseWindow.runs_during_fullscreen());
         assert!(!Action::ZoomIn.runs_during_fullscreen());
         assert!(!Action::CenterNearest(Direction::Up).runs_during_fullscreen());

@@ -1719,6 +1719,35 @@ impl DriftWm {
         }
     }
 
+    /// Move a screen-pinned window to `target`, keeping its on-screen position
+    /// (clamped into the target output's bounds) and rebinding the pin to it.
+    /// No-op if the window isn't pinned or is already on `target`.
+    pub(crate) fn send_pinned_to_output(&mut self, window: &Window, target: &Output) {
+        let Some(mut site) = self.stage.pin_of(window).cloned() else {
+            return;
+        };
+        if site.output == target.name() {
+            return;
+        }
+        let target_size = output_logical_size(target);
+        let win_size = window.geometry().size;
+        site.output = target.name();
+        site.screen_pos.x = site
+            .screen_pos
+            .x
+            .clamp(0, (target_size.w - win_size.w).max(0));
+        site.screen_pos.y = site
+            .screen_pos
+            .y
+            .clamp(0, (target_size.h - win_size.h).max(0));
+        self.stage.set_pin(window, site);
+        // Re-anchor the Space loc to the new output now — `sync_pinned_locs`
+        // only fires on camera changes, which this rebind doesn't trigger, so
+        // without it the window keeps its stale (off the new output) canvas loc
+        // and gets culled until the next pan.
+        self.sync_pinned_locs();
+    }
+
     /// Reassign every pinned window whose output is no longer a live space
     /// output (it was unplugged) to `to`, clamping `screen_pos` into the new
     /// output's bounds. Covers both the multi-output unplug (output already

@@ -24,6 +24,7 @@ mod focus_timing;
 mod hotplug;
 mod popups;
 mod real_clients;
+mod send_to_output;
 mod soak;
 mod window_opening;
 mod window_rules;

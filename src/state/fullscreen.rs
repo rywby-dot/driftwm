@@ -8,18 +8,38 @@ use super::{DriftWm, FocusTarget};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
-    /// Resolve which output a window should fullscreen onto: a window-rule
-    /// `output` wins, then the client-requested output, then the active output.
-    /// Unknown output names fall through to the next choice.
+    /// Resolve which output a window should fullscreen onto. An already-fullscreen
+    /// window re-asserting with no requested output stays on its current output;
+    /// otherwise a window-rule `output` wins, then the client-requested output,
+    /// then the window's pin site output, then the active output. Unknown output
+    /// names fall through to the next choice.
+    ///
+    /// Fullscreen exit re-pins a pinned window to its pin output, so resolving
+    /// there on entry keeps enter/exit symmetric.
     pub fn resolve_fullscreen_output(
         &self,
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         client_output: Option<smithay::output::Output>,
     ) -> Option<smithay::output::Output> {
+        // Toolkits re-assert fullscreen (no requested output) on focus changes;
+        // an already-fullscreen window must stay put. Falling through would
+        // re-resolve down the chain and yank it to the pin or active (cursor)
+        // output, undoing a send-to-output move.
+        if client_output.is_none()
+            && let Some(current) = self.find_fullscreen_output_for_surface(surface)
+        {
+            return Some(current);
+        }
+
         driftwm::config::applied_rule(surface)
             .and_then(|r| r.output)
             .and_then(|name| self.space.outputs().find(|o| o.name() == name).cloned())
             .or(client_output)
+            .or_else(|| {
+                self.window_for_surface(surface)
+                    .and_then(|w| self.stage.pin_of(&w).map(|site| site.output.clone()))
+                    .and_then(|name| self.output_by_name(&name))
+            })
             .or_else(|| self.active_output())
     }
 
