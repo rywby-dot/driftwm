@@ -226,12 +226,6 @@ pub struct DndIcon {
     pub offset: Point<i32, Logical>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PendingMode {
-    pub intent: ModeIntent,
-    pub retry_count: u8,
-}
-
 /// What mode the user (config or wlr-output-management client) asked for.
 /// Resolved to a concrete `drm::control::Mode` in the udev backend.
 #[derive(Clone, Debug)]
@@ -651,7 +645,7 @@ pub struct DriftWm {
     /// Mode-change requests from wlr-output-management Apply or config reload.
     /// Drained by the udev render loop, which resolves each intent to a
     /// concrete `control::Mode`. Keyed by output name; backend resolves CRTCs.
-    pub pending_mode_changes: HashMap<String, PendingMode>,
+    pub pending_mode_changes: HashMap<String, ModeIntent>,
 
     pub satellite: Option<crate::xwayland::Satellite>,
 

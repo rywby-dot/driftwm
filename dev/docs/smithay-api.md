@@ -234,6 +234,18 @@ let images = xcursor::parser::parse_xcursor(&std::fs::read(path)?)?;
 // Image { width, height, xhot, yhot, pixels_rgba: Vec<u8>, pixels_argb: Vec<u8>, size, delay }
 ```
 
+## DrmCompositor Mode Changes
+
+### `DrmCompositor::use_mode(mode)` is safe with a page flip in flight
+Source: `src/backend/drm/compositor/mod.rs` (`use_mode`), `src/backend/drm/surface/atomic.rs` (`AtomicDrmSurface::use_mode`); git checkout under `~/.cargo/git/checkouts/smithay-*/`.
+
+`use_mode` does **not** modeset immediately:
+1. `AtomicDrmSurface::use_mode` creates a mode property blob + a throwaway test buffer, submits a `TEST_ONLY` atomic commit to validate, and on success just stores the mode in the surface's `pending` state.
+2. `DrmCompositor::use_mode` then resizes the swapchain to the new dimensions.
+3. The **real** modeset lands with the next frame commit (`queue_frame` picks up the pending state, commits with `ALLOW_MODESET`).
+
+So it never races an in-flight page flip — the kernel serializes atomic commits per CRTC, and the pending frame's fb holds its own reference. niri calls `use_mode` unconditionally at config-apply time with no deferral (`tty.rs`, `on_output_config_changed`) and only handles the `Err`. Deferring/queueing around `frames_pending` before calling it is unnecessary.
+
 ## Gotchas
 
 ### Compositor / Protocol Essentials

@@ -962,13 +962,8 @@ impl OutputManagementHandler for DriftWm {
         // Phase 2: commit. Validation already succeeded for every head.
         for s in staged {
             if let Some(intent) = s.mode_intent {
-                self.pending_mode_changes.insert(
-                    s.output_name.clone(),
-                    crate::state::PendingMode {
-                        intent,
-                        retry_count: 0,
-                    },
-                );
+                self.pending_mode_changes
+                    .insert(s.output_name.clone(), intent);
             }
 
             if let Some(pos) = s.new_position {

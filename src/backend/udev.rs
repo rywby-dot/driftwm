@@ -1529,37 +1529,21 @@ fn queue_estimated_vblank_timer(data: &mut DriftWm, output: &Output, crtc: crtc:
 use driftwm::protocols::output_management::{ModeInfo, OutputHeadState};
 
 /// Drain `data.pending_mode_changes`, applying each via `DrmCompositor::use_mode`.
-/// Entries for outputs with a frame in flight are deferred (bounded retries) so
-/// we don't modeset on top of an in-progress page flip.
+/// Safe with a page flip in flight: `use_mode` only validates (TEST_ONLY commit)
+/// and stages the mode; the real modeset lands with the next frame commit.
 fn apply_pending_mode_changes(
     drm: &DrmDevice,
     surfaces: &mut HashMap<crtc::Handle, SurfaceData>,
     data: &mut DriftWm,
 ) {
     use smithay::reexports::drm::control::Device as ControlDevice;
-    const MAX_RETRIES: u8 = 3;
 
     let pending = std::mem::take(&mut data.pending_mode_changes);
-    for (name, mut pm) in pending {
-        let Some((crtc, surface)) = surfaces.iter_mut().find(|(_, s)| s.output.name() == name)
-        else {
+    for (name, intent) in pending {
+        let Some((_, surface)) = surfaces.iter_mut().find(|(_, s)| s.output.name() == name) else {
             tracing::warn!("Mode change for '{name}' dropped: output no longer present");
             continue;
         };
-
-        // Defer if a page flip is in flight on this CRTC — modesetting on top
-        // of pending frames is undefined behavior.
-        if data.frames_pending.contains(crtc) {
-            if pm.retry_count >= MAX_RETRIES {
-                tracing::error!(
-                    "Mode change for '{name}' dropped after {MAX_RETRIES} deferrals (frames stuck pending)"
-                );
-                continue;
-            }
-            pm.retry_count += 1;
-            data.pending_mode_changes.insert(name, pm);
-            continue;
-        }
 
         let connector = match ControlDevice::get_connector(drm, surface.connector, false) {
             Ok(c) => c,
@@ -1569,11 +1553,8 @@ fn apply_pending_mode_changes(
             }
         };
 
-        let Some(mode) = resolve_pending_mode(&pm.intent, &connector, &name) else {
-            tracing::error!(
-                "Mode change for '{name}': could not resolve intent {:?}",
-                pm.intent
-            );
+        let Some(mode) = resolve_pending_mode(&intent, &connector, &name) else {
+            tracing::error!("Mode change for '{name}': could not resolve intent {intent:?}");
             continue;
         };
 

@@ -239,13 +239,7 @@ impl DriftWm {
                     _ => None,
                 };
                 if let Some(intent) = intent {
-                    self.pending_mode_changes.insert(
-                        name.clone(),
-                        crate::state::PendingMode {
-                            intent,
-                            retry_count: 0,
-                        },
-                    );
+                    self.pending_mode_changes.insert(name.clone(), intent);
                 }
             }
 
