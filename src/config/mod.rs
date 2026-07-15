@@ -129,6 +129,10 @@ pub struct Config {
     /// leaves a suspended window behind instead of destroying the window.
     /// Overridable per window rule. Read at close time, so hot-reload applies.
     pub suspend_on_close: bool,
+    /// When true, eligible windows are serialized on graceful shutdown (keybind
+    /// quit or SIGTERM/SIGHUP) and materialized as suspended windows on the next
+    /// launch. Read at use, so hot-reload applies.
+    pub restore_session: bool,
     /// Multiplier for trackpad scroll and gesture pan deltas. 1.0 = raw trackpad.
     pub trackpad_speed: f64,
     /// Multiplier for mouse drag pan (Mod+LMB or LMB on canvas). 1.0 = direct.
@@ -911,6 +915,7 @@ impl Config {
             mod_key,
             focus_follows_mouse: raw.focus_follows_mouse.unwrap_or(false),
             suspend_on_close: raw.suspend_on_close.unwrap_or(false),
+            restore_session: raw.restore_session.unwrap_or(false),
             trackpad_speed,
             mouse_speed,
             touch_speed,

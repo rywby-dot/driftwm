@@ -10,6 +10,9 @@ pub(super) struct ConfigFile {
     /// Convert client-initiated closes into suspended windows instead of
     /// destroying them. Per-window overridable via a `suspend_on_close` rule.
     pub suspend_on_close: Option<bool>,
+    /// Save eligible windows on graceful shutdown and bring them back as
+    /// suspended windows on the next launch.
+    pub restore_session: Option<bool>,
     pub input: InputConfig,
     pub cursor: CursorConfig,
     pub navigation: NavigationConfig,

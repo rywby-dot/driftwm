@@ -26,6 +26,13 @@
 # # `suspend_on_close` window rule.
 # suspend_on_close = false
 
+# # Restore your canvas after a restart: on quit or logout, windows that
+# # resolve to a .desktop entry are saved and come back as suspended windows
+# # on the next launch (nothing auto-launches). Suspended windows are saved
+# # to ~/.local/state/driftwm/session.json regardless of this setting; it
+# # only controls whether still-open windows are saved too.
+# restore_session = false
+
 # # Where new windows spawn when no window rule positions them:
 # #   "center"  — viewport center; camera animates to the new window.
 # #   "cursor"           — centered on the cursor (clamped to the active output's
