@@ -30,6 +30,7 @@ mod opacity;
 mod popups;
 mod real_clients;
 mod send_to_output;
+mod session_restore;
 mod soak;
 mod suspend_flows;
 mod suspended;
