@@ -406,7 +406,6 @@ impl State {
     pub fn create_popup(&mut self, parent: &WlSurface) -> &mut Popup {
         let compositor = self.compositor.as_ref().unwrap();
         let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
-        let seat = self.seat.clone().unwrap();
 
         let parent_xdg = self
             .windows
@@ -427,29 +426,12 @@ impl State {
         let xdg_popup = xdg_surface.get_popup(Some(&parent_xdg), &positioner, &self.qh, ());
         positioner.destroy();
 
-        let popup = Popup {
-            qh: self.qh.clone(),
-            spbm: self.spbm.clone().unwrap(),
-            seat,
-
-            surface,
-            xdg_surface,
-            xdg_popup,
-            pending_configure: PopupConfigure::default(),
-            configures_received: Vec::new(),
-            popup_done: false,
-
-            configures_looked_at: 0,
-        };
-
-        self.popups.push(popup);
-        self.popups.last_mut().unwrap()
+        self.finish_popup(surface, xdg_surface, xdg_popup)
     }
 
     pub fn create_layer_popup(&mut self, parent: &WlSurface) -> &mut Popup {
         let compositor = self.compositor.as_ref().unwrap();
         let xdg_wm_base = self.xdg_wm_base.as_ref().unwrap();
-        let seat = self.seat.clone().unwrap();
 
         let parent_layer = self
             .layers
@@ -472,10 +454,19 @@ impl State {
         positioner.destroy();
         parent_layer.get_popup(&xdg_popup);
 
+        self.finish_popup(surface, xdg_surface, xdg_popup)
+    }
+
+    fn finish_popup(
+        &mut self,
+        surface: WlSurface,
+        xdg_surface: XdgSurface,
+        xdg_popup: XdgPopup,
+    ) -> &mut Popup {
         let popup = Popup {
             qh: self.qh.clone(),
             spbm: self.spbm.clone().unwrap(),
-            seat,
+            seat: self.seat.clone().unwrap(),
 
             surface,
             xdg_surface,

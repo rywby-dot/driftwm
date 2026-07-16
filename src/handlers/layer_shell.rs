@@ -160,12 +160,13 @@ impl WlrLayerShellHandler for DriftWm {
     }
 
     fn new_popup(&mut self, _parent: LayerSurface, popup: PopupSurface) {
+        // No track_popup here: the xdg new_popup handler already queued this
+        // popup (parentless at that point) into the manager's unmapped list,
+        // and its first commit maps it — with the parent this request just
+        // set. Tracking again would double-register it in the popup tree and
+        // every layer popup would render twice.
         let popup = PopupKind::Xdg(popup);
         self.unconstrain_popup(&popup);
-
-        if let Err(err) = self.popups.track_popup(popup) {
-            tracing::warn!("error tracking layer popup: {err}");
-        }
     }
 }
 

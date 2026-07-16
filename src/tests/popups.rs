@@ -179,7 +179,7 @@ fn overhanging_popup_keeps_parent_hit_testable() {
     // outside the parent's own (popup-less) bbox.
     #[allow(clippy::disallowed_methods)] // the popup-less box is the point here
     let mut parent_only_bbox = window.bbox();
-    parent_only_bbox.loc += win_pos;
+    parent_only_bbox.loc += win_pos - window.geometry().loc;
     assert!(
         !parent_only_bbox.to_f64().contains(overhang),
         "test setup bug: overhang point {overhang:?} is inside the parent's own bbox {parent_only_bbox:?}"
@@ -212,7 +212,7 @@ fn overhanging_popup_keeps_parent_hit_testable() {
 /// `canvas_layer_under` must find that popup even where it overhangs past
 /// the widget's own bbox.
 #[test]
-fn overhanging_popup_keeps_layer_widget_hit_testable() {
+fn overhanging_popup_on_layer_widget_is_hit_testable() {
     let mut f = Fixture::with_config(config(
         r#"
 [[window_rules]]
@@ -274,6 +274,11 @@ position = [0, 0]
 
     let widget_root = f.state().canvas_layers[0].surface.wl_surface().clone();
     let popup_server_surface = first_popup_surface(&widget_root).unwrap();
+    assert_eq!(
+        popups_tracked_on(&widget_root),
+        1,
+        "a layer-parented popup must be tracked exactly once — a duplicate tree entry renders it twice"
+    );
 
     let hit = f.state().canvas_layer_under(overhang).map(|(t, _)| t.0);
     assert_eq!(

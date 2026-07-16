@@ -197,14 +197,16 @@ impl PopupManager {
 `render_output()` → `Window::render_elements()` → `PopupManager::popups_for_surface()` →
 `render_elements_from_surface_tree()` per popup. Fully automatic — no compositor render code needed.
 
-### Layer-parented popups double-register in PopupManager
+### Never track_popup in WlrLayerShellHandler::new_popup
 The protocol flow for a popup on a layer surface is `xdg_surface.get_popup(None, positioner)` then
 `zwlr_layer_surface_v1.get_popup(xdg_popup)`. The first call fires `XdgShellHandler::new_popup` with
-`parent = None` (queued into `unmapped_popups`); the second fires `WlrLayerShellHandler::new_popup`
-after the parent is set, tracking it again; the popup's first commit then drains the stale unmapped
-entry and adds it once more. Duplicates share the same `PopupKind`, so `popups_for_surface`,
-hit-testing, and teardown all still behave — but counting tracked popups over-reports for
-layer-parented ones.
+`parent = None`, and `track_popup` queues a parentless popup into `unmapped_popups`; the popup's
+first commit drains that entry and inserts it into the popup tree (the parent is set by then).
+Calling `track_popup` again from the layer handler inserts a second tree node — `PopupTree::insert`
+never dedupes — and `popups_for_surface` then yields the popup twice, so it renders twice
+(double-alpha on translucent pixels, doubled per-popup render work). The layer handler should only
+`unconstrain_popup`; the xdg-path unmapped entry handles tracking. `find_popup` searches
+`unmapped_popups` too, so the popup is resolvable in the pre-commit window.
 
 ### Bounding boxes: `bbox()` vs `bbox_with_popups()`
 `Window::bbox()` / `LayerSurface::bbox()` cover the toplevel and its subsurfaces but **not** popups;
