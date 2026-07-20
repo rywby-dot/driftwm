@@ -43,11 +43,20 @@ impl DriftWm {
             return;
         };
         let from_size = window.geometry().size;
-        if from_loc == to_loc && from_size == to_size {
+        // A new action may interrupt an animation whose stage geometry already
+        // points at its old destination. Continue from what is actually shown,
+        // not from that logical destination, so rapid toggles reverse cleanly.
+        let visual = self.window_visual(window, from_loc, from_size);
+        if visual.loc == to_loc.to_f64() && visual.size == to_size.to_f64() {
             return;
         }
-        self.window_animations
-            .start_geometry(window, from_loc, from_size, to_loc, to_size);
+        self.window_animations.start_geometry(
+            window,
+            visual.loc.to_i32_round(),
+            visual.size.to_i32_round(),
+            to_loc,
+            to_size,
+        );
         self.mark_all_dirty();
     }
 

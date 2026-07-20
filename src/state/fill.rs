@@ -146,6 +146,7 @@ impl DriftWm {
             return;
         };
 
+        self.animate_window_geometry(window, new_loc, new_size);
         self.send_size_configure(window, new_size);
         self.map_window(window.clone(), new_loc, false);
         self.stage.set_fill(window, saved_pos, saved_size);
@@ -176,6 +177,7 @@ impl DriftWm {
         ));
 
         let pre_exit_size = window.geometry().size;
+        self.animate_window_geometry(window, saved_pos, saved_size);
         self.send_size_configure(window, saved_size);
 
         if saved_size == pre_exit_size {
