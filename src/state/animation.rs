@@ -113,14 +113,19 @@ impl DriftWm {
         if !self.window_animations.request_close(window) {
             return;
         }
-        let visible = self
-            .space
-            .outputs()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .any(|output| self.window_intersects_viewport_on(window, &output));
-        if visible {
+        let can_capture = matches!(self.session_lock, super::SessionLock::Unlocked)
+            && self
+                .space
+                .outputs()
+                .filter(|output| {
+                    self.active_outputs.contains(*output)
+                        && !self.dpms_off_outputs.contains(*output)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .any(|output| self.window_intersects_viewport_on(window, &output));
+        if can_capture {
             self.mark_all_dirty();
         } else {
             // Nothing can flash on screen, and no output composition pass can

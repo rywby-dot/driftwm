@@ -17,6 +17,12 @@ pub(crate) struct WindowVisual {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum GeometryRole {
+    Normal,
+    FullscreenEntry,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum AnimationKind {
     Open,
     Geometry {
@@ -24,12 +30,13 @@ enum AnimationKind {
         from_size: Size<f64, Logical>,
         to_loc: Point<f64, Logical>,
         to_size: Size<f64, Logical>,
-        fullscreen: bool,
+        role: GeometryRole,
     },
 }
 
 #[derive(Debug)]
 struct WindowAnimation {
+    window: Window,
     kind: AnimationKind,
     progress: f64,
 }
@@ -48,6 +55,7 @@ impl WindowAnimations {
         self.animations.insert(
             surface.id(),
             WindowAnimation {
+                window: window.clone(),
                 kind: AnimationKind::Open,
                 progress: 0.0,
             },
@@ -62,21 +70,13 @@ impl WindowAnimations {
         to_loc: Point<i32, Logical>,
         to_size: Size<i32, Logical>,
     ) {
-        let Some(surface) = window.wl_surface() else {
-            return;
-        };
-        self.animations.insert(
-            surface.id(),
-            WindowAnimation {
-                kind: AnimationKind::Geometry {
-                    from_loc: from_loc.to_f64(),
-                    from_size: from_size.to_f64(),
-                    to_loc: to_loc.to_f64(),
-                    to_size: to_size.to_f64(),
-                    fullscreen: false,
-                },
-                progress: 0.0,
-            },
+        self.insert_geometry(
+            window,
+            from_loc,
+            from_size,
+            to_loc,
+            to_size,
+            GeometryRole::Normal,
         );
     }
 
@@ -88,18 +88,38 @@ impl WindowAnimations {
         to_loc: Point<i32, Logical>,
         to_size: Size<i32, Logical>,
     ) {
+        self.insert_geometry(
+            window,
+            from_loc,
+            from_size,
+            to_loc,
+            to_size,
+            GeometryRole::FullscreenEntry,
+        );
+    }
+
+    fn insert_geometry(
+        &mut self,
+        window: &Window,
+        from_loc: Point<i32, Logical>,
+        from_size: Size<i32, Logical>,
+        to_loc: Point<i32, Logical>,
+        to_size: Size<i32, Logical>,
+        role: GeometryRole,
+    ) {
         let Some(surface) = window.wl_surface() else {
             return;
         };
         self.animations.insert(
             surface.id(),
             WindowAnimation {
+                window: window.clone(),
                 kind: AnimationKind::Geometry {
                     from_loc: from_loc.to_f64(),
                     from_size: from_size.to_f64(),
                     to_loc: to_loc.to_f64(),
                     to_size: to_size.to_f64(),
-                    fullscreen: true,
+                    role,
                 },
                 progress: 0.0,
             },
@@ -114,10 +134,10 @@ impl WindowAnimations {
                 matches!(
                     animation.kind,
                     AnimationKind::Geometry {
-                        fullscreen: true,
+                        role: GeometryRole::FullscreenEntry,
                         ..
                     }
-                )
+                ) && animation.progress < 1.0
             })
     }
 
@@ -140,7 +160,10 @@ impl WindowAnimations {
     }
 
     pub fn is_active(&self) -> bool {
-        !self.animations.is_empty() || !self.pending_closes.is_empty()
+        self.animations
+            .values()
+            .any(|animation| animation.progress < 1.0)
+            || !self.pending_closes.is_empty()
     }
 
     pub fn close_pending(&self, id: &ObjectId) -> bool {
@@ -154,8 +177,24 @@ impl WindowAnimations {
     pub fn tick(&mut self, dt: Duration, factor: f64) {
         let frame_factor = 1.0 - (1.0 - factor).powf(dt.as_secs_f64() * 60.0);
         self.animations.retain(|_, animation| {
-            animation.progress += (1.0 - animation.progress) * frame_factor;
-            1.0 - animation.progress > DONE_EPSILON
+            if animation.progress < 1.0 {
+                animation.progress += (1.0 - animation.progress) * frame_factor;
+                if 1.0 - animation.progress <= DONE_EPSILON {
+                    animation.progress = 1.0;
+                }
+            }
+
+            match animation.kind {
+                AnimationKind::Open => animation.progress < 1.0,
+                AnimationKind::Geometry { to_size, .. } => {
+                    // A configure is asynchronous. Keep the endpoint transform
+                    // without scheduling frames until the client commits the
+                    // requested size; otherwise a slow client briefly snaps
+                    // back to its old buffer when the timed animation ends.
+                    animation.progress < 1.0
+                        || animation.window.geometry().size != to_size.to_i32_round()
+                }
+            }
         });
     }
 
