@@ -38,8 +38,9 @@ pub enum Request {
     /// implementation detail, not a compatibility surface.
     DebugCounters,
     /// Switches the connection to push mode: after the `Ok` reply the server
-    /// writes one [`Event`] line immediately and another on every state change
-    /// (throttled with the state file, ~10/sec).
+    /// writes one [`Event`] line immediately and another on every rendered frame
+    /// while state keeps changing. The ~10 Hz throttle governs only the state
+    /// file, not these events.
     Subscribe,
     /// Focus a window when `Some` (by [`WindowSelector`]); read the focused
     /// window's `app_id` when `None`.

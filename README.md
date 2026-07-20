@@ -228,7 +228,7 @@ window-search script that lets you search and jump to any open window.
 - Session lock (swaylock), idle notify (swayidle/hypridle)
 - Screen capture: screencasting (OBS, Firefox, Discord) and screenshots, incl. built-in [canvas/DPI capture](docs/ipc.md#screenshots)
 - 40+ Wayland protocols
-- [IPC control](docs/ipc.md): script the compositor over a Unix socket with `driftwm msg`
+- [IPC control](docs/ipc.md): script the compositor over a Unix socket with `driftwm msg` (full command/flag reference: [docs/cli.md](docs/cli.md))
 
 ## Install
 

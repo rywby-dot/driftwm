@@ -10,25 +10,7 @@ JSON, so any language can speak it directly.
 Run `driftwm msg <command>` from inside a driftwm session. Each command reads
 when given no arguments and writes when given arguments.
 
-| Command           | Example                       | Description                                                                                                                                                             |
-| ----------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `camera`          | `driftwm msg camera`          | Print the camera position (viewport center)                                                                                                                             |
-| `camera <x> <y>`  | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                                                                                              |
-| `zoom`            | `driftwm msg zoom`            | Print the zoom level                                                                                                                                                    |
-| `zoom <level>`    | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                                                                                      |
-| `focus`           | `driftwm msg focus`           | Print the focused window's `id` and `app_id` (e.g. `#5 alacritty`)                                                                                                      |
-| `focus <app_id>`  | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive), or `--id <n>` (from `state`); navigates to it only if it's off-screen                                          |
-| `move`            | `driftwm msg move`            | Print the focused window's position (or `--id <n>`'s)                                                                                                                   |
-| `move <x> <y>`    | `driftwm msg move 100 200`    | Move the focused window, or `--id <n>`                                                                                                                                  |
-| `opacity`         | `driftwm msg opacity`         | Print the focused window's opacity (or `--id <n>`'s); `1` when no rule set it                                                                                           |
-| `opacity <value>` | `driftwm msg opacity 0.85`    | Set opacity `0.0`–`1.0` on the focused window, or `--id <n>` (see [Opacity](#opacity))                                                                                  |
-| `close`           | `driftwm msg close`           | Close the focused window, a window by `app_id` substring, or `--id <n>`                                                                                                 |
-| `layout`          | `driftwm msg layout`          | Print the active keyboard layout (full XKB name); `--short` prints the configured code (e.g. `ru`)                                                                      |
-| `action <spec>`   | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                                                                                         |
-| `screenshot ...`  | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots))                                                                    |
-| `state`           | `driftwm msg state`           | Dump camera, zoom, and the window inventory (each window has a stable `id`)                                                                                             |
-| `subscribe`       | `driftwm msg subscribe`       | Stream state snapshots: the current one immediately, then one on every change (`--json` for line-delimited JSON, see [Subscribing to changes](#subscribing-to-changes)) |
-| `debug-counters`  | `driftwm msg debug-counters`  | Print internal collection sizes for leak diagnosis (unstable keys — see [Debug counters](#debug-counters))                                                              |
+The available commands — `camera`, `zoom`, `focus`, `move`, `opacity`, `close`, `layout`, `action`, `screenshot`, `state`, `subscribe`, and `debug-counters` — with their arguments, flags, and JSON reply shapes are documented in the generated [CLI reference](cli.md); `driftwm msg <command> --help` prints the same for one command. The concepts behind the commands follow below.
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
