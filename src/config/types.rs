@@ -702,7 +702,7 @@ impl WindowRule {
 /// Built by merging ALL matching `WindowRule`s in config order
 /// (later rules override earlier ones for scalar fields; boolean flags
 /// are sticky-on).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppliedWindowRule {
     pub fullscreen: Option<bool>,
     pub widget: bool,
