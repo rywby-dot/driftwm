@@ -64,7 +64,7 @@ impl DriftWm {
         self.with_output_state(|os| {
             os.camera_target = None;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
             os.momentum.stop();
         });
     }

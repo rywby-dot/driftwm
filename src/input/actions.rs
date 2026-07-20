@@ -1,6 +1,6 @@
 use smithay::{
-    input::{keyboard::Layout, pointer::MotionEvent},
-    utils::{Logical, Point, SERIAL_COUNTER, Size},
+    input::keyboard::Layout,
+    utils::{Logical, Point, Size},
     wayland::seat::WaylandFocus,
 };
 
@@ -70,9 +70,8 @@ impl DriftWm {
             }
             Action::PanViewport(dir) => {
                 let Some(zoom) = self.with_output_state(|os| {
-                    os.camera_target = None;
                     os.zoom_target = None;
-                    os.zoom_animation_center = None;
+                    os.zoom_animation_anchor = None;
                     os.overview_return = None;
                     os.zoom
                 }) else {
@@ -82,25 +81,10 @@ impl DriftWm {
                 let (ux, uy) = dir.to_unit_vec();
                 let delta: Point<f64, smithay::utils::Logical> =
                     Point::from((ux * step, uy * step));
-                self.set_camera(self.camera() + delta);
-                self.update_output_from_camera();
-
-                // Shift pointer so cursor stays at the same screen position
-                let pointer = self.seat.get_pointer().unwrap();
-                let pos = pointer.current_location();
-                let new_pos = pos + delta;
-                let under = self.surface_under(new_pos, None);
-                let serial = SERIAL_COUNTER.next_serial();
-                pointer.motion(
-                    self,
-                    under,
-                    &MotionEvent {
-                        location: new_pos,
-                        serial,
-                        time: self.start_time.elapsed().as_millis() as u32,
-                    },
-                );
-                pointer.frame(self);
+                // Repeated key actions extend the destination instead of
+                // restarting from the partially animated camera position.
+                let target = self.camera_target().unwrap_or_else(|| self.camera()) + delta;
+                self.set_camera_target(Some(target));
             }
             Action::CenterWindow => {
                 if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
@@ -254,10 +238,13 @@ impl DriftWm {
                             self.enter_fullscreen(ret.fullscreen_window.as_ref().unwrap(), None);
                         } else {
                             let vc = self.usable_center_screen();
-                            self.set_zoom_animation_center(Some(Point::from((
-                                ret.camera.x + vc.x / ret.zoom,
-                                ret.camera.y + vc.y / ret.zoom,
-                            ))));
+                            self.set_zoom_animation_anchor(
+                                Point::from((
+                                    ret.camera.x + vc.x / ret.zoom,
+                                    ret.camera.y + vc.y / ret.zoom,
+                                )),
+                                vc,
+                            );
                             self.set_camera_target(Some(ret.camera));
                             self.set_zoom_target(Some(ret.zoom));
                         }
@@ -282,7 +269,7 @@ impl DriftWm {
                         self.update_output_from_camera();
                         self.warp_pointer(Point::from((0.0, 0.0)));
                     } else {
-                        self.set_zoom_animation_center(Some(Point::from((0.0, 0.0))));
+                        self.set_zoom_animation_anchor(Point::from((0.0, 0.0)), vc);
                         self.set_camera_target(Some(home));
                         self.set_zoom_target(Some(1.0));
                     }
@@ -596,10 +583,13 @@ impl DriftWm {
         };
         self.set_overview_return(None);
         let vc = self.usable_center_screen();
-        self.set_zoom_animation_center(Some(Point::from((
-            saved_camera.x + vc.x / saved_zoom,
-            saved_camera.y + vc.y / saved_zoom,
-        ))));
+        self.set_zoom_animation_anchor(
+            Point::from((
+                saved_camera.x + vc.x / saved_zoom,
+                saved_camera.y + vc.y / saved_zoom,
+            )),
+            vc,
+        );
         self.set_camera_target(Some(saved_camera));
         self.set_zoom_target(Some(saved_zoom));
         true
@@ -617,7 +607,7 @@ impl DriftWm {
         let new_camera: Point<f64, smithay::utils::Logical> =
             Point::from((bbox_cx - vc.x / fit_zoom, bbox_cy - vc.y / fit_zoom));
         self.set_overview_return(Some((self.camera(), self.zoom())));
-        self.set_zoom_animation_center(Some(Point::from((bbox_cx, bbox_cy))));
+        self.set_zoom_animation_anchor(Point::from((bbox_cx, bbox_cy)), vc);
         self.set_camera_target(Some(new_camera));
         self.set_zoom_target(Some(fit_zoom));
     }
@@ -630,7 +620,7 @@ impl DriftWm {
         let zoom = self.zoom();
         let vc_canvas = Point::from((camera.x + vc.x / zoom, camera.y + vc.y / zoom));
         let new_camera = canvas::zoom_anchor_camera(vc_canvas, vc, target_zoom);
-        self.set_zoom_animation_center(Some(vc_canvas));
+        self.set_zoom_animation_anchor(vc_canvas, vc);
         self.set_zoom_target(Some(target_zoom));
         self.set_camera_target(Some(new_camera));
     }

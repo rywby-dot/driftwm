@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter};
+use super::{DriftWm, PendingRecenter, ZoomAnimationAnchor};
 use driftwm::config;
 use driftwm::window_ext::WindowExt;
 
@@ -107,9 +107,13 @@ impl DriftWm {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.raise_and_focus(window, serial);
         self.set_overview_return(None);
+        let viewport_center = self.usable_center_screen();
         self.with_output_state(|os| {
             os.momentum.stop();
-            os.zoom_animation_center = Some(center);
+            os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
+                canvas: center,
+                screen: viewport_center,
+            });
             os.camera_target = Some(target_camera);
             os.zoom_target = Some(1.0);
         });
