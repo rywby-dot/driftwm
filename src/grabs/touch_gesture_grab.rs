@@ -219,12 +219,19 @@ impl TouchGestureGrab {
         }
         let serial = SERIAL_COUNTER.next_serial();
         data.raise_and_focus(&window, serial);
+        // Moving re-anchors the window, invalidating any fill restore point.
+        data.stage.clear_fill(&window);
         let initial = data.stage.position_of(&window).unwrap_or(loc);
         let (members, surfaces) = if cluster {
             data.cluster_snapshot_for_drag(&window, initial)
         } else {
             (Vec::new(), HashSet::new())
         };
+        // Members ride along with the primary, so their fill restore points go
+        // stale too.
+        for (member, _) in &members {
+            data.stage.clear_fill(member);
+        }
         let start = TouchGrabStartData {
             focus: None,
             slot: event.slot,

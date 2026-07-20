@@ -434,6 +434,8 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
                 return Err("pinned and fullscreen windows have no canvas position to move".into());
             }
             let loc = driftwm::canvas::rule_to_internal(x, y, size);
+            // Moving re-anchors the window, invalidating any fill restore point.
+            state.stage.clear_fill(&window);
             // Activating is only consistent when the target already holds
             // focus; a selector can reach any window.
             let activate = state.focused_window().as_ref() == Some(&window);

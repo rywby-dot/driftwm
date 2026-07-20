@@ -2,6 +2,7 @@ mod animation;
 mod cluster_snapshot;
 mod cursor;
 mod errors;
+pub mod fill;
 pub mod fit;
 mod focus;
 mod fullscreen;
@@ -1813,11 +1814,13 @@ impl DriftWm {
     /// Viewport area minus layer-shell exclusive zones (panels, bars).
     pub fn get_usable_area(&self) -> Rectangle<i32, Logical> {
         self.active_output()
-            .map(|o| {
-                let map = smithay::desktop::layer_map_for_output(&o);
-                map.non_exclusive_zone()
-            })
+            .map(|o| self.usable_area_on(&o))
             .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into()))
+    }
+
+    /// `output`'s usable area (viewport minus layer-shell exclusive zones).
+    pub fn usable_area_on(&self, output: &Output) -> Rectangle<i32, Logical> {
+        smithay::desktop::layer_map_for_output(output).non_exclusive_zone()
     }
 
     /// Screen-space center of the usable area (= viewport center when no panels exist).

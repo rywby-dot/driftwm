@@ -532,6 +532,9 @@ mod harness {
         ToggleFit {
             idx: usize,
         },
+        ToggleFillMembership {
+            idx: usize,
+        },
         ResizeGrabEnd {
             idx: usize,
             w: i32,
@@ -579,6 +582,7 @@ mod harness {
             1 => (0..3usize).prop_map(|output| Op::RemoveOutput { output }),
             1 => (0..3usize).prop_map(|output| Op::AddOutput { output }),
             2 => idx.clone().prop_map(|idx| Op::ToggleFit { idx }),
+            1 => idx.clone().prop_map(|idx| Op::ToggleFillMembership { idx }),
             1 => (idx.clone(), 50..500i32, 50..500i32)
                 .prop_map(|(idx, w, h)| Op::ResizeGrabEnd { idx, w, h }),
             2 => (idx.clone(), -300..300i32, -300..300i32)
@@ -1244,6 +1248,27 @@ mod harness {
                         w.enter_fit_configure(Size::from((1000, 700)));
                         self.stage.map(w.clone(), pos);
                         self.raise_and_focus(&w);
+                    }
+                }
+                Op::ToggleFillMembership { idx } => {
+                    // Fill's geometry lives in DriftWm, not the stage; here we
+                    // only exercise the membership field so verify_invariants
+                    // covers it. Same eligibility as the keybinding path.
+                    let Some(w) = self.pick(*idx) else { return };
+                    if w.is_widget()
+                        || self.stage.is_fullscreen(&w)
+                        || self.stage.is_pinned(&w)
+                        || self.stage.is_fit(&w)
+                        || !self.stage.contains(&w)
+                    {
+                        return;
+                    }
+                    if self.stage.is_fill(&w) {
+                        self.stage.take_fill_saved(&w);
+                    } else {
+                        let pos = self.stage.position_of(&w).unwrap_or_default();
+                        let size = StageElement::size(&w);
+                        self.stage.set_fill(&w, pos, size);
                     }
                 }
                 Op::ResizeGrabEnd { idx, w: nw, h: nh } => {

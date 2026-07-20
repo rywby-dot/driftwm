@@ -458,6 +458,12 @@ impl DriftWm {
         let Some(output) = self.active_output() else {
             return;
         };
+        // Moving re-anchors the window, invalidating any fill restore point —
+        // for the primary and every member dragged along.
+        self.stage.clear_fill(&window);
+        for (member, _) in &members {
+            self.stage.clear_fill(member);
+        }
         let grab = MoveSurfaceGrab::new(
             GrabStartData {
                 focus: None,
@@ -518,8 +524,9 @@ impl DriftWm {
         let initial_size = window.geometry().size;
         let edges = edges_from_position(pos, initial_location, initial_size);
 
-        // Clear fit state — user took manual control
+        // Clear fit/fill state — user took manual control
         self.stage.clear_fit(&window);
+        self.stage.clear_fill(&window);
 
         // Store resize state on surface data map for commit() repositioning
         with_states(&wl_surface, |states| {

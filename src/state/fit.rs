@@ -97,6 +97,9 @@ impl DriftWm {
         // After the map — set_fit needs the window's stage entry, which the
         // map guarantees even for a window that wasn't staged before.
         self.stage.set_fit(window, current_size);
+        // Fit translates the window and unfit restores by visual center, so a
+        // pre-fit fill's saved position would be permanently stale — drop it.
+        self.stage.clear_fill(window);
         // Don't refresh `stable_snap_rects` here — the fit canvas position
         // snap-touches nothing, so close-time `cluster_of` would degrade to
         // `{self}`. The pre-fit rect is the window's cluster identity.

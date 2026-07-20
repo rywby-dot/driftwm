@@ -67,6 +67,7 @@ pub enum Action {
     ToggleFullscreen,
     FitWindow,
     FitWindowSnapped,
+    FillWindow,
     SendToOutput(Direction),
     SendCursorToOutput(Direction),
     FocusCenter,

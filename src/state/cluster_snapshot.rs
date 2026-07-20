@@ -100,6 +100,8 @@ impl ClusterResizeSnapshot {
             if !m.window.alive() {
                 continue;
             }
+            // Shifting a member re-anchors it, invalidating any fill restore point.
+            stage.clear_fill(&m.window);
             let new_pos = m.initial_pos + Point::from((*dx, *dy));
             stage.map(m.window.clone(), new_pos);
         }
