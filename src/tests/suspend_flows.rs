@@ -669,6 +669,45 @@ fn suspend_action_on_suspended_focus_is_noop() {
     f.state().dismiss_suspended(sid);
 }
 
+/// `fill-window` on a focused suspended window is a no-op: the action targets
+/// `focused_window()`, which is `None` while a stand-in holds focus intent, so
+/// the stand-in is never grown or repositioned.
+#[test]
+fn fill_action_on_suspended_focus_is_noop() {
+    let mut f = Fixture::with_config(config_with(""));
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((400, 300)),
+        Size::from((300, 200)),
+        "s",
+        "S",
+    );
+    f.state().focus_and_raise_suspended(sid);
+
+    let elem = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let before_count = f.state().stage.windows().count();
+    let before_size = f.state().find_suspended(sid).unwrap().size.get();
+    let before_pos = f.state().stage.position_of(&elem);
+
+    f.state().execute_action(&Action::FillWindow);
+
+    assert_eq!(
+        f.state().find_suspended(sid).unwrap().size.get(),
+        before_size,
+        "stand-in not grown"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&elem),
+        before_pos,
+        "stand-in not moved"
+    );
+    assert_eq!(f.state().stage.windows().count(), before_count);
+
+    f.state().dismiss_suspended(sid);
+}
+
 /// The IPC inventory reports suspended windows with `suspended: true`, and a
 /// focused stand-in is `windows[0]` / `is_focused` per the shared convention.
 #[test]
