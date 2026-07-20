@@ -182,7 +182,7 @@ fn durable_camera_seeds_fresh_boot() {
         SessionOutput {
             camera: [-1234.0, -5678.0],
             // A real zoom-out value: the compositor caps zoom at MAX_ZOOM (1.0),
-            // and out-of-bounds seeds are now rejected on load.
+            // and out-of-bounds seeds are rejected on load.
             zoom: 0.75,
         },
     );

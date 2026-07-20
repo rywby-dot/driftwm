@@ -613,13 +613,13 @@ fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     if window.is_widget() {
         return Err("widgets cannot be suspended".to_string());
     }
-    // The selected window, not a modal child `raise_and_focus` would redirect
-    // to: a dialog/modal is ineligible (same as the action and docs).
+    // The window itself must not be a dialog/modal (same restriction as the
+    // `suspend-window` action).
     if window.parent_surface().is_some() || window.is_modal() {
         return Err("cannot suspend a dialog".to_string());
     }
-    // `raise_and_focus` would redirect focus to an open modal child, and the
-    // action would then silently refuse it; reply honestly instead.
+    // A window with an open modal child is ineligible too — raise_and_focus
+    // would silently redirect to the child instead.
     if state.topmost_modal_child(&window).is_some() {
         return Err("window has an open modal dialog".to_string());
     }
@@ -633,8 +633,7 @@ fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
 fn cmd_relaunch(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let id = suspended_by_selector(state, sel.as_ref())
         .ok_or_else(|| "no suspended window matching selector".to_string())?;
-    // Name the app if it no longer resolves to a launchable entry, rather than
-    // replying Ok on a silent no-op.
+    // Captured before the call, so a failed relaunch can name the app in the error.
     let name = state
         .find_suspended(id)
         .map(|s| s.identity.display_name.clone());

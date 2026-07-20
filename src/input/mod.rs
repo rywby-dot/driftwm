@@ -348,9 +348,8 @@ impl DriftWm {
         }
     }
 
-    /// Whether any suspended stand-in is on the stage — a cheap variant check
-    /// that short-circuits, gating the per-motion suspended hit-tests
-    /// (`decoration_under` scans) so a canvas with no stand-ins pays nothing.
+    /// Whether any suspended stand-in is on the stage — gates the per-motion
+    /// `decoration_under` scans so a canvas with no stand-ins pays nothing.
     fn any_suspended(&self) -> bool {
         self.stage.windows().any(|w| w.suspended().is_some())
     }
