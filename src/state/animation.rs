@@ -1,9 +1,12 @@
 use std::time::{Duration, Instant};
 
 use smithay::input::pointer::CursorImageStatus;
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point};
+use smithay::wayland::seat::WaylandFocus;
 
 use driftwm::canvas::{self, CanvasPos};
+use driftwm::window_ext::WindowExt;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use smithay::output::Output;
@@ -17,6 +20,147 @@ impl DriftWm {
         let base = self.config.animation_speed;
         let dt_secs = dt.as_secs_f64();
         1.0 - (1.0 - base).powf(dt_secs * 60.0)
+    }
+
+    pub(crate) fn start_window_open_animation(&mut self, window: &smithay::desktop::Window) {
+        if self.backend.is_none() {
+            return;
+        }
+        self.window_animations.start_open(window);
+        self.mark_all_dirty();
+    }
+
+    pub(crate) fn animate_window_geometry(
+        &mut self,
+        window: &smithay::desktop::Window,
+        to_loc: Point<i32, Logical>,
+        to_size: smithay::utils::Size<i32, Logical>,
+    ) {
+        if self.backend.is_none() {
+            return;
+        }
+        let Some(from_loc) = self.stage.position_of(window) else {
+            return;
+        };
+        let from_size = window.geometry().size;
+        if from_loc == to_loc && from_size == to_size {
+            return;
+        }
+        self.window_animations
+            .start_geometry(window, from_loc, from_size, to_loc, to_size);
+        self.mark_all_dirty();
+    }
+
+    pub(crate) fn animate_window_geometry_from(
+        &mut self,
+        window: &smithay::desktop::Window,
+        from_loc: Point<i32, Logical>,
+        to_loc: Point<i32, Logical>,
+    ) {
+        if self.backend.is_none() || from_loc == to_loc {
+            return;
+        }
+        let size = window.geometry().size;
+        self.window_animations
+            .start_geometry(window, from_loc, size, to_loc, size);
+        self.mark_all_dirty();
+    }
+
+    pub fn request_window_close(&mut self, window: &smithay::desktop::Window) {
+        if self.backend.is_none() {
+            window.send_close();
+            return;
+        }
+        if !self.window_animations.request_close(window) {
+            return;
+        }
+        let visible = self
+            .space
+            .outputs()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .any(|output| self.window_intersects_viewport_on(window, &output));
+        if visible {
+            self.mark_all_dirty();
+        } else {
+            // Nothing can flash on screen, and no output composition pass can
+            // capture this window. Remove it immediately without a snapshot.
+            self.finish_snapshotted_close(window, None);
+        }
+    }
+
+    pub(crate) fn tick_window_animations(&mut self, dt: Duration) {
+        let speed = self.config.animation_speed;
+        self.window_animations.tick(dt, speed);
+        let frame_factor = 1.0 - (1.0 - speed).powf(dt.as_secs_f64() * 60.0);
+        for snapshot in &mut self.closing_snapshots {
+            snapshot.tick(frame_factor);
+        }
+        self.closing_snapshots
+            .retain(|snapshot| !snapshot.is_done());
+    }
+
+    pub(crate) fn window_close_pending(&self, window: &smithay::desktop::Window) -> bool {
+        window
+            .wl_surface()
+            .is_some_and(|surface| self.window_animations.close_pending(&surface.id()))
+    }
+
+    pub(crate) fn finish_snapshotted_close(
+        &mut self,
+        window: &smithay::desktop::Window,
+        snapshot: Option<crate::render::ClosingSnapshot>,
+    ) {
+        let Some(surface) = window.wl_surface() else {
+            return;
+        };
+        let Some(close_window) = self.window_animations.take_pending_close(&surface.id()) else {
+            return;
+        };
+        if let Some(snapshot) = snapshot {
+            self.closing_snapshots.push(snapshot);
+        }
+
+        let was_focused = self.focused_window().as_ref() == Some(window);
+        self.unmap_window(window);
+        close_window.send_close();
+
+        if was_focused {
+            let next = self.stage.focus_history().first().cloned();
+            if let Some(next) = next {
+                if self.config.auto_navigate_on_close {
+                    self.navigate_to_window(&next, false);
+                } else if self.window_fully_in_viewport(&next) {
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    self.raise_and_focus(&next, serial);
+                } else {
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    self.set_window_focus(None, serial);
+                }
+            } else {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.set_window_focus(None, serial);
+            }
+        }
+        self.refresh_pointer_focus();
+    }
+
+    pub(crate) fn window_visual(
+        &self,
+        window: &smithay::desktop::Window,
+        target_loc: Point<i32, Logical>,
+        target_size: smithay::utils::Size<i32, Logical>,
+    ) -> super::window_animation::WindowVisual {
+        let Some(surface) = window.wl_surface() else {
+            return super::window_animation::WindowVisual {
+                loc: target_loc.to_f64(),
+                size: target_size.to_f64(),
+                alpha: 1.0,
+            };
+        };
+        self.window_animations
+            .visual(&surface.id(), target_loc, target_size)
     }
 
     /// Fire held compositor action if repeat delay/rate has elapsed.
@@ -381,9 +525,12 @@ impl DriftWm {
         let factor = self.animation_factor(dt);
 
         let dz = target - old_zoom;
-        if dz.abs() < 0.001 {
+        let zoom_close = dz.abs() < 0.001;
+        if zoom_close {
             self.set_zoom(target);
-            self.set_zoom_target(None);
+            if self.zoom_animation_center().is_none() {
+                self.set_zoom_target(None);
+            }
         } else {
             self.set_zoom(old_zoom + dz * factor);
         }
@@ -405,15 +552,21 @@ impl DriftWm {
             // Suppress camera_animation — we set camera directly
             self.set_camera_target(None);
 
-            if self.zoom_target().is_none() {
-                // Zoom snapped — hand off final convergence to camera_animation
+            let center_dx = target_center.x - current_center.x;
+            let center_dy = target_center.y - current_center.y;
+            if zoom_close && center_dx * center_dx + center_dy * center_dy < 0.25 {
+                // Finish both coordinates together. Keeping one coupled
+                // animation avoids the camera-only tail that made zoom-to-fit
+                // change velocity near the end.
                 let cur_zoom = self.zoom();
                 let final_camera = Point::from((
                     target_center.x - vc.x / cur_zoom,
                     target_center.y - vc.y / cur_zoom,
                 ));
+                self.set_zoom_target(None);
                 self.set_zoom_animation_center(None);
-                self.set_camera_target(Some(final_camera));
+                self.set_camera(final_camera);
+                self.update_output_from_camera();
             }
 
             // Warp pointer: compensate for both camera and zoom change
@@ -457,6 +610,7 @@ impl DriftWm {
         // Global (not per-output) ticks
         self.apply_key_repeat();
         self.check_exec_cursor_timeout();
+        self.tick_window_animations(dt);
         // Re-arm cursor edge-pan from the current cursor position before the
         // per-output velocities are applied below (disarms outputs the cursor
         // has left; keeps the active output's speed stable frame-to-frame).
@@ -581,11 +735,14 @@ impl DriftWm {
         let factor = self.animation_factor(dt);
 
         let dz = target - old_zoom;
+        let zoom_close = dz.abs() < 0.001;
         {
             let mut os = output_state(output);
-            if dz.abs() < 0.001 {
+            if zoom_close {
                 os.zoom = target;
-                os.zoom_target = None;
+                if anim_center.is_none() {
+                    os.zoom_target = None;
+                }
                 drop(os);
             } else {
                 os.zoom = old_zoom + dz * factor;
@@ -612,14 +769,17 @@ impl DriftWm {
                 // Suppress camera_animation — we set camera directly
                 os.camera_target = None;
 
-                if os.zoom_target.is_none() {
-                    // Zoom snapped — hand off final convergence to camera_animation
+                let center_dx = target_center.x - current_center.x;
+                let center_dy = target_center.y - current_center.y;
+                if zoom_close && center_dx * center_dx + center_dy * center_dy < 0.25 {
                     let final_camera = Point::from((
                         target_center.x - vc.x / cur_zoom,
                         target_center.y - vc.y / cur_zoom,
                     ));
+                    os.zoom_target = None;
                     os.zoom_animation_center = None;
-                    os.camera_target = Some(final_camera);
+                    drop(os);
+                    self.set_camera_on(output, final_camera);
                 }
             }
 

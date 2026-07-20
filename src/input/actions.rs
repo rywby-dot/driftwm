@@ -50,7 +50,7 @@ impl DriftWm {
             }
             Action::CloseWindow => {
                 if let Some(window) = self.focused_window().filter(|w| !w.is_widget()) {
-                    window.send_close();
+                    self.request_window_close(&window);
                 }
             }
             Action::NudgeWindow(dir) => {
@@ -64,6 +64,7 @@ impl DriftWm {
                         (uy * step as f64).round() as i32,
                     );
                     let new_loc = loc + Point::from(offset);
+                    self.animate_window_geometry(&window, new_loc, window.geometry().size);
                     self.map_window(window.clone(), new_loc, false);
                 }
             }

@@ -14,6 +14,7 @@ mod placement;
 mod reload;
 mod render_cache;
 mod viewport;
+mod window_animation;
 pub use cluster_snapshot::ClusterResizeSnapshot;
 pub use cursor::{CursorFrames, CursorState};
 pub use errors::ErrorSource;
@@ -439,6 +440,8 @@ pub struct DriftWm {
     /// (downscaling stays crisp; only upscaling blurs).
     pub decoration_scale: i32,
     pub render: RenderCache,
+    pub(crate) window_animations: window_animation::WindowAnimations,
+    pub(crate) closing_snapshots: Vec<crate::render::ClosingSnapshot>,
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
@@ -763,6 +766,9 @@ impl DriftWm {
     /// half (camera restore) is NOT handled here — a caller unmapping a
     /// fullscreen window must tear that down first, as `toplevel_destroyed` does.
     pub fn unmap_window(&mut self, window: &Window) {
+        if let Some(surface) = window.wl_surface() {
+            self.window_animations.remove(&surface.id());
+        }
         self.stage.remove(window);
         membership::send_output_leaves(window);
     }
@@ -1314,6 +1320,15 @@ impl DriftWm {
             || os.momentum.velocity.y != 0.0
     }
 
+    /// Visual animations which are not owned by a single output.
+    ///
+    /// These currently include windows that may span outputs and closing
+    /// snapshots. Keeping this separate from timers such as key repeat makes
+    /// the render scheduler's "draw one final frame" rule explicit.
+    pub(crate) fn has_global_visual_animations(&self) -> bool {
+        self.window_animations.is_active() || !self.closing_snapshots.is_empty()
+    }
+
     /// True when `output_name`'s animated background is due for its next tick
     /// under `[background] animate_fps` (0 = every frame). The timestamp is
     /// stamped where the uniforms are actually pushed, in
@@ -1372,6 +1387,7 @@ impl DriftWm {
             || self.cursor.exec_cursor_show_at.is_some()
             || self.cursor.exec_cursor_deadline.is_some()
             || self.cursor.is_animated()
+            || self.has_global_visual_animations()
     }
 
     pub fn flush_middle_click(&mut self, press_time: u32, release_time: Option<u32>) {
@@ -1965,6 +1981,7 @@ impl DriftWm {
             ("auto_anchor_snapshot", self.auto_anchor_snapshot.len()),
             ("pending_recenter", self.pending_recenter.len()),
             ("stable_snap_rects", self.stable_snap_rects.len()),
+            ("closing_snapshots", self.closing_snapshots.len()),
             (
                 "idle_inhibiting_surfaces",
                 self.idle_inhibiting_surfaces.len(),

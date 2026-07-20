@@ -254,7 +254,7 @@ impl DriftWm {
                     if button == config::BTN_LEFT {
                         match hit {
                             DecorationHit::CloseButton => {
-                                window.send_close();
+                                self.request_window_close(&window);
                                 return;
                             }
                             DecorationHit::TitleBar if !is_widget => {
@@ -523,7 +523,7 @@ impl DriftWm {
                 .and_then(|s| config::applied_rule(&s))
                 .is_some_and(|r| r.widget);
             match hit {
-                DecorationHit::CloseButton => window.send_close(),
+                DecorationHit::CloseButton => self.request_window_close(&window),
                 DecorationHit::TitleBar if !is_widget => {
                     self.raise_and_focus(&window, serial);
                     self.start_pinned_move(pointer, &window, pos, button, serial);

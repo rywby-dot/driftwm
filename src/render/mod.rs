@@ -2,6 +2,7 @@ mod background;
 mod blur;
 mod capture;
 mod capture_background;
+mod closing;
 mod cursor;
 mod elements;
 mod error_bar;
@@ -18,9 +19,11 @@ pub use background::{BackgroundElement, init_background, update_background_eleme
 pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
+pub(crate) use closing::ClosingSnapshot;
 pub use cursor::build_cursor_elements;
 pub use elements::{
     OutputRenderElements, PixelSnapRescaleElement, RoundedCornerElement, TileShaderElement,
+    WindowTransformElement,
 };
 pub use error_bar::ErrorBarCache;
 pub use lifecycle::{
@@ -38,6 +41,13 @@ pub use tile_chunks::BgChunkCache;
 use blur::{BlurLayer, BlurRequestData, process_blur_requests};
 use layers::{build_canvas_layer_elements, build_layer_elements};
 use shaders::{push_border_element, push_shadow_element};
+
+#[derive(Clone, Copy)]
+pub(super) struct WindowRenderAnimation {
+    origin: Point<f64, Physical>,
+    offset: Point<f64, Physical>,
+    scale: Scale<f64>,
+}
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::{
@@ -109,6 +119,7 @@ fn push_corner_clipped_elements(
     corner_radius: [f32; 4],
     zoom: f64,
     output_scale: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     let aa_scale = (output_scale * zoom) as f32;
     // Clamp radii so a tiny window doesn't get corners wider than half its
@@ -122,20 +133,30 @@ fn push_corner_clipped_elements(
         corner_radius[3].clamp(0.0, max_r),
     ];
     for elem in elems {
-        target.push(OutputRenderElements::CsdWindow(
-            PixelSnapRescaleElement::from_element(
-                RoundedCornerElement::new(
-                    elem,
-                    shader.clone(),
-                    geometry,
-                    clamped,
-                    output_scale,
-                    aa_scale,
-                ),
-                Point::<i32, Physical>::from((0, 0)),
-                zoom,
+        let elem = PixelSnapRescaleElement::from_element(
+            RoundedCornerElement::new(
+                elem,
+                shader.clone(),
+                geometry,
+                clamped,
+                output_scale,
+                aa_scale,
             ),
-        ));
+            Point::<i32, Physical>::from((0, 0)),
+            zoom,
+        );
+        if let Some(animation) = animation {
+            target.push(OutputRenderElements::AnimatedCsdWindow(
+                WindowTransformElement::new(
+                    elem,
+                    animation.origin,
+                    animation.offset,
+                    animation.scale,
+                ),
+            ));
+        } else {
+            target.push(OutputRenderElements::CsdWindow(elem));
+        }
     }
 }
 
@@ -143,13 +164,21 @@ fn push_plain_elements(
     target: &mut Vec<OutputRenderElements>,
     elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     zoom: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     target.extend(elems.into_iter().map(|elem| {
-        OutputRenderElements::Window(PixelSnapRescaleElement::from_element(
-            elem,
-            Point::<i32, Physical>::from((0, 0)),
-            zoom,
-        ))
+        let elem =
+            PixelSnapRescaleElement::from_element(elem, Point::<i32, Physical>::from((0, 0)), zoom);
+        if let Some(animation) = animation {
+            OutputRenderElements::AnimatedWindow(WindowTransformElement::new(
+                elem,
+                animation.origin,
+                animation.offset,
+                animation.scale,
+            ))
+        } else {
+            OutputRenderElements::Window(elem)
+        }
     }));
 }
 
@@ -335,7 +364,7 @@ pub(crate) fn compose_capture_elements(
 
         let target = if is_widget { &mut widgets } else { &mut normal };
         // Popups push first so they sit above the title bar and window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, None);
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -395,12 +424,13 @@ pub(crate) fn compose_capture_elements(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        None,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, None);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
 
             if effective_bw > 0
@@ -423,6 +453,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
 
@@ -446,6 +477,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
         } else if let Some(ref shader) = state.render.corner_clip_shader {
@@ -469,6 +501,7 @@ pub(crate) fn compose_capture_elements(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    None,
                 );
 
                 if effective_bw > 0
@@ -487,6 +520,7 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
 
@@ -510,13 +544,14 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, None);
         }
     }
 
@@ -615,6 +650,7 @@ pub fn compose_frame(
     // Screen-pinned windows: own bucket, rendered above normal and below
     // Top/Overlay layer-shell (see all_elements assembly below).
     let mut zoomed_pinned: Vec<OutputRenderElements> = Vec::new();
+    let mut completed_closes: Vec<(smithay::desktop::Window, Option<ClosingSnapshot>)> = Vec::new();
 
     let blur_enabled = state.render.blur_down_shader.is_some()
         && state.render.blur_up_shader.is_some()
@@ -712,6 +748,28 @@ pub fn compose_frame(
         else {
             continue;
         };
+        let visual = state.window_visual(window, loc, geom_size);
+        let target_size = geom_size.to_f64();
+        let animated =
+            visual.loc != loc.to_f64() || visual.size != target_size || visual.alpha != 1.0;
+        let window_animation = animated.then(|| {
+            let physical_zoom = output_scale * zoom;
+            let content_origin = Point::from((
+                (render_loc.x + geom_loc.x as f64) * physical_zoom,
+                (render_loc.y + geom_loc.y as f64) * physical_zoom,
+            ));
+            WindowRenderAnimation {
+                origin: content_origin,
+                offset: Point::from((
+                    (visual.loc.x - loc.x as f64) * physical_zoom,
+                    (visual.loc.y - loc.y as f64) * physical_zoom,
+                )),
+                scale: Scale::from((
+                    visual.size.w / target_size.w.max(1.0),
+                    visual.size.h / target_size.h.max(1.0),
+                )),
+            }
+        });
 
         #[cfg(feature = "profile-with-tracy")]
         {
@@ -726,7 +784,7 @@ pub fn compose_frame(
         // Empty rect list = client explicitly opted out → treat as off.
         let client_blur = client_blur_rects.as_ref().is_some_and(|r| !r.is_empty());
         let wants_blur = blur_enabled && (applied.as_ref().is_some_and(|r| r.blur) || client_blur);
-        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
+        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0) * visual.alpha as f64;
 
         // Split elements: toplevel + subsurfaces get corner-clipped, popups
         // don't (they can legitimately extend outside the parent's geometry —
@@ -784,7 +842,7 @@ pub fn compose_frame(
 
         // Popups push first (earlier in vec = on-top in smithay z-order) so
         // they sit above the title bar and clipped window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, window_animation);
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -858,12 +916,13 @@ pub fn compose_frame(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        window_animation,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, window_animation);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
 
             // Border wraps title bar + content; drawn between window content
@@ -888,6 +947,7 @@ pub fn compose_frame(
                     opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
             }
 
@@ -915,6 +975,7 @@ pub fn compose_frame(
                     opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
                 shadow_count = 1;
             }
@@ -951,6 +1012,7 @@ pub fn compose_frame(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    window_animation,
                 );
 
                 if effective_bw > 0
@@ -969,6 +1031,7 @@ pub fn compose_frame(
                         opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                 }
 
@@ -994,15 +1057,16 @@ pub fn compose_frame(
                         opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                     shadow_count = 1;
                 }
             } else {
                 // Bare (`decoration = "none"`) or fullscreen: pass through.
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, window_animation);
         }
 
         if wants_blur && (target.len() - elem_start - shadow_count) > 0 {
@@ -1103,7 +1167,41 @@ pub fn compose_frame(
                 });
             }
         }
+
+        if state.window_close_pending(window) {
+            let snapshot = match closing::capture(
+                renderer,
+                &output.name(),
+                scale,
+                camera,
+                zoom,
+                is_pinned,
+                &target[elem_start..],
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::warn!("failed to snapshot closing window: {err}");
+                    None
+                }
+            };
+            completed_closes.push((window.clone(), snapshot));
+        }
     }
+
+    // Mutating the stage while iterating it would invalidate the z-order
+    // iterator. Finalize closes only after every live window was composed.
+    for (window, snapshot) in completed_closes {
+        state.finish_snapshotted_close(&window, snapshot);
+    }
+    let mut closing_elements = closing::render_for_output(
+        &state.closing_snapshots,
+        &output.name(),
+        camera,
+        zoom,
+        output_scale,
+    );
+    closing_elements.extend(zoomed_normal);
+    zoomed_normal = closing_elements;
 
     #[cfg(feature = "profile-with-tracy")]
     {

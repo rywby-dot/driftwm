@@ -576,6 +576,7 @@ impl CompositorHandler for DriftWm {
                         // `fit_window_snapped` overwrites with the post-fit
                         // rect; non-snapped fit and fullscreen keep this.
                         self.refresh_stable_snap_rect(&window);
+                        self.start_window_open_animation(&window);
 
                         if let Some(client_output) = self.pending_fullscreen.remove(&root) {
                             let target = self.resolve_fullscreen_output(&root, client_output);

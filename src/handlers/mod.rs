@@ -659,7 +659,7 @@ impl ForeignToplevelHandler for DriftWm {
     fn close(&mut self, wl_surface: WlSurface) {
         let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
-            window.send_close();
+            self.request_window_close(&window);
         }
     }
 

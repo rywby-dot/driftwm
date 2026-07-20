@@ -717,7 +717,7 @@ impl DriftWm {
                     )
                 };
                 if still_inside {
-                    pc.window.send_close();
+                    self.request_window_close(&pc.window);
                 }
                 return;
             }

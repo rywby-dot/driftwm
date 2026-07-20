@@ -264,7 +264,7 @@ momentum coast: 0 = off, 0.5 = default, 1 = floatiest
 
 Default: `0.3`
 
-camera lerp factor (higher = faster)
+camera/window animation speed (higher = faster)
 
 ### `auto_navigate_on_close`
 

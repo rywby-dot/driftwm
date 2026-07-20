@@ -445,7 +445,7 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
 
 fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let window = window_by_selector(state, sel.as_ref())?;
-    window.send_close();
+    state.request_window_close(&window);
     Ok(Response::Ok)
 }
 

@@ -287,6 +287,8 @@ impl DriftWm {
             pending_ssd: HashSet::new(),
             decoration_scale: 1,
             render: RenderCache::new(),
+            window_animations: Default::default(),
+            closing_snapshots: Vec::new(),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             render_device: None,

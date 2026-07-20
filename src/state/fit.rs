@@ -92,6 +92,7 @@ impl DriftWm {
             visual_center: center,
         } = self.compute_fit_geometry(window);
 
+        self.animate_window_geometry(window, new_loc, target_size);
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
         // After the map — set_fit needs the window's stage entry, which the
@@ -137,6 +138,7 @@ impl DriftWm {
         // then re-center using the real post-unfit size.
         let pre_exit_size = window.geometry().size;
 
+        self.animate_window_geometry(window, new_loc, saved_size);
         window.exit_fit_configure(saved_size);
         self.map_window(window.clone(), new_loc, false);
 
@@ -248,7 +250,20 @@ impl DriftWm {
                 .filter(|w| w != window)
                 .collect()
         };
+        let old_member_positions: Vec<_> = cluster_members
+            .iter()
+            .filter_map(|member| {
+                self.stage
+                    .position_of(member)
+                    .map(|loc| (member.clone(), loc))
+            })
+            .collect();
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        for (member, old_loc) in old_member_positions {
+            if let Some(new_loc) = self.stage.position_of(&member) {
+                self.animate_window_geometry_from(&member, old_loc, new_loc);
+            }
+        }
         self.fit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
@@ -289,7 +304,20 @@ impl DriftWm {
                 .filter(|w| w != window)
                 .collect()
         };
+        let old_member_positions: Vec<_> = cluster_members
+            .iter()
+            .filter_map(|member| {
+                self.stage
+                    .position_of(member)
+                    .map(|loc| (member.clone(), loc))
+            })
+            .collect();
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        for (member, old_loc) in old_member_positions {
+            if let Some(new_loc) = self.stage.position_of(&member) {
+                self.animate_window_geometry_from(&member, old_loc, new_loc);
+            }
+        }
         self.unfit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);

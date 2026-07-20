@@ -220,6 +220,16 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         return;
     };
 
+    // Remember what was active before ticking. An animation may finish during
+    // this tick, but its final state still needs to be presented once.
+    let animated_outputs_before: Vec<Output> = data
+        .space
+        .outputs()
+        .filter(|output| data.output_has_active_animations(output))
+        .cloned()
+        .collect();
+    let global_visual_animation_before = data.has_global_visual_animations();
+
     // 1. Tick animations once for all outputs (before device borrow)
     data.tick_all_animations();
 
@@ -270,7 +280,9 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         if data.dpms_off_outputs.contains(&surface.output) {
             continue;
         }
-        if data.output_has_active_animations(&surface.output) {
+        if animated_outputs_before.contains(&surface.output)
+            || data.output_has_active_animations(&surface.output)
+        {
             data.redraws_needed.insert(surface.output.clone());
         }
         // Chunked-bg with tiles still to upload: keep firing frames until the
@@ -295,6 +307,8 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         || data.cursor.exec_cursor_show_at.is_some()
         || data.cursor.exec_cursor_deadline.is_some()
         || data.cursor_is_animated()
+        || global_visual_animation_before
+        || data.has_global_visual_animations()
     {
         data.mark_all_dirty();
     } else if data.render.background_is_animated {
@@ -660,6 +674,7 @@ pub fn init_udev(
         .handle()
         .insert_source(drm_notifier, move |event, meta, data: &mut DriftWm| {
             let mut dev = device_for_drm.borrow_mut();
+            let mut render_after_event = false;
             match event {
                 DrmEvent::VBlank(crtc) => {
                     let Some(surface) = dev.surfaces.get_mut(&crtc) else {
@@ -677,13 +692,19 @@ pub fn init_udev(
                     if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
                         data.loop_handle.remove(token);
                     }
-                    if data.redraws_needed.contains(&surface.output) {
-                        render_frame(data, &mut surface.compositor, &surface.output, crtc);
-                    }
+                    render_after_event = true;
                 }
                 DrmEvent::Error(err) => {
                     tracing::error!("DRM error: {err}");
                 }
+            }
+            drop(dev);
+
+            // VBlank is the clock for output animations. Re-enter the regular
+            // render path so it advances animation state and marks the affected
+            // output dirty before deciding whether another frame is needed.
+            if render_after_event {
+                render_if_needed(data);
             }
         })?;
 
@@ -1517,6 +1538,10 @@ fn queue_estimated_vblank_timer(data: &mut DriftWm, output: &Output, crtc: crtc:
         .loop_handle
         .insert_source(timer, move |_, _, data: &mut DriftWm| {
             data.estimated_vblank_timers.remove(&crtc);
+            // EmptyFrame produces no kernel VBlank. Treat this timer as its
+            // replacement so an ongoing animation can advance and request the
+            // next frame without waiting for unrelated input or client damage.
+            render_if_needed(data);
             TimeoutAction::Drop
         }) {
         Ok(tok) => {

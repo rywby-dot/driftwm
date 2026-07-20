@@ -70,8 +70,8 @@ pub struct Config {
     pub edge_pan_cursor: bool,
     /// Cursor edge-pan activation zone, px from the edge.
     pub edge_pan_cursor_zone: f64,
-    /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
-    /// Lower = smoother; 1 = instant; 0 would freeze the camera.
+    /// Base lerp factor for camera and window animations (frame-rate
+    /// independent), in (0, 1]. Lower = smoother; 1 = instant.
     pub animation_speed: f64,
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
@@ -725,13 +725,12 @@ impl Config {
             "navigation.drift",
             &mut errors,
         );
-        // Valid range is (0, 1]: at 0 the lerp factor stays 0 and the camera
-        // never reaches its target, so reject it (and negatives/NaN) back to the
-        // default rather than freezing. Above 1 just clamps to instant.
+        // Valid range is (0, 1]: at 0 the lerp factor stays 0 and animations
+        // never reach their targets. Above 1 just clamps to instant.
         let animation_speed = match raw.navigation.animation_speed {
             Some(v) if v <= 0.0 || v.is_nan() => {
                 warn_and_collect!(
-                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
+                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes animations), using 0.3"
                 );
                 0.3
             }
