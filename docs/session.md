@@ -91,7 +91,7 @@ Escape hatches, for closes you want to stay real closes:
 restore_session = true
 ```
 
-On a graceful shutdown — `quit`/`Ctrl+Alt+Shift+Q` or a logout that sends
+On a graceful shutdown — `quit`/`Super+Ctrl+Shift+Q` or a logout that sends
 SIGTERM/SIGHUP — every eligible live window is saved. On the next launch they
 come back as dormant suspended windows at the positions they were at; nothing
 auto-launches, you relaunch each one same as any other suspended window (or
@@ -154,9 +154,12 @@ dev session run inside your main one can never clobber it. Opt in with
 driftwm --backend winit --session-file /tmp/driftwm-dev-session.json
 ```
 
-This is unrelated to suspended windows within a single run — those are always
-live and durable the moment they're created, in any backend. It only affects
-whether a *quit* is saved to (and a *startup* is restored from) a file at all.
+This is unrelated to suspended windows within a single run — those are on the
+canvas the moment they're created, in any backend. Durability, though, needs a
+store: the udev backend uses the default path, and a winit run persists only
+with `--session-file`. Without a store path nothing is written — the flag only
+affects whether a *quit* is saved to (and a *startup* is restored from) a file
+at all.
 
 ## IPC
 

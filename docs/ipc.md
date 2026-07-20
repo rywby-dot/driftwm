@@ -50,8 +50,10 @@ live one (raising/panning to it, or reading/setting its canvas position);
 
 A selector matches by app_id substring or `--id`, same as everywhere else.
 When a live client and a suspended stand-in share the same `app_id`, an
-app_id-substring selector always resolves to the **live client** — target the
-stand-in by its `id` instead.
+app_id-substring selector resolves to the **live client** for commands that can
+act on either (`focus`, `move`, `close`, `suspend`) — target the stand-in by
+its `id` instead. `relaunch` is the exception: it only ever acts on a stand-in,
+so an app_id selector there resolves straight to the matching suspended window.
 
 > [!NOTE]
 > Between spawning a relaunch and its adoption (the relaunched app's first

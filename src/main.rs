@@ -378,7 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("Starting event loop — launch apps with: WAYLAND_DISPLAY={socket_name} <app>");
-    event_loop.run(None, &mut data, |data| {
+    let run_result = event_loop.run(None, &mut data, |data| {
         backend::udev::render_if_needed(data);
         data.refresh_and_flush_clients();
         // Expire suspend / real-close marks a refused close left behind, and
@@ -388,14 +388,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = std::time::Instant::now();
         data.sweep_marks(now);
         data.sweep_pending_relaunches(now);
-    })?;
+    });
 
-    // Both Action::Quit and SIGTERM/SIGHUP reach here via event_loop.run()
-    // returning — flush the durable session (fsync'd) before wiping the
-    // runtime state file.
+    // Runs on both a clean Action::Quit/SIGTERM exit and a loop error, so a
+    // shutdown fault never silently drops the durable session: flush it
+    // (fsync'd) before wiping the runtime state file.
     data.serialize_session_on_shutdown();
-
     state::remove_state_file();
 
+    run_result?;
     Ok(())
 }
