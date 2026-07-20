@@ -66,45 +66,17 @@ Multiple `*` wildcards are allowed in glob patterns: `"*terminal*"`.
 
 Regex patterns use the `regex` crate (RE2-compatible, no backreferences).
 
-## Effect fields
+## Field reference
 
-The table below describes how each field behaves on rules matching regular
-windows (xdg-toplevels). Layer-shell surfaces interpret chrome fields
-differently — see [Layer-shell surfaces](#layer-shell-surfaces) below.
+Every rule field — its type, default, accepted values, and per-field caveats
+(which fields `decoration = "none"` ignores, the blur GPU/VRAM cost, the one-shot
+`size`, how layer-shell surfaces opt into chrome) — is documented in the generated
+[config reference](config.md#window-rules), whose canonical source is
+[`config.reference.toml`](../config.reference.toml). This page is the recipe and
+semantics guide; the reference is the field dictionary.
 
-| Field                  | Type                     | Default   | Description                                                                                                                                  |
-| ---------------------- | ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `position`             | `[x, y]`                 | —         | Place window at canvas coordinates (window center, Y-up). Output-relative (origin = output center) when `pinned_to_screen` is set.           |
-| `size`                 | `[w, h]`                 | —         | Initial window dimensions in pixels (one-shot: the user/app can resize freely afterwards; pair with `widget = true` to keep the size locked) |
-| `widget`               | `bool`                   | `false`   | Pin window: immovable, below normal windows, excluded from navigation/alt-tab                                                                |
-| `pinned_to_screen`     | `bool`                   | `false`   | Pin to one output's screen space — see [Screen-pinned windows](#screen-pinned-windows)                                                       |
-| `decoration`           | string                   | inherited | Override decoration mode (see below)                                                                                                         |
-| `blur`                 | `bool`                   | `false`   | Blur compositor background behind this window                                                                                                |
-| `opacity`              | `0.0`–`1.0`              | `1.0`     | Window transparency (1.0 = fully opaque)                                                                                                     |
-| `border_width`         | px                       | inherited | Border width override. Set to `0` to disable the border even when global width is `> 0`. Ignored for `decoration = "none"`.                  |
-| `border_color`         | `"#rrggbb[aa]"`          | inherited | Per-window unfocused border color                                                                                                            |
-| `border_color_focused` | `"#rrggbb[aa]"`          | inherited | Per-window focused border color                                                                                                              |
-| `corner_radius`        | px                       | inherited | Per-window corner radius override. Affects content clip, border shape, and shadow. Ignored for `decoration = "none"`.                        |
-| `shadow`               | `bool`                   | inherited | Per-window shadow toggle. Overrides `[decorations] shadow`. Ignored for `decoration = "none"`.                                               |
-| `output`               | string                   | —         | Output name (e.g. `"DP-1"`) this window fullscreens onto — see [Fullscreen output](#fullscreen-output)                                       |
-| `pass_keys`            | `bool` or `["combo", …]` | `false`   | Forward keys to the app — see below                                                                                                          |
-
-> [!WARNING]
-> Blur has real GPU/VRAM cost. Results are cached and only recomputed when
-> the content behind a window changes, but the cost does **not** scale down with
-> zoom — a blurred window is processed at full resolution no matter how far you
-> zoom out. Many blurred windows, or a few at extreme zoom-out, can stutter and
-> consume significant VRAM. Prefer enabling `blur` on a handful of windows over
-> applying it globally. There's room to improve this further.
-
-### `decoration` values
-
-| Value       | Description                                                                                              |
-| ----------- | -------------------------------------------------------------------------------------------------------- |
-| `"client"`  | CSD — client draws its own titlebar (default)                                                            |
-| `"server"`  | SSD — driftwm draws a titlebar with the window title and a close button                                  |
-| `"minimal"` | SSD — no titlebar; shadow, corner clip, and border still apply per `[decorations]` / per-window rules    |
-| `"none"`    | Bare client surface — compositor adds zero chrome; per-window border/corner/shadow rules are ignored too |
+Layer-shell surfaces interpret chrome fields differently — see
+[Layer-shell surfaces](#layer-shell-surfaces) below.
 
 ### Screen-pinned windows
 
@@ -337,6 +309,18 @@ app_id but have a generic title:
 [[window_rules]]
 title  = "winit window"
 widget = true
+```
+
+### On-screen keyboard above other overlays
+
+Overlay layer-shell clients that share a wlr-layer (an on-screen keyboard, a touch
+visualizer) otherwise stack by launch order; a higher `layer_order` keeps this one
+on top (see [Layer-shell surfaces](#layer-shell-surfaces)):
+
+```toml
+[[window_rules]]
+app_id      = "wvkbd"
+layer_order = 10
 ```
 
 ## Debugging

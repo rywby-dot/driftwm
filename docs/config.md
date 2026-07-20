@@ -993,6 +993,14 @@ Per-output configuration. Each [[outputs]] entry matches by connector name. Find
 
 `mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the default, and the safe choice) uses the monitor's advertised preferred mode. "max" picks the highest resolution, then highest refresh. A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
 
+Fields (each [[outputs]] entry):
+
+- `name` — connector name, or "*" for the fallback entry (see above); required.
+- `scale` — fractional scale factor (default: 1.0).
+- `transform` — normal, 90, 180, 270, flipped, flipped-90, flipped-180, or flipped-270 (default: normal).
+- `position` — "auto" (left-to-right placement) or [x, y] in layout coords.
+- `mode` — "preferred", "max", "WxH", or "WxH@Hz" (see above; default: preferred).
+
 **Example:**
 
 ```toml
@@ -1012,6 +1020,8 @@ mode = "1920x1080@60"
 ## Window rules
 
 Window rules: match windows and apply per-window overrides. ALL matching rules are merged in config order (later rules override earlier ones for scalar fields; boolean flags are sticky-on). This lets you compose rules — e.g. one rule sets blur=true, a later one adds opacity=0.85.
+
+This section is the field reference. The full recipe collection, along with matching/merge semantics and pattern-syntax details, lives in docs/window-rules.md.
 
 Match criteria (at least one required; all specified must match):
 
@@ -1033,7 +1043,7 @@ To find a window's identifiers, run while the window is open:
 Effect fields:
 
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
-- `size` — [width, height] initial window dimensions (one-shot; user/app can resize after)
+- `size` — [width, height] initial window dimensions (one-shot; user/app can resize afterwards, so pair with widget = true to lock it)
 - `fullscreen` — true: force this window to open in fullscreen mode
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
@@ -1042,11 +1052,11 @@ Effect fields:
   - "server":  SSD — driftwm's titlebar
   - "minimal": SSD — no titlebar, just shadow + corners + border (this is the mode for chrome-on-borderless widgets; border_width / corner_radius / shadow rules apply)
   - "none":    bare client surface — compositor adds zero chrome, and per-window border_width / corner_radius / shadow rules are ignored. Use "minimal" if you want chrome without a titlebar.
-- `blur` — true: blur background behind this window (default: false)
+- `blur` — true: blur background behind this window (default: false). Real GPU/VRAM cost that does NOT scale down with zoom (a blurred window is processed at full resolution however far you zoom out), so prefer blur on a handful of windows over globally. Results are cached and only recomputed when the content behind the window changes.
 - `opacity` — 0.0–1.0: window transparency (default: 1.0, fully opaque)
 - `border_width` — per-window border width override (px). Set to 0 to disable border on a window even when [decorations] border_width > 0. Ignored for decoration = "none".
-- `border_color` — per-window unfocused border color hex (e.g. "#5c5c5c").
-- `border_color_focused` — per-window focused border color hex.
+- `border_color` — per-window unfocused border color, "#rrggbb" or "#rrggbbaa" (optional alpha byte), e.g. "#5c5c5c".
+- `border_color_focused` — per-window focused border color; same "#rrggbb[aa]" form, with an optional alpha byte.
 - `corner_radius` — per-window corner radius override (px). Affects content clip, border shape, and shadow. Ignored for decoration = "none".
 - `shadow` — per-window shadow toggle. Overrides [decorations] shadow. Ignored for decoration = "none".
 - `output` — output name (e.g. "DP-1") this window fullscreens onto. Takes precedence over the output the client itself requests. Omit to honor the client's request, then the active output. Find names under `outputs.*` in `driftwm msg state`. (default: unset)
@@ -1060,23 +1070,7 @@ Layer-shell surfaces (panels, notifications, bars like waybar): matched by their
 
 - `layer_order` — stacking among layer surfaces sharing the same wlr-layer (higher = on top; ties stack by map order, newest on top). The protocol has no z-index within a layer, so two overlay clients (e.g. an on-screen keyboard and a touch visualizer) otherwise stack by launch order. Also orders canvas-positioned layers among themselves. Ignored for regular windows.
 
-**Example: keep the on-screen keyboard above other overlay surfaces**
-
-```toml
-[[window_rules]]
-app_id      = "wvkbd"
-layer_order = 10
-```
-
-**Example: Desktop widget (pinned clock/calendar)**
-
-```toml
-[[window_rules]]
-app_id     = "my-widget"
-position   = [0, 0]
-widget     = true
-decoration = "none"
-```
+A few representative rules follow; docs/window-rules.md collects the rest.
 
 **Example: Picture-in-Picture, pinned to the screen, stays put while you pan/zoom**
 
@@ -1087,45 +1081,12 @@ pinned_to_screen = true
 position         = [0, -300]   # output-relative: 300px below center; movable, drop to center on the output
 ```
 
-**Example: Blurred transparent terminal**
-
-```toml
-[[window_rules]]
-app_id  = "kitty"
-opacity = 0.85
-blur    = true
-```
-
-**Example: Game, pass ALL keys to the app (mod+q, ctrl+q etc. reach the game)**
-
-```toml
-[[window_rules]]
-app_id    = "steam_app_*"
-pass_keys = true
-```
-
 **Example: Game, only let ctrl+q through, keep everything else (mod+q still closes)**
 
 ```toml
 [[window_rules]]
 app_id    = "factorio"
 pass_keys = ["ctrl+q"]
-```
-
-**Example: Regex match, any Steam game app**
-
-```toml
-[[window_rules]]
-app_id    = "/^steam_app_\\d+$/"
-pass_keys = true
-```
-
-**Example: Always open this game fullscreen on a specific monitor**
-
-```toml
-[[window_rules]]
-app_id = "steam_app_*"
-output = "DP-1"
 ```
 
 **Example: Compose rules, blur from first rule, opacity from second (both apply)**
@@ -1138,12 +1099,4 @@ blur   = true
 [[window_rules]]
 app_id  = "Alacritty"
 opacity = 0.9
-```
-
-**Example: Iced/libcosmic utility windows that share the main window's app_id**
-
-```toml
-[[window_rules]]
-title  = "winit window"
-widget = true
 ```

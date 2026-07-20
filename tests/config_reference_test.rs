@@ -176,3 +176,130 @@ fn reference_example_blocks_parse() {
         );
     }
 }
+
+/// The reference text from a `# ## <heading>` doc heading up to the next
+/// same-level heading (or EOF). The heading is matched only at the start of a
+/// line, so a heading string can't accidentally hit a substring inside prose.
+fn reference_section(heading: &str) -> &'static str {
+    let start = REFERENCE
+        .match_indices(heading)
+        .map(|(i, _)| i)
+        .find(|&i| i == 0 || REFERENCE.as_bytes()[i - 1] == b'\n')
+        .unwrap_or_else(|| panic!("config.reference.toml is missing heading {heading:?}"));
+    let body = &REFERENCE[start..];
+    let end = body[heading.len()..]
+        .find("\n# ## ")
+        .map_or(body.len(), |i| heading.len() + i);
+    &body[..end]
+}
+
+/// True if some line of `section` documents `field` as a two-column reference
+/// entry: after its `# #` comment prefix and alignment padding, the line begins
+/// with `field` and the em-dash separator follows. Requiring the `—` keeps
+/// example TOML (`field = value`) and longer field names (`border_color` vs
+/// `border_color_focused`) from counting as an entry.
+fn section_documents_field(section: &str, field: &str) -> bool {
+    section.lines().any(|line| {
+        let Some(body) = line.strip_prefix("# #") else {
+            return false;
+        };
+        let Some(rest) = body.trim_start().strip_prefix(field) else {
+            return false;
+        };
+        rest.trim_start().starts_with('—')
+    })
+}
+
+/// The field names serde lists after "expected one of" in a `deny_unknown_fields`
+/// rejection — the backtick-quoted tokens.
+fn expected_fields(err: &str) -> Vec<String> {
+    let (_, tail) = err
+        .split_once("expected one of")
+        .unwrap_or_else(|| panic!("not a deny_unknown_fields error:\n{err}"));
+    tail.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Feed a section an unknown field and assert every name serde reports as valid
+/// is documented there — the only check that catches a field added in code but
+/// forgotten in the docs. The reverse (documented but code-absent) is caught only
+/// via example blocks (`reference_example_blocks_parse`); prose-only names aren't verified.
+fn assert_all_fields_documented(bogus_toml: &str, heading: &str) {
+    let err = Config::from_toml_collect(bogus_toml)
+        .expect_err("an unknown field must be rejected by deny_unknown_fields")
+        .to_string();
+    let fields = expected_fields(&err);
+    assert!(!fields.is_empty(), "no field names parsed from:\n{err}");
+    let section = reference_section(heading);
+    for field in &fields {
+        assert!(
+            section_documents_field(section, field),
+            "field `{field}` exists in code but is undocumented in the \
+             {heading:?} section of config.reference.toml"
+        );
+    }
+}
+
+#[test]
+fn window_rule_fields_are_all_documented() {
+    assert_all_fields_documented(
+        "[[window_rules]]\napp_id = \"x\"\nbogus_field_zz = 1\n",
+        "# ## Window rules",
+    );
+}
+
+#[test]
+fn output_fields_are_all_documented() {
+    assert_all_fields_documented(
+        "[[outputs]]\nname = \"eDP-1\"\nbogus_field_zz = 1\n",
+        "# ## Outputs",
+    );
+}
+
+/// The body of every ```` ```toml ```` fence in a markdown document.
+fn toml_fences(md: &str) -> Vec<String> {
+    let mut fences = Vec::new();
+    let mut current: Option<String> = None;
+    for line in md.lines() {
+        match &mut current {
+            Some(buf) if line.trim_start().starts_with("```") => {
+                fences.push(std::mem::take(buf));
+                current = None;
+            }
+            Some(buf) => {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            None if line.trim() == "```toml" => current = Some(String::new()),
+            None => {}
+        }
+    }
+    fences
+}
+
+/// Every window-rule recipe in `docs/window-rules.md` must be valid, warning-free
+/// config, so a hand-written recipe can't drift into broken TOML unnoticed.
+#[test]
+fn window_rules_doc_snippets_parse() {
+    const DOC: &str = include_str!("../docs/window-rules.md");
+    let mut checked = 0;
+    for fence in toml_fences(DOC) {
+        if !fence.contains("[[window_rules]]") {
+            continue;
+        }
+        let (_, warnings) = Config::from_toml_collect(&fence)
+            .unwrap_or_else(|e| panic!("window-rules.md snippet failed to parse: {e}\n\n{fence}"));
+        assert!(
+            warnings.is_empty(),
+            "window-rules.md snippet produced warnings:\n{warnings:#?}\n\n{fence}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "found no [[window_rules]] snippets in docs/window-rules.md"
+    );
+}
