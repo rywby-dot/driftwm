@@ -989,17 +989,19 @@ Default: `0.5`
 
 Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. Winit backend ignores [[outputs]] entries.
 
-`mode` accepts "preferred", "WxH", or "WxH@Hz". A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
+`name = "*"` is a wildcard entry: it applies to any connected output that has no exact-name entry (exact entries always win). A fixed `position` makes no sense on the wildcard — it's ignored (falls back to "auto").
+
+`mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the default, and the safe choice) uses the monitor's advertised preferred mode. "max" picks the highest resolution, then highest refresh. A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
 
 **Example:**
 
 ```toml
 [[outputs]]
-name = "eDP-1"           # connector name (required)
+name = "eDP-1"           # connector name, or "*" for a fallback entry (required)
 scale = 1.5              # fractional scale (default: 1.0)
 transform = "normal"     # normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
 position = "auto"        # "auto" (left-to-right) or [x, y] in layout coords
-mode = "preferred"       # "preferred", "1920x1080", or "2560x1440@144"
+mode = "preferred"       # "preferred", "max", "1920x1080", or "2560x1440@144"
 
 [[outputs]]
 name = "HDMI-A-1"

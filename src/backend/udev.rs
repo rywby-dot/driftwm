@@ -931,18 +931,8 @@ fn log_drm_connectors(drm: &DrmDevice) {
     }
 }
 
-/// Pick the best mode for a connector: prefer MODE_TYPE_PREFERRED,
-/// fall back to highest resolution (w*h), then highest refresh.
-fn pick_preferred_mode(modes: &[control::Mode]) -> Option<control::Mode> {
-    if modes.is_empty() {
-        return None;
-    }
-    if let Some(preferred) = modes
-        .iter()
-        .find(|m| m.mode_type().contains(control::ModeTypeFlags::PREFERRED))
-    {
-        return Some(*preferred);
-    }
+/// Pick the mode with the highest resolution (w*h), then highest refresh.
+fn pick_max_mode(modes: &[control::Mode]) -> Option<control::Mode> {
     modes
         .iter()
         .max_by_key(|m| {
@@ -950,6 +940,18 @@ fn pick_preferred_mode(modes: &[control::Mode]) -> Option<control::Mode> {
             (w as u64 * h as u64, m.vrefresh() as u64)
         })
         .copied()
+}
+
+/// Pick the best mode for a connector: prefer MODE_TYPE_PREFERRED,
+/// fall back to the highest-resolution mode.
+fn pick_preferred_mode(modes: &[control::Mode]) -> Option<control::Mode> {
+    if let Some(preferred) = modes
+        .iter()
+        .find(|m| m.mode_type().contains(control::ModeTypeFlags::PREFERRED))
+    {
+        return Some(*preferred);
+    }
+    pick_max_mode(modes)
 }
 
 /// Where a chosen mode came from. `SynthesizedCvt` modes haven't been
@@ -972,6 +974,7 @@ pub(crate) fn pick_mode_for_config(
 ) -> Option<(control::Mode, ModeSource)> {
     match config {
         ConfigOutputMode::Preferred => pick_preferred_mode(modes).map(|m| (m, ModeSource::Edid)),
+        ConfigOutputMode::Max => pick_max_mode(modes).map(|m| (m, ModeSource::Edid)),
         ConfigOutputMode::Size(w, h) => {
             let matched = modes
                 .iter()
@@ -1038,6 +1041,7 @@ fn resolve_pending_mode(
             }
         }
         crate::state::ModeIntent::Preferred => pick_preferred_mode(connector.modes()),
+        crate::state::ModeIntent::Max => pick_max_mode(connector.modes()),
     }
 }
 
@@ -1588,15 +1592,17 @@ fn apply_pending_mode_changes(
             refresh: (mode.vrefresh() * 1000) as i32,
         };
 
-        // Config reload queues Preferred on every reload, so skip the modeset
-        // when it resolves to the mode already in use. Scoped to Preferred:
-        // reload already change-detects Size/SizeRefresh, and explicit
-        // EdidIndex/Custom requests are one-shot user actions worth honoring
-        // even when nominally identical to the current mode.
-        if intent == crate::state::ModeIntent::Preferred
-            && surface.output.current_mode() == Some(new_smithay_mode)
+        // Config reload queues Preferred/Max on every reload, so skip the
+        // modeset when it resolves to the mode already in use. Scoped to those
+        // rule-derived intents: reload already change-detects Size/SizeRefresh,
+        // and explicit EdidIndex/Custom requests are one-shot user actions
+        // worth honoring even when nominally identical to the current mode.
+        if matches!(
+            intent,
+            crate::state::ModeIntent::Preferred | crate::state::ModeIntent::Max
+        ) && surface.output.current_mode() == Some(new_smithay_mode)
         {
-            tracing::debug!("Mode change for '{name}': already at preferred mode, skipping");
+            tracing::debug!("Mode change for '{name}': already at requested mode, skipping");
             continue;
         }
 

@@ -702,7 +702,7 @@ impl WindowRule {
 /// Built by merging ALL matching `WindowRule`s in config order
 /// (later rules override earlier ones for scalar fields; boolean flags
 /// are sticky-on).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppliedWindowRule {
     pub fullscreen: Option<bool>,
     pub widget: bool,
@@ -1024,6 +1024,8 @@ pub enum OutputMode {
     Size(i32, i32),
     /// WxH@Hz — approximate match (DRM reports millihertz).
     SizeRefresh(i32, i32, u32),
+    /// Highest resolution (w*h), then highest refresh.
+    Max,
 }
 
 /// Built-in dot grid shader — used when no background source is configured.

@@ -22,6 +22,7 @@ mod config_reload;
 mod configure_sequences;
 mod focus_timing;
 mod hotplug;
+mod opacity;
 mod popups;
 mod real_clients;
 mod send_to_output;

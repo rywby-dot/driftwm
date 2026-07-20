@@ -1,16 +1,20 @@
 use crate::DriftWm;
-use driftwm::canvas::{CanvasPos, canvas_to_screen};
+use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_space_focus_loc};
 use smithay::{
     input::pointer::{ButtonEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle},
     utils::{Logical, Point},
 };
 
-pub struct LayerClickGrab {
+/// Click grab for screen-space targets (wlr layers, pinned windows):
+/// recomputes the canvas-adjusted focus location on every motion so the client
+/// sees screen-space coords at any zoom, where the default click grab would
+/// freeze the offset captured at press.
+pub struct ScreenSpaceClickGrab {
     pub start_data: GrabStartData<DriftWm>,
     pub screen_loc: Point<f64, Logical>,
 }
 
-impl PointerGrab<DriftWm> for LayerClickGrab {
+impl PointerGrab<DriftWm> for ScreenSpaceClickGrab {
     fn motion(
         &mut self,
         data: &mut DriftWm,
@@ -24,9 +28,10 @@ impl PointerGrab<DriftWm> for LayerClickGrab {
         let canvas_pos = event.location;
         let camera = data.camera();
         let zoom = data.zoom();
-        let screen_pos = canvas_to_screen(CanvasPos(canvas_pos), camera, zoom).0;
+        let screen = canvas_to_screen(CanvasPos(canvas_pos), camera, zoom);
 
-        let new_loc = self.screen_loc + (canvas_pos - screen_pos);
+        let new_loc =
+            screen_space_focus_loc(ScreenPos(self.screen_loc), CanvasPos(canvas_pos), screen);
         let focus = self
             .start_data
             .focus
@@ -44,7 +49,7 @@ impl PointerGrab<DriftWm> for LayerClickGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            handle.unset_grab(self, data, event.serial, event.time, false);
+            handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
 

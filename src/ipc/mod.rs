@@ -180,7 +180,7 @@ fn flush_pending_events(stream: &UnixStream, state: &mut DriftWm) -> std::io::Re
     Ok(())
 }
 
-fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
+pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
     // The animated setters (Camera/Zoom) only stash a target — they don't
     // self-schedule a frame — so every state-changing command needs the kick.
     // Pure queries don't, and shouldn't force a redraw.
@@ -198,6 +198,7 @@ fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Subscribe => unreachable!("Subscribe is handled before dispatch"),
         Request::Focus(arg) => cmd_focus(arg, state),
         Request::Move { window, to } => cmd_move(window, to, state),
+        Request::Opacity { window, value } => cmd_opacity(window, value, state),
         Request::Close(sel) => cmd_close(sel, state),
         Request::Action(spec) => cmd_action(&spec, state),
         Request::Screenshot {
@@ -215,6 +216,7 @@ fn is_mutating(request: &Request) -> bool {
             | Request::Zoom(Some(_))
             | Request::Focus(Some(_))
             | Request::Move { to: Some(_), .. }
+            | Request::Opacity { value: Some(_), .. }
             | Request::Close(_)
             | Request::Action(_)
     )
@@ -441,6 +443,42 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
             let activate = state.focused_window().as_ref() == Some(&window);
             state.map_window(window, loc, activate);
             Ok(Response::Position { x, y })
+        }
+    }
+}
+
+/// Runtime per-window opacity. The stored `AppliedWindowRule` is the single
+/// source of truth: seeded from window rules at map, overwritten here. Applies
+/// to anything the compositor renders, so no widget/pinned/fullscreen guard.
+fn cmd_opacity(window: Option<WindowSelector>, value: Option<f64>, state: &mut DriftWm) -> Reply {
+    let window = window_by_selector(state, window.as_ref())?;
+    let surface = window
+        .wl_surface()
+        .ok_or_else(|| "window has no surface".to_string())?;
+    match value {
+        None => Ok(Response::Opacity(
+            driftwm::config::applied_rule(&surface)
+                .and_then(|r| r.opacity)
+                .unwrap_or(1.0),
+        )),
+        Some(v) => {
+            // Reject rather than clamp: the docs promise commands fail on bad values.
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                return Err("opacity must be between 0.0 and 1.0".to_string());
+            }
+            smithay::wayland::compositor::with_states(&surface, |states| {
+                states.data_map.insert_if_missing_threadsafe(|| {
+                    std::sync::Mutex::new(driftwm::config::AppliedWindowRule::default())
+                });
+                states
+                    .data_map
+                    .get::<std::sync::Mutex<driftwm::config::AppliedWindowRule>>()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .opacity = Some(v);
+            });
+            Ok(Response::Opacity(v))
         }
     }
 }

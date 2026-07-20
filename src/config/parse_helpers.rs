@@ -467,6 +467,9 @@ pub(super) fn parse_output_mode(s: &str) -> Result<OutputMode, String> {
     if s == "preferred" {
         return Ok(OutputMode::Preferred);
     }
+    if s == "max" {
+        return Ok(OutputMode::Max);
+    }
     // "WxH" or "WxH@Hz"
     let (res_part, hz_part) = match s.split_once('@') {
         Some((res, hz)) => (res, Some(hz)),
@@ -517,17 +520,30 @@ pub(super) fn parse_output_position(val: &::toml::Value) -> Result<OutputPositio
     }
 }
 
-pub(super) fn parse_output_rule(r: OutputRuleFile) -> Result<OutputConfig, String> {
+pub(super) fn parse_output_rule(
+    r: OutputRuleFile,
+    errors: &mut Warnings,
+) -> Result<OutputConfig, String> {
     let scale = match r.scale {
         Some(s) if s <= 0.0 => return Err(format!("scale must be positive, got {s}")),
         other => other,
     };
     let transform = r.transform.map(|s| parse_transform(&s)).transpose()?;
-    let position = r
+    let mut position = r
         .position
         .map(|v| parse_output_position(&v))
         .transpose()?
         .unwrap_or_default();
+    // A fixed position would put every wildcard-matched monitor at the same
+    // spot, so it's meaningless — drop it but keep the rest of the entry.
+    if r.name == "*" && matches!(position, OutputPosition::Fixed(..)) {
+        collect_warn(
+            errors,
+            "config: [[outputs]] wildcard \"*\" can't have a fixed position, using \"auto\""
+                .to_string(),
+        );
+        position = OutputPosition::Auto;
+    }
     let mode = r
         .mode
         .map(|s| parse_output_mode(&s))
@@ -620,6 +636,11 @@ mod tests {
             parse_output_mode("preferred").unwrap(),
             OutputMode::Preferred
         );
+    }
+
+    #[test]
+    fn parse_mode_max() {
+        assert_eq!(parse_output_mode("max").unwrap(), OutputMode::Max);
     }
 
     #[test]

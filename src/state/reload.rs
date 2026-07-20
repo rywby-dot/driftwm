@@ -226,15 +226,18 @@ impl DriftWm {
                         })
                     }
                     // The state layer has no EDID/connector knowledge, so it
-                    // can't tell whether the current mode already is the
-                    // preferred one. Queue unconditionally; the backend skips
-                    // the modeset when the resolved preferred mode is a no-op.
+                    // can't resolve "preferred"/"max" or tell whether the
+                    // current mode already satisfies the rule. Queue
+                    // unconditionally; the backend skips no-op modesets.
                     // Not on winit: nothing drains the queue there, and the
                     // default-rule intent would sit in debug counters forever.
-                    ConfigOutputMode::Preferred
+                    ConfigOutputMode::Preferred | ConfigOutputMode::Max
                         if !matches!(self.backend, Some(crate::backend::Backend::Winit(_))) =>
                     {
-                        Some(crate::state::ModeIntent::Preferred)
+                        Some(match &want_mode {
+                            ConfigOutputMode::Max => crate::state::ModeIntent::Max,
+                            _ => crate::state::ModeIntent::Preferred,
+                        })
                     }
                     _ => None,
                 };

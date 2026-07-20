@@ -49,6 +49,14 @@ pub enum Msg {
         #[arg(long)]
         id: Option<u64>,
     },
+    /// Get a window's opacity, or set it with `<value>` (0.0–1.0). Targets the
+    /// focused window, or `--id` (the stable id shown in `state`).
+    Opacity {
+        value: Option<f64>,
+        /// Target the window with this stable id (from `state`).
+        #[arg(long)]
+        id: Option<u64>,
+    },
     /// Close the focused window, or a window by app_id substring or `--id`.
     Close {
         app_id: Option<String>,
@@ -211,6 +219,17 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
                 to,
             }
         }
+        Msg::Opacity { value, id } => {
+            // serde_json serializes non-finite floats as null, which the server
+            // would read back as a get instead of rejecting — refuse them here.
+            if value.is_some_and(|v| !v.is_finite()) {
+                return Err("opacity must be between 0.0 and 1.0".to_string());
+            }
+            Request::Opacity {
+                window: id.map(WindowSelector::Id),
+                value: *value,
+            }
+        }
         Msg::Close { app_id, id } => Request::Close(window_selector(app_id, *id)),
         Msg::Action { spec } => Request::Action(spec.join(" ")),
         Msg::Screenshot {
@@ -332,6 +351,7 @@ fn print_response(response: Response) {
         }
         Response::Focused(None) => println!("(none)"),
         Response::Position { x, y } => println!("{x} {y}"),
+        Response::Opacity(value) => println!("{value}"),
         Response::Screenshot { path, .. } => println!("{path}"),
         Response::Ok => println!("ok"),
         Response::State(info) => print_state(&info),
@@ -495,6 +515,68 @@ mod tests {
             to_request(&Msg::Move {
                 x: Some(1),
                 y: None,
+                id: None
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn opacity_maps_value_and_id() {
+        assert_eq!(
+            to_request(&Msg::Opacity {
+                value: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Opacity {
+                window: None,
+                value: None
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Opacity {
+                value: Some(0.5),
+                id: None
+            })
+            .unwrap(),
+            Request::Opacity {
+                window: None,
+                value: Some(0.5)
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Opacity {
+                value: None,
+                id: Some(3)
+            })
+            .unwrap(),
+            Request::Opacity {
+                window: Some(WindowSelector::Id(3)),
+                value: None
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Opacity {
+                value: Some(0.25),
+                id: Some(3)
+            })
+            .unwrap(),
+            Request::Opacity {
+                window: Some(WindowSelector::Id(3)),
+                value: Some(0.25)
+            }
+        );
+        assert!(
+            to_request(&Msg::Opacity {
+                value: Some(f64::NAN),
+                id: None
+            })
+            .is_err()
+        );
+        assert!(
+            to_request(&Msg::Opacity {
+                value: Some(f64::INFINITY),
                 id: None
             })
             .is_err()

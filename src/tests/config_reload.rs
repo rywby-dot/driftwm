@@ -80,6 +80,32 @@ mode = "preferred"
 }
 
 #[test]
+fn reload_to_max_mode_via_wildcard_queues_intent() {
+    let mut f = Fixture::with_config(config(""));
+    f.add_output(1, (1920, 1080));
+
+    // A wildcard entry applies to any output without an exact-name entry; like
+    // "preferred", "max" needs the connector's mode list to resolve, so the
+    // state layer queues it unconditionally for the backend to resolve.
+    f.state().reload_config_from_contents(
+        r#"
+[[outputs]]
+name = "*"
+mode = "max"
+"#,
+    );
+
+    assert_eq!(
+        f.state().pending_mode_changes.get("HEADLESS-1"),
+        Some(&ModeIntent::Max)
+    );
+
+    // Only the udev render loop drains this queue; the headless fixture has no
+    // backend, so drain it by hand to leave teardown at the leak baseline.
+    f.state().pending_mode_changes.clear();
+}
+
+#[test]
 fn reload_to_matching_explicit_mode_queues_nothing() {
     let mut f = Fixture::with_config(config(""));
     f.add_output(1, (1920, 1080));

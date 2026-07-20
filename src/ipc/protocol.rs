@@ -53,6 +53,15 @@ pub enum Request {
         #[serde(default)]
         to: Option<(i32, i32)>,
     },
+    /// Get or set a window's opacity. `window` `None` targets the focused
+    /// window; `value` `None` reads instead of setting it. The value is `0.0`
+    /// (transparent) to `1.0` (opaque); a window with no stored rule reads `1.0`.
+    Opacity {
+        #[serde(default)]
+        window: Option<WindowSelector>,
+        #[serde(default)]
+        value: Option<f64>,
+    },
     /// Close a window (the focused one when `None`); errors when nothing matches.
     Close(Option<WindowSelector>),
     /// Run a config action by its config-grammar string, e.g. `"switch-layout
@@ -112,6 +121,8 @@ pub enum Response {
         x: i32,
         y: i32,
     },
+    /// A window's opacity in `0.0`–`1.0`.
+    Opacity(f64),
     /// A written screenshot: absolute `path` and pixel dimensions.
     Screenshot {
         path: String,
@@ -287,6 +298,22 @@ mod tests {
                 window: Some(WindowSelector::AppId("foot".into())),
                 to: Some((100, 200)),
             },
+            Request::Opacity {
+                window: None,
+                value: None,
+            },
+            Request::Opacity {
+                window: None,
+                value: Some(0.5),
+            },
+            Request::Opacity {
+                window: Some(WindowSelector::Id(3)),
+                value: None,
+            },
+            Request::Opacity {
+                window: Some(WindowSelector::AppId("foot".into())),
+                value: Some(0.75),
+            },
             Request::Close(None),
             Request::Close(Some(WindowSelector::Id(7))),
             Request::Action("switch-layout next".into()),
@@ -344,6 +371,21 @@ mod tests {
             Request::Move {
                 window: None,
                 to: None
+            }
+        );
+        // Opacity fields both default too: bare `{}` is the focused-window read.
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Opacity":{}}"#).unwrap(),
+            Request::Opacity {
+                window: None,
+                value: None
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"Opacity":{"window":5,"value":0.5}}"#).unwrap(),
+            Request::Opacity {
+                window: Some(WindowSelector::Id(5)),
+                value: Some(0.5)
             }
         );
         // Screenshot window target defaults its selector too.
@@ -414,6 +456,7 @@ mod tests {
                 id: 5,
                 app_id: Some("foot".into()),
             }))),
+            Ok(Response::Opacity(0.5)),
             Ok(Response::Ok),
             Err("no focused window".into()),
         ];

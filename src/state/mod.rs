@@ -243,6 +243,10 @@ pub enum ModeIntent {
     /// output's rule is (or reverts to) "preferred"; the backend resolves it
     /// against the connector and skips the modeset when it's already active.
     Preferred,
+    /// The highest-resolution mode (then highest refresh). Queued by config
+    /// reload for a "max" rule; resolved against the connector, and the
+    /// modeset is skipped when it's already active.
+    Max,
 }
 
 /// Per-output viewport state, stored on each `Output` via `UserDataMap`
@@ -520,6 +524,9 @@ pub struct DriftWm {
     pub lock_surfaces: HashMap<Output, LockSurface>,
 
     pub pointer_over_layer: bool,
+    /// Last pointer hit-test landed on a screen-space target — a wlr layer or a
+    /// screen-pinned window (both live in screen coords, unlike canvas windows).
+    pub pointer_over_screen_space: bool,
     pub canvas_layers: Vec<CanvasLayer>,
 
     pub config: Config,
