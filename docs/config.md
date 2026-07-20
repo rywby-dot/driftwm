@@ -27,13 +27,13 @@ Sloppy focus: keyboard focus follows the pointer to windows. Moving to empty can
 
 Default: `false`
 
-Suspend instead of close when a window is closed by the client (titlebar X, in-app quit). close-window bindings, `msg close`, and taskbar closes still close for real. Per-window overridable via a `suspend_on_close` window rule.
+Suspend instead of close when a window is closed by the client (titlebar X, in-app quit). close-window bindings, `msg close`, and taskbar closes still close for real. Per-window overridable via a `suspend_on_close` window rule. See docs/session.md.
 
 ### `restore_session`
 
 Default: `false`
 
-Restore your canvas after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). Suspended windows are saved to ~/.local/state/driftwm/session.json regardless of this setting; it only controls whether still-open windows are saved too.
+Restore your canvas after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). Suspended windows are saved to ~/.local/state/driftwm/session.json regardless of this setting; it only controls whether still-open windows are saved too. See docs/session.md.
 
 ### `window_placement`
 

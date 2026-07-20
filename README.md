@@ -221,6 +221,19 @@ management means your dock/taskbar shows all windows — click one and the
 viewport pans to it and centers it. See [`extras/`](extras/) for a fuzzel
 window-search script that lets you search and jump to any open window.
 
+### Window suspend & session restore
+
+Close a window and leave a placeholder behind instead of losing it:
+`suspend-window` swaps the window for a compositor-drawn stand-in at the same
+canvas spot — press `Enter` or click its name to bring the app right back, in
+the same place. `suspend_on_close` does this automatically for every
+client-initiated close (including the title-bar `×`, which is otherwise
+indistinguishable from the app quitting) — cheap crash recovery as a side
+effect. `restore_session` saves your whole canvas on quit/logout and restores
+it (dormant, nothing auto-launches) on the next start.
+
+See [docs/session.md](docs/session.md).
+
 ### Everything else
 
 - New window placement: in viewport center (default), under cursor, or snapped adjacent to the focused window's cluster
@@ -385,6 +398,10 @@ X11 support. You can override the binary path or disable the integration in
 driftwm auto-detects whether it's running nested (inside an existing Wayland
 session) or on real hardware (from a TTY). Just run `driftwm`. For display
 manager integration, select "driftwm" from the session menu.
+
+A nested session skips [session restore](docs/session.md#nested--dev-sessions)
+by default (`--session-file <path>` opts it in), so a dev instance can never
+clobber your real session file.
 
 > [!TIP]
 > When launched by a display manager, driftwm runs as a systemd user service — view logs with `journalctl --user -u driftwm.service` (add `-f` to follow). Run directly and logs go to stderr.

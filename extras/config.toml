@@ -68,6 +68,7 @@ decoration_fit_snapped = true
 "XF86MonBrightnessUp" = "spawn swayosd-client --brightness raise"
 "XF86MonBrightnessDown" = "spawn swayosd-client --brightness lower"
 "mod+s" = "exec ~/Documents/work/scripts/driftwm/extras/scripts/window-search.sh"
+"mod+shift+s" = "suspend-window"
 "mod+m" = "fit-window-snapped"
 "mod+shift+m" = "fit-window"
 
