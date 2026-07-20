@@ -253,11 +253,14 @@ impl Config {
         self.touch_gestures.lookup(trigger, context)
     }
 
-    /// Find the output config for a given connector name (e.g. "eDP-1").
+    /// Find the output config for a given connector name (e.g. "eDP-1"). An
+    /// exact-name entry always wins; a `name = "*"` entry is the fallback for
+    /// any output without one.
     pub fn output_config(&self, connector_name: &str) -> Option<&OutputConfig> {
         self.output_configs
             .iter()
             .find(|c| c.name == connector_name)
+            .or_else(|| self.output_configs.iter().find(|c| c.name == "*"))
     }
 
     /// Parse a TOML string into a Config. Useful for testing and config reload.
@@ -683,7 +686,7 @@ impl Config {
         let output_configs = {
             let mut configs: Vec<OutputConfig> = Vec::new();
             for rule in raw.outputs.unwrap_or_default() {
-                match parse_output_rule(rule) {
+                match parse_output_rule(rule, &mut errors) {
                     Ok(config) => {
                         if configs.iter().any(|c| c.name == config.name) {
                             warn_and_collect!(
@@ -1356,6 +1359,35 @@ mod tests {
         assert!(config.output_config("eDP-1").is_some());
         assert!(config.output_config("HDMI-A-1").is_some());
         assert!(config.output_config("DP-2").is_none());
+    }
+
+    #[test]
+    fn output_config_wildcard_is_fallback_exact_wins() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+            scale = 1.5
+
+            [[outputs]]
+            name = "*"
+            scale = 2.0
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.output_config("eDP-1").unwrap().scale, Some(1.5));
+        assert_eq!(config.output_config("HDMI-A-1").unwrap().scale, Some(2.0));
+        assert_eq!(config.output_config("DP-3").unwrap().scale, Some(2.0));
+    }
+
+    #[test]
+    fn wildcard_fixed_position_warns_and_falls_back_to_auto() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "*"
+            position = [100, 200]
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert_eq!(config.output_configs[0].position, OutputPosition::Auto);
+        assert!(warnings.iter().any(|w| w.contains("wildcard")));
     }
 
     #[test]
