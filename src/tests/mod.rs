@@ -29,6 +29,7 @@ mod hotplug;
 mod opacity;
 mod popups;
 mod real_clients;
+mod relaunch;
 mod send_to_output;
 mod session_restore;
 mod soak;
