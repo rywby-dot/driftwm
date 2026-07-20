@@ -8,6 +8,17 @@ use super::{DriftWm, FocusTarget};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
+    /// Whether fullscreen occlusion should already hide the canvas underneath.
+    /// During entry the stage is logically fullscreen immediately, while the
+    /// visual transition keeps the previous scene visible until the window
+    /// reaches the output bounds.
+    pub(crate) fn is_output_visually_fullscreen(&self, output: &smithay::output::Output) -> bool {
+        self.is_output_fullscreen(output)
+            && self
+                .fullscreen_window_on(output)
+                .is_none_or(|window| !self.window_fullscreen_animation_active(&window))
+    }
+
     /// Resolve which output a window should fullscreen onto. An already-fullscreen
     /// window re-asserting with no requested output stays on its current output;
     /// otherwise a window-rule `output` wins, then the client-requested output,
@@ -122,6 +133,7 @@ impl DriftWm {
             let os = super::output_state(&output);
             (os.camera, os.zoom)
         };
+        let windowed_size = window.geometry().size;
 
         // A game that maps straight into fullscreen commits its first buffer at
         // a throwaway default before it learns it's fullscreen, and that size is
@@ -183,6 +195,15 @@ impl DriftWm {
 
         // Place window at viewport origin and raise
         self.map_window(window.clone(), camera_i32, true);
+        let from_loc = Point::from((
+            camera_i32.x + ((saved_location.x as f64 - saved_camera.x) * saved_zoom).round() as i32,
+            camera_i32.y + ((saved_location.y as f64 - saved_camera.y) * saved_zoom).round() as i32,
+        ));
+        let from_size = Size::from((
+            (windowed_size.w as f64 * saved_zoom).round().max(1.0) as i32,
+            (windowed_size.h as f64 * saved_zoom).round().max(1.0) as i32,
+        ));
+        self.animate_window_fullscreen(window, from_loc, from_size, camera_i32, viewport_size);
         self.raise_window(window, true);
         self.enforce_below_windows();
         self.update_output_from_camera();
@@ -272,6 +293,26 @@ impl DriftWm {
             return;
         };
 
+        // Capture the currently presented geometry before changing the stage.
+        // If entry is still animating, this is its intermediate visual rather
+        // than the fullscreen target, so reversing the transition cannot jump.
+        let parked_camera = super::output_state(output).camera;
+        let parked_zoom = super::output_state(output).zoom;
+        let parked_loc = self
+            .stage
+            .position_of(&entry.window)
+            .unwrap_or_else(|| parked_camera.to_i32_round());
+        let current_visual =
+            self.window_visual(&entry.window, parked_loc, entry.window.geometry().size);
+        let current_screen_loc: Point<f64, Logical> = Point::from((
+            (current_visual.loc.x - parked_camera.x) * parked_zoom,
+            (current_visual.loc.y - parked_camera.y) * parked_zoom,
+        ));
+        let current_screen_size: Size<f64, Logical> = Size::from((
+            current_visual.size.w * parked_zoom,
+            current_visual.size.h * parked_zoom,
+        ));
+
         entry.window.exit_fullscreen_configure(entry.saved_size);
 
         // Restore window position, camera, zoom on the specific output
@@ -290,6 +331,42 @@ impl DriftWm {
         if was_pinned {
             self.sync_pinned_locs();
         }
+
+        let target_loc = self
+            .stage
+            .position_of(&entry.window)
+            .unwrap_or(entry.saved_location);
+        let (from_loc, from_size): (Point<i32, Logical>, Size<i32, Logical>) = if let Some(site) =
+            self.stage.pin_of(&entry.window)
+        {
+            // Pinned windows render directly in screen space. Express the
+            // current fullscreen visual relative to their restored screen site.
+            (
+                Point::from((
+                    target_loc.x + (current_screen_loc.x - site.screen_pos.x as f64).round() as i32,
+                    target_loc.y + (current_screen_loc.y - site.screen_pos.y as f64).round() as i32,
+                )),
+                current_screen_size.to_i32_round(),
+            )
+        } else {
+            // Normal windows render through the restored camera/zoom. Convert
+            // the current screen rectangle back into that canvas coordinate
+            // system before animating toward the saved window geometry.
+            (
+                Point::from((
+                    (ret.camera.x + current_screen_loc.x / ret.zoom).round() as i32,
+                    (ret.camera.y + current_screen_loc.y / ret.zoom).round() as i32,
+                )),
+                current_screen_size.downscale(ret.zoom).to_i32_round(),
+            )
+        };
+        self.animate_window_geometry_between(
+            &entry.window,
+            from_loc,
+            Size::from((from_size.w.max(1), from_size.h.max(1))),
+            target_loc,
+            entry.saved_size,
+        );
     }
 
     /// Restore an output's camera/zoom after fullscreen ends. Drops any

@@ -66,6 +66,45 @@ impl DriftWm {
         self.mark_all_dirty();
     }
 
+    pub(crate) fn animate_window_geometry_between(
+        &mut self,
+        window: &smithay::desktop::Window,
+        from_loc: Point<i32, Logical>,
+        from_size: smithay::utils::Size<i32, Logical>,
+        to_loc: Point<i32, Logical>,
+        to_size: smithay::utils::Size<i32, Logical>,
+    ) {
+        if self.backend.is_none() {
+            return;
+        }
+        self.window_animations
+            .start_geometry(window, from_loc, from_size, to_loc, to_size);
+        self.mark_all_dirty();
+    }
+
+    pub(crate) fn animate_window_fullscreen(
+        &mut self,
+        window: &smithay::desktop::Window,
+        from_loc: Point<i32, Logical>,
+        from_size: smithay::utils::Size<i32, Logical>,
+        to_loc: Point<i32, Logical>,
+        to_size: smithay::utils::Size<i32, Logical>,
+    ) {
+        if self.backend.is_none() {
+            return;
+        }
+        self.window_animations
+            .start_fullscreen(window, from_loc, from_size, to_loc, to_size);
+        self.mark_all_dirty();
+    }
+
+    pub(crate) fn window_fullscreen_animation_active(
+        &self,
+        window: &smithay::desktop::Window,
+    ) -> bool {
+        self.window_animations.is_fullscreen_transition(window)
+    }
+
     pub fn request_window_close(&mut self, window: &smithay::desktop::Window) {
         if self.backend.is_none() {
             window.send_close();

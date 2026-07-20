@@ -24,6 +24,7 @@ enum AnimationKind {
         from_size: Size<f64, Logical>,
         to_loc: Point<f64, Logical>,
         to_size: Size<f64, Logical>,
+        fullscreen: bool,
     },
 }
 
@@ -72,10 +73,52 @@ impl WindowAnimations {
                     from_size: from_size.to_f64(),
                     to_loc: to_loc.to_f64(),
                     to_size: to_size.to_f64(),
+                    fullscreen: false,
                 },
                 progress: 0.0,
             },
         );
+    }
+
+    pub fn start_fullscreen(
+        &mut self,
+        window: &Window,
+        from_loc: Point<i32, Logical>,
+        from_size: Size<i32, Logical>,
+        to_loc: Point<i32, Logical>,
+        to_size: Size<i32, Logical>,
+    ) {
+        let Some(surface) = window.wl_surface() else {
+            return;
+        };
+        self.animations.insert(
+            surface.id(),
+            WindowAnimation {
+                kind: AnimationKind::Geometry {
+                    from_loc: from_loc.to_f64(),
+                    from_size: from_size.to_f64(),
+                    to_loc: to_loc.to_f64(),
+                    to_size: to_size.to_f64(),
+                    fullscreen: true,
+                },
+                progress: 0.0,
+            },
+        );
+    }
+
+    pub fn is_fullscreen_transition(&self, window: &Window) -> bool {
+        window
+            .wl_surface()
+            .and_then(|surface| self.animations.get(&surface.id()))
+            .is_some_and(|animation| {
+                matches!(
+                    animation.kind,
+                    AnimationKind::Geometry {
+                        fullscreen: true,
+                        ..
+                    }
+                )
+            })
     }
 
     /// Queue a window for a one-shot GPU snapshot on the next rendered frame.
@@ -148,6 +191,7 @@ impl WindowAnimations {
                 from_size,
                 to_loc,
                 to_size,
+                ..
             } => WindowVisual {
                 loc: lerp_point(from_loc, to_loc, p),
                 size: lerp_size(from_size, to_size, p),

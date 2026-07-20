@@ -596,7 +596,7 @@ pub fn compose_frame(
     }
 
     let name = output.name();
-    let output_fullscreen = state.is_output_fullscreen(output);
+    let output_fullscreen = state.is_output_visually_fullscreen(output);
     // The fullscreen window fully occludes its output: only it, the overlay
     // layer, and the cursor render; everything beneath is culled below. Pinned
     // windows count as top-tier toplevels and get covered like the top layer.
@@ -1272,7 +1272,7 @@ pub fn compose_frame(
         vec![]
     };
 
-    let is_fullscreen = state.is_output_fullscreen(output);
+    let is_fullscreen = state.is_output_visually_fullscreen(output);
     #[cfg(feature = "profile-with-tracy")]
     let _layers_span = tracy_client::span!("compose::layers");
     let (overlay_elements, overlay_blur) = build_layer_elements(
