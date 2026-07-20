@@ -764,6 +764,97 @@ fn ipc_focus_and_move_route_to_suspended() {
     f.state().dismiss_suspended(sid);
 }
 
+/// `msg suspend <id>` reaches a window other than the currently-focused one:
+/// it focuses the target first, then runs the same path as the
+/// `suspend-window` binding.
+#[test]
+fn ipc_suspend_routes_to_suspend_action() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with(""));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+
+    // A different window holds focus; `msg suspend <id>` must still reach
+    // `myapp`, not the focused one.
+    let id2 = f.add_client();
+    map_window(&mut f, id2, "other", (200, 200));
+    let other = window_by_app_id(&mut f, "other").unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&other, serial);
+
+    let win_id = f.state().stage.id_of(&target).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Suspend(Some(WindowSelector::Id(win_id))),
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Ok)));
+    assert_eq!(
+        f.state().debug_counters()["suspend_marks"],
+        1,
+        "the selected window was marked, not the previously-focused one"
+    );
+
+    client_close(&mut f, id, &surface);
+    let sid = suspended_id(&mut f).expect("myapp converted");
+    assert_eq!(
+        f.state().find_suspended(sid).unwrap().identity.app_id,
+        "myapp"
+    );
+
+    f.state().dismiss_suspended(sid);
+    close_client(&mut f, id2);
+}
+
+/// `msg suspend` rejects a widget (nothing to leave a stand-in for) and a
+/// selector that already names a suspended stand-in (no client left to close).
+#[test]
+fn ipc_suspend_rejects_widget_and_already_suspended() {
+    // Widget.
+    {
+        let mut f = Fixture::with_config(config_with(
+            "[[window_rules]]\napp_id = \"panel\"\nwidget = true",
+        ));
+        f.add_output(1, (1920, 1080));
+        let id = f.add_client();
+        let (surface, target) = map_at(&mut f, id, "panel", (400, 300), (200, 200));
+        origin_view(&mut f);
+        let win_id = f.state().stage.id_of(&target).unwrap().0;
+        let reply = crate::ipc::dispatch(
+            Request::Suspend(Some(WindowSelector::Id(win_id))),
+            f.state(),
+        );
+        assert!(reply.is_err(), "a widget cannot be suspended");
+        client_close(&mut f, id, &surface);
+    }
+    // Already suspended.
+    {
+        let mut f = Fixture::with_config(config_with(""));
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let sid = f.state().insert_suspended_for_test(
+            1,
+            Point::from((300, 200)),
+            Size::from((320, 240)),
+            "s",
+            "S",
+        );
+        let element = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+        let ipc_id = f.state().stage.id_of(&element).unwrap().0;
+        let reply = crate::ipc::dispatch(
+            Request::Suspend(Some(WindowSelector::Id(ipc_id))),
+            f.state(),
+        );
+        assert!(
+            reply.is_err(),
+            "an already-suspended stand-in cannot be re-suspended"
+        );
+        f.state().dismiss_suspended(sid);
+    }
+}
+
 /// The mark maps are exposed as debug counters (leak tracking + fixture
 /// baseline).
 #[test]

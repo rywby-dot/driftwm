@@ -519,3 +519,54 @@ fn relaunch_of_vanished_entry_stays_dormant() {
 
     f.state().dismiss_suspended(sid);
 }
+
+/// `msg relaunch <id>` calls `relaunch_suspended` for the selected stand-in:
+/// the label flips to launching and the app is spawned with the minted token.
+#[test]
+fn ipc_relaunch_triggers_relaunch_suspended() {
+    use crate::ipc::protocol::{Request, Response, WindowSelector};
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+    f.state().take_relaunch_spawns_for_test();
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (300, 300), (400, 300));
+    let element = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let ipc_id = f.state().stage.id_of(&element).unwrap().0;
+
+    let reply = crate::ipc::dispatch(
+        Request::Relaunch(Some(WindowSelector::Id(ipc_id))),
+        f.state(),
+    );
+    assert!(matches!(reply, Ok(Response::Ok)));
+    assert!(
+        f.state().is_suspended_launching(sid),
+        "msg relaunch started a pending relaunch"
+    );
+    assert_eq!(
+        f.state().take_relaunch_spawns_for_test().len(),
+        1,
+        "the app was spawned"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// `msg relaunch` on a selector that names no suspended window errors instead
+/// of silently doing nothing.
+#[test]
+fn ipc_relaunch_errors_on_unknown_selector() {
+    use crate::ipc::protocol::{Request, WindowSelector};
+
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+
+    let reply = crate::ipc::dispatch(
+        Request::Relaunch(Some(WindowSelector::AppId("nope".into()))),
+        f.state(),
+    );
+    assert!(reply.is_err());
+}

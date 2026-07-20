@@ -65,6 +65,11 @@ pub enum Request {
     },
     /// Close a window (the focused one when `None`); errors when nothing matches.
     Close(Option<WindowSelector>),
+    /// Suspend a window (the focused one when `None`) — routes through the same
+    /// path as the `suspend-window` action, targeted at the selected window.
+    Suspend(Option<WindowSelector>),
+    /// Relaunch a suspended window (the focused stand-in when `None`).
+    Relaunch(Option<WindowSelector>),
     /// Run a config action by its config-grammar string, e.g. `"switch-layout
     /// next"`. Any keybindable action is reachable, so one-shot ops live here
     /// rather than as their own commands.
@@ -323,6 +328,10 @@ mod tests {
             },
             Request::Close(None),
             Request::Close(Some(WindowSelector::Id(7))),
+            Request::Suspend(None),
+            Request::Suspend(Some(WindowSelector::Id(4))),
+            Request::Relaunch(None),
+            Request::Relaunch(Some(WindowSelector::AppId("foot".into()))),
             Request::Action("switch-layout next".into()),
             Request::Screenshot {
                 target: ScreenshotTarget::Viewport,

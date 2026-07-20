@@ -135,6 +135,22 @@ pub enum Msg {
         #[arg(long, conflicts_with = "app_id")]
         id: Option<u64>,
     },
+    /// Suspend the focused window, or a window by app_id substring or `--id`
+    /// (same as the `suspend-window` action, targeted).
+    Suspend {
+        app_id: Option<String>,
+        /// Suspend the window with this stable id (from `state`).
+        #[arg(long, conflicts_with = "app_id")]
+        id: Option<u64>,
+    },
+    /// Relaunch a suspended window: the focused stand-in, or one by app_id
+    /// substring or `--id`.
+    Relaunch {
+        app_id: Option<String>,
+        /// Relaunch the suspended window with this stable id (from `state`).
+        #[arg(long, conflicts_with = "app_id")]
+        id: Option<u64>,
+    },
     /// Run a config action, e.g. `action close-window`, `action quit`, `action switch-layout next`.
     ///
     /// Runs any compositor action by the same string you would write in a config
@@ -345,6 +361,8 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
             }
         }
         Msg::Close { app_id, id } => Request::Close(window_selector(app_id, *id)),
+        Msg::Suspend { app_id, id } => Request::Suspend(window_selector(app_id, *id)),
+        Msg::Relaunch { app_id, id } => Request::Relaunch(window_selector(app_id, *id)),
         Msg::Action { spec } => Request::Action(spec.join(" ")),
         Msg::Screenshot {
             target,
@@ -595,6 +613,46 @@ mod tests {
             })
             .unwrap(),
             Request::Close(Some(WindowSelector::Id(7)))
+        );
+    }
+
+    #[test]
+    fn suspend_maps_default_and_id() {
+        assert_eq!(
+            to_request(&Msg::Suspend {
+                app_id: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Suspend(None)
+        );
+        assert_eq!(
+            to_request(&Msg::Suspend {
+                app_id: None,
+                id: Some(9)
+            })
+            .unwrap(),
+            Request::Suspend(Some(WindowSelector::Id(9)))
+        );
+    }
+
+    #[test]
+    fn relaunch_maps_default_and_app_id() {
+        assert_eq!(
+            to_request(&Msg::Relaunch {
+                app_id: None,
+                id: None
+            })
+            .unwrap(),
+            Request::Relaunch(None)
+        );
+        assert_eq!(
+            to_request(&Msg::Relaunch {
+                app_id: Some("chrome".into()),
+                id: None
+            })
+            .unwrap(),
+            Request::Relaunch(Some(WindowSelector::AppId("chrome".into())))
         );
     }
 

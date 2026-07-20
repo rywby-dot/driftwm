@@ -201,6 +201,8 @@ pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Move { window, to } => cmd_move(window, to, state),
         Request::Opacity { window, value } => cmd_opacity(window, value, state),
         Request::Close(sel) => cmd_close(sel, state),
+        Request::Suspend(sel) => cmd_suspend(sel, state),
+        Request::Relaunch(sel) => cmd_relaunch(sel, state),
         Request::Action(spec) => cmd_action(&spec, state),
         Request::Screenshot {
             target,
@@ -219,6 +221,8 @@ fn is_mutating(request: &Request) -> bool {
             | Request::Move { to: Some(_), .. }
             | Request::Opacity { value: Some(_), .. }
             | Request::Close(_)
+            | Request::Suspend(_)
+            | Request::Relaunch(_)
             | Request::Action(_)
     )
 }
@@ -587,6 +591,37 @@ fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
             None => Err(e),
         },
     }
+}
+
+/// Suspend a window by selector: focus it (without moving the camera) if it
+/// isn't already focused, then run it through the `suspend-window` action
+/// path — the same one a keybinding hits, so fullscreen/pin handling and mark
+/// bookkeeping stay in one place.
+fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let window = match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => window,
+        Err(e) => {
+            return match suspended_by_selector(state, sel.as_ref()) {
+                Some(_) => Err("window is already suspended".to_string()),
+                None => Err(e),
+            };
+        }
+    };
+    if window.is_widget() {
+        return Err("widgets cannot be suspended".to_string());
+    }
+    if state.focused_window().as_ref() != Some(&window) {
+        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
+    }
+    cmd_action("suspend-window", state)
+}
+
+/// Relaunch a suspended window by selector (the focused stand-in when `None`).
+fn cmd_relaunch(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let id = suspended_by_selector(state, sel.as_ref())
+        .ok_or_else(|| "no suspended window matching selector".to_string())?;
+    state.relaunch_suspended(id);
+    Ok(Response::Ok)
 }
 
 /// Capture a screenshot synchronously to `path`.
