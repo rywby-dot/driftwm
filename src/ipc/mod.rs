@@ -505,6 +505,9 @@ fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut 
                 Some((x, y)) => {
                     let loc = driftwm::canvas::rule_to_internal(x, y, size);
                     state.stage.set_position(&element, loc);
+                    // A stand-in's canvas position is durable — coalesce the
+                    // write like a pointer/touch drag does.
+                    state.session_store_mark_dirty();
                     Ok(Response::Position { x, y })
                 }
             };
@@ -610,6 +613,11 @@ fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     if window.is_widget() {
         return Err("widgets cannot be suspended".to_string());
     }
+    // The selected window, not a modal child `raise_and_focus` would redirect
+    // to: a dialog/modal is ineligible (same as the action and docs).
+    if window.parent_surface().is_some() || window.is_modal() {
+        return Err("cannot suspend a dialog".to_string());
+    }
     if state.focused_window().as_ref() != Some(&window) {
         state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
     }
@@ -620,8 +628,17 @@ fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
 fn cmd_relaunch(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let id = suspended_by_selector(state, sel.as_ref())
         .ok_or_else(|| "no suspended window matching selector".to_string())?;
-    state.relaunch_suspended(id);
-    Ok(Response::Ok)
+    // Name the app if it no longer resolves to a launchable entry, rather than
+    // replying Ok on a silent no-op.
+    let name = state
+        .find_suspended(id)
+        .map(|s| s.identity.display_name.clone());
+    if state.relaunch_suspended(id) {
+        Ok(Response::Ok)
+    } else {
+        let name = name.unwrap_or_else(|| "the app".to_string());
+        Err(format!("{name} is no longer installed"))
+    }
 }
 
 /// Capture a screenshot synchronously to `path`.
@@ -664,35 +681,61 @@ fn cmd_screenshot(target: &ScreenshotTarget, scale: f64, path: &str, state: &mut
 }
 
 /// Resolve a screenshot target to an internal canvas rect (top-left, Y-down)
-/// and, for a `window` target, the window to compose in isolation (`None` for
+/// and, for a `window` target, the element to compose in isolation (`None` for
 /// scene targets, which render every window).
-fn resolve_screenshot_region(
+pub(crate) fn resolve_screenshot_region(
     target: &ScreenshotTarget,
     state: &DriftWm,
-) -> Result<(Rectangle<i32, Logical>, Option<smithay::desktop::Window>), String> {
+) -> Result<(Rectangle<i32, Logical>, Option<crate::state::StageWindow>), String> {
+    use crate::state::StageWindow;
     match target {
         ScreenshotTarget::Viewport => {
             let output = state.active_output().ok_or("no active output to capture")?;
             Ok((crate::state::output_viewport_rect(&output), None))
         }
         ScreenshotTarget::Window { window } => {
-            // Isolation composes only this window, so pinned and fullscreen
-            // capture fine — `window_visual_rect` already returns the right
-            // rect for both (camera park / dormant canvas slot).
-            let window = window_by_selector(state, window.as_ref())?;
-            let rect = window_visual_rect(state, &window)
-                .ok_or_else(|| "window has no capturable area".to_string())?;
-            Ok((rect, Some(window)))
+            // A live client wins; a selector resolving only to a stand-in
+            // captures its chrome in isolation (docs promise suspended ids
+            // screenshot). Pinned and fullscreen clients capture fine too —
+            // `window_visual_rect` returns the right rect for both.
+            match window_by_selector(state, window.as_ref()) {
+                Ok(w) => {
+                    let rect = window_visual_rect(state, &w)
+                        .ok_or_else(|| "window has no capturable area".to_string())?;
+                    Ok((rect, Some(StageWindow::Client(w))))
+                }
+                Err(e) => {
+                    let Some(id) = suspended_by_selector(state, window.as_ref()) else {
+                        return Err(e);
+                    };
+                    let s = state
+                        .find_suspended(id)
+                        .ok_or_else(|| "suspended window is gone".to_string())?;
+                    let element = StageWindow::Suspended(s);
+                    let rect = state
+                        .visual_frame_rect(&element)
+                        .map(snap_rect_to_rect)
+                        .ok_or_else(|| "suspended window has no capturable area".to_string())?;
+                    Ok((rect, Some(element)))
+                }
+            }
         }
         ScreenshotTarget::All => {
+            // Union over every canvas element, stand-ins included — the capture
+            // renders their chrome, so an all-suspended canvas must frame them,
+            // not error "no windows to capture".
             let mut acc: Option<Rectangle<i32, Logical>> = None;
-            for w in state
-                .stage
-                .windows()
-                .filter_map(|w| w.client())
-                .filter(|w| state.is_canvas_window(*w))
-            {
-                let Some(r) = window_visual_rect(state, w) else {
+            for element in state.stage.windows() {
+                let r = match element {
+                    StageWindow::Client(w) if state.is_canvas_window(w) => {
+                        window_visual_rect(state, w)
+                    }
+                    StageWindow::Suspended(_) => {
+                        state.visual_frame_rect(element).map(snap_rect_to_rect)
+                    }
+                    _ => None,
+                };
+                let Some(r) = r else {
                     continue;
                 };
                 acc = Some(match acc {
@@ -812,6 +855,16 @@ fn window_visual_rect(
         Point::<i32, Logical>::from((loc.x - edge, loc.y - bar - edge)),
         Size::<i32, Logical>::from((size.w + 2 * edge, size.h + bar + 2 * edge)),
     ))
+}
+
+/// A `SnapRect` (f64 canvas bounds) as an integer `Rectangle`, for framing a
+/// suspended stand-in in a screenshot region.
+fn snap_rect_to_rect(r: driftwm::layout::snap::SnapRect) -> Rectangle<i32, Logical> {
+    let x = r.x_low.floor() as i32;
+    let y = r.y_low.floor() as i32;
+    let w = (r.x_high - r.x_low).ceil().max(1.0) as i32;
+    let h = (r.y_high - r.y_low).ceil().max(1.0) as i32;
+    Rectangle::new((x, y).into(), (w, h).into())
 }
 
 fn union_rect(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {

@@ -173,10 +173,11 @@ fn push_plain_elements(
 /// next live frame rebuilds those entries once — preferred over a second cache
 /// since captures are rare.
 ///
-/// When `isolate` is `Some(window)`, only that window (plus its popups + chrome)
-/// is composed, so overlapping neighbors never leak in. It renders at its stage
-/// position regardless of kind (see the render-loc note below), which is what
-/// lets a `window` capture cover pinned and fullscreen windows too.
+/// When `isolate` is `Some(element)`, only that element (a client window plus
+/// its popups + chrome, or a suspended stand-in's chrome) is composed, so
+/// overlapping neighbors never leak in. A client renders at its stage position
+/// regardless of kind (see the render-loc note below), which is what lets a
+/// `window` capture cover pinned and fullscreen windows too.
 pub(crate) fn compose_capture_elements(
     state: &mut crate::state::DriftWm,
     renderer: &mut GlesRenderer,
@@ -184,7 +185,7 @@ pub(crate) fn compose_capture_elements(
     dpi_scale: f64,
     viewport_logical: Size<i32, Logical>,
     capture_bg: &capture_background::CaptureBackground,
-    isolate: Option<&smithay::desktop::Window>,
+    isolate: Option<&crate::state::StageWindow>,
 ) -> Vec<OutputRenderElements> {
     use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 
@@ -206,14 +207,15 @@ pub(crate) fn compose_capture_elements(
     // with an in-flight `state.stage.windows()` iterator. Elements are ref-counted.
     let elements: Vec<StageWindow> = state.stage.windows().rev().cloned().collect();
     for element in &elements {
+        // Isolation (`msg screenshot window`) composes only its target — a
+        // client or a suspended stand-in. Whole-canvas / `all` captures pass
+        // `None` and render every element.
+        if isolate.is_some_and(|target| target != element) {
+            continue;
+        }
         let window = match element {
             StageWindow::Client(w) => w,
-            // Isolation (`msg screenshot window`) targets a specific client;
-            // suspended windows only appear in whole-canvas / `all` captures.
             StageWindow::Suspended(s) => {
-                if isolate.is_some() {
-                    continue;
-                }
                 let Some(loc) = state.stage.position_of(element) else {
                     continue;
                 };
@@ -242,9 +244,6 @@ pub(crate) fn compose_capture_elements(
                 continue;
             }
         };
-        if isolate.is_some_and(|target| target != window) {
-            continue;
-        }
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };

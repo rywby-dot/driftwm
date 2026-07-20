@@ -194,6 +194,53 @@ fn explicit_suspend_of_fullscreen_uses_windowed_rect() {
     f.state().dismiss_suspended(sid);
 }
 
+/// A `suspend_on_close` (markless) conversion of a fullscreen self-close seats
+/// the stand-in at the pre-fullscreen rect — position AND size — not the
+/// fullscreen buffer parked at the camera origin.
+#[test]
+fn suspend_on_close_of_fullscreen_uses_windowed_rect() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    // No camera override, so the fullscreen park is a no-op and the render
+    // counters return to baseline (mirrors the explicit-suspend fullscreen test).
+    let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&target, serial);
+
+    // Enter fullscreen: geometry balloons to the output size.
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    f.client(id).window(&surface).ack_last_and_commit();
+    f.double_roundtrip(id);
+    assert!(f.state().stage.has_fullscreen());
+
+    // The client self-closes while fullscreen — no suspend/close action, so the
+    // markless suspend_on_close path runs.
+    client_close(&mut f, id, &surface);
+
+    let sid = suspended_id(&mut f).expect("fullscreen self-close converted under the flag");
+    let s = f.state().find_suspended(sid).unwrap();
+    assert_eq!(
+        s.size.get(),
+        Size::from((400, 300)),
+        "the stand-in is the windowed size, not the fullscreen buffer"
+    );
+    let elem = StageWindow::Suspended(s);
+    assert_eq!(
+        f.state().stage.position_of(&elem),
+        Some(Point::from((200, 200))),
+        "the stand-in is at the pre-fullscreen position, not the camera park"
+    );
+    assert!(
+        !f.state().stage.has_fullscreen(),
+        "fullscreen state was torn down"
+    );
+    f.state().dismiss_suspended(sid);
+}
+
 /// A window with no `.desktop` entry can never relaunch, so `suspend-window`
 /// falls back to a plain close (no stand-in, no mark left behind).
 #[test]
@@ -448,6 +495,63 @@ fn suspend_on_close_dialog_with_parent_does_not_convert() {
     // The parent itself is eligible — close it for real so nothing leaks.
     f.state().mark_real_close(&parent);
     client_close(&mut f, cid, &parent_surface);
+}
+
+/// A dialog is ineligible for the explicit `suspend-window` action too:
+/// focusing one and firing the action is a no-op, and `msg suspend` on it
+/// returns an error (aligning the code with the docs).
+#[test]
+fn explicit_suspend_and_msg_suspend_refuse_dialog() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with(""));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["parent", "dialog"]);
+    let cid = f.add_client();
+    let (parent_surface, parent) = map_at(&mut f, cid, "parent", (400, 300), (100, 100));
+    let parent_toplevel = f.client(cid).window(&parent_surface).xdg_toplevel.clone();
+
+    // A child toplevel that names `parent`.
+    let dialog = f.client(cid).create_window();
+    let dsurface = dialog.surface.clone();
+    dialog.set_app_id("dialog");
+    dialog.set_parent(Some(&parent_toplevel));
+    dialog.commit();
+    f.roundtrip(cid);
+    let dwin = f.client(cid).window(&dsurface);
+    dwin.set_size(300, 200);
+    dwin.attach_new_buffer();
+    dwin.ack_last_and_commit();
+    f.double_roundtrip(cid);
+    origin_view(&mut f);
+
+    let dialog_win = window_by_app_id(&mut f, "dialog").unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&dialog_win, serial);
+
+    // The explicit action refuses the focused dialog — no mark, no close.
+    f.state().execute_action(&Action::SuspendWindow);
+    assert_eq!(
+        f.state().debug_counters()["suspend_marks"],
+        0,
+        "no mark recorded for a focused dialog"
+    );
+
+    // `msg suspend` on the dialog returns an error, not Ok.
+    let dialog_id = f.state().stage.id_of(&dialog_win).unwrap().0;
+    let reply = crate::ipc::dispatch(
+        Request::Suspend(Some(WindowSelector::Id(dialog_id))),
+        f.state(),
+    );
+    assert!(
+        matches!(reply, Err(ref e) if e.contains("dialog")),
+        "msg suspend on a dialog errors, got {reply:?}"
+    );
+
+    // Flag is off, so plain closes leave no stand-in.
+    client_close(&mut f, cid, &dsurface);
+    let _ = parent;
+    client_close(&mut f, cid, &parent_surface);
+    assert_eq!(f.state().stage.windows().count(), 0);
 }
 
 /// A per-window rule overrides the global flag both ways: off-rule beats
@@ -708,6 +812,50 @@ fn fill_action_on_suspended_focus_is_noop() {
     f.state().dismiss_suspended(sid);
 }
 
+/// Fill state is cleared at suspend conversion, so it doesn't ride
+/// `Stage::replace` into the stand-in and then the adopted window (which would
+/// silently make the relaunched client `is_fill` with a stale pre-fill rect).
+#[test]
+fn suspend_clears_fill_state_through_adoption() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+
+    // A filled window: a saved pre-fill rect on its stage entry.
+    f.state()
+        .stage
+        .set_fill(&target, Point::from((10, 10)), Size::from((100, 100)));
+    assert!(f.state().stage.is_fill(&target));
+
+    // Client self-close converts under the flag; the conversion clears fill.
+    client_close(&mut f, id, &surface);
+    let sid = suspended_id(&mut f).expect("converted");
+    let stand_in = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    assert!(
+        !f.state().stage.is_fill(&stand_in),
+        "conversion cleared the fill state off the stand-in"
+    );
+
+    // Relaunch + identity-fallback adopt with a fresh client.
+    assert!(f.state().relaunch_suspended(sid));
+    let id2 = f.add_client();
+    let surface2 = map_window(&mut f, id2, "myapp", (300, 200));
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted");
+    assert!(
+        !f.state().stage.is_fill(&adopted),
+        "the adopted window did not inherit stale fill state"
+    );
+
+    // Flag is on, so a plain close would re-convert — close it for real.
+    f.state().mark_real_close(&adopted);
+    client_close(&mut f, id2, &surface2);
+    assert_eq!(f.state().stage.windows().count(), 0);
+}
+
 /// The IPC inventory reports suspended windows with `suspended: true`, and a
 /// focused stand-in is `windows[0]` / `is_focused` per the shared convention.
 #[test]
@@ -892,6 +1040,105 @@ fn ipc_suspend_rejects_widget_and_already_suspended() {
         );
         f.state().dismiss_suspended(sid);
     }
+}
+
+/// `screenshot all` frames suspended stand-ins: a mix of live + suspended far
+/// apart yields a region covering both, and an all-suspended canvas resolves a
+/// valid region instead of erroring "no windows to capture".
+#[test]
+fn screenshot_all_frames_suspended_windows() {
+    use crate::ipc::protocol::ScreenshotTarget;
+
+    // Mixed: a live client far left, a stand-in far right.
+    {
+        let mut f = Fixture::with_config(config_with(""));
+        f.add_output(1, (1920, 1080));
+        let cid = f.add_client();
+        map_window(&mut f, cid, "live", (300, 200));
+        let live = window_by_app_id(&mut f, "live").unwrap();
+        origin_view(&mut f);
+        f.state()
+            .map_window(StageWindow::Client(live), Point::from((-2000, 0)), true);
+        let sid = f.state().insert_suspended_for_test(
+            1,
+            Point::from((2000, 0)),
+            Size::from((300, 200)),
+            "sus",
+            "Sus",
+        );
+
+        let (region, isolate) =
+            crate::ipc::resolve_screenshot_region(&ScreenshotTarget::All, f.state()).unwrap();
+        assert!(isolate.is_none(), "an `all` capture composes every window");
+        assert!(
+            region.loc.x <= -2000,
+            "region reaches the live client at the left: {region:?}"
+        );
+        assert!(
+            region.loc.x + region.size.w >= 2300,
+            "region reaches the stand-in at the right: {region:?}"
+        );
+
+        f.state().dismiss_suspended(sid);
+        close_client(&mut f, cid);
+    }
+    // All-suspended canvas: a valid region, not an error.
+    {
+        let mut f = Fixture::with_config(config_with(""));
+        f.add_output(1, (1920, 1080));
+        origin_view(&mut f);
+        let sid = f.state().insert_suspended_for_test(
+            1,
+            Point::from((100, 100)),
+            Size::from((300, 200)),
+            "sus",
+            "Sus",
+        );
+        let resolved = crate::ipc::resolve_screenshot_region(&ScreenshotTarget::All, f.state());
+        assert!(
+            resolved.is_ok(),
+            "an all-suspended canvas frames the stand-ins, got {resolved:?}"
+        );
+        f.state().dismiss_suspended(sid);
+    }
+}
+
+/// `msg screenshot window` resolves a suspended stand-in by id: a non-empty
+/// region and a suspended isolate target (docs promise suspended ids screenshot).
+#[test]
+fn screenshot_window_resolves_suspended_by_id() {
+    use crate::ipc::protocol::ScreenshotTarget;
+
+    let mut f = Fixture::with_config(config_with(""));
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        7,
+        Point::from((300, 200)),
+        Size::from((320, 240)),
+        "sus",
+        "Sus",
+    );
+    let element = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let ipc_id = f.state().stage.id_of(&element).unwrap().0;
+
+    let (region, isolate) = crate::ipc::resolve_screenshot_region(
+        &ScreenshotTarget::Window {
+            window: Some(WindowSelector::Id(ipc_id)),
+        },
+        f.state(),
+    )
+    .unwrap();
+    assert!(
+        region.size.w > 0 && region.size.h > 0,
+        "non-empty region: {region:?}"
+    );
+    assert!(
+        matches!(isolate, Some(StageWindow::Suspended(ref s)) if s.id == sid),
+        "the isolate target is the stand-in"
+    );
+
+    f.state().dismiss_suspended(sid);
 }
 
 /// The mark maps are exposed as debug counters (leak tracking + fixture
