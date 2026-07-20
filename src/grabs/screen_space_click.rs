@@ -5,12 +5,16 @@ use smithay::{
     utils::{Logical, Point},
 };
 
-pub struct LayerClickGrab {
+/// Click grab for screen-space targets (wlr layers, pinned windows):
+/// recomputes the canvas-adjusted focus location on every motion so the client
+/// sees screen-space coords at any zoom, where the default click grab would
+/// freeze the offset captured at press.
+pub struct ScreenSpaceClickGrab {
     pub start_data: GrabStartData<DriftWm>,
     pub screen_loc: Point<f64, Logical>,
 }
 
-impl PointerGrab<DriftWm> for LayerClickGrab {
+impl PointerGrab<DriftWm> for ScreenSpaceClickGrab {
     fn motion(
         &mut self,
         data: &mut DriftWm,
@@ -45,7 +49,7 @@ impl PointerGrab<DriftWm> for LayerClickGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            handle.unset_grab(self, data, event.serial, event.time, false);
+            handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
 

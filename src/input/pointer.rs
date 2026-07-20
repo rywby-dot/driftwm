@@ -201,48 +201,7 @@ impl DriftWm {
                 if button_state == ButtonState::Pressed {
                     let layer = pointer.current_focus().map(|f| f.0);
                     self.focus_layer_if_on_demand(layer, serial);
-
-                    // A live grab (e.g. a layer's own popup grab) must keep
-                    // routing this click: set_grab would replace it, and a
-                    // popup grab's unset only releases its keyboard half, so
-                    // the popup would linger with no dismiss-on-click-outside.
-                    if !pointer.is_grabbed()
-                        && let Some(target) = pointer.current_focus()
-                    {
-                        let canvas_pos_0 = pointer.current_location();
-                        let screen_pos_0 = driftwm::canvas::canvas_to_screen(
-                            driftwm::canvas::CanvasPos(canvas_pos_0),
-                            self.camera(),
-                            self.zoom(),
-                        )
-                        .0;
-                        if let Some((focus, adjusted_0)) =
-                            self.pointer_focus_under(screen_pos_0, canvas_pos_0)
-                            && focus == target
-                        {
-                            let screen_loc = driftwm::canvas::screen_space_origin(
-                                adjusted_0,
-                                driftwm::canvas::CanvasPos(canvas_pos_0),
-                                driftwm::canvas::ScreenPos(screen_pos_0),
-                            )
-                            .0;
-                            let start_data = GrabStartData {
-                                focus: Some((focus, adjusted_0)),
-                                button,
-                                location: canvas_pos_0,
-                            };
-                            let grab = crate::grabs::LayerClickGrab {
-                                start_data,
-                                screen_loc,
-                            };
-                            pointer.set_grab(
-                                self,
-                                grab,
-                                serial,
-                                smithay::input::pointer::Focus::Keep,
-                            );
-                        }
-                    }
+                    self.maybe_grab_screen_space_click(&pointer, button, serial);
                 }
                 pointer.button(
                     self,
@@ -541,6 +500,51 @@ impl DriftWm {
         }
     }
 
+    /// Keep a click-drag on the screen-space target under the pointer (wlr
+    /// layer or pinned window) in screen coordinates: smithay's default click
+    /// grab would freeze the canvas-adjusted focus offset for the whole drag,
+    /// scaling the motion the client sees at zoom != 1. No-op while another
+    /// grab is live — e.g. a layer's own popup grab must keep routing the
+    /// click, since replacing it only releases its keyboard half and the popup
+    /// would linger with no dismiss-on-click-outside.
+    fn maybe_grab_screen_space_click(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) {
+        if pointer.is_grabbed() {
+            return;
+        }
+        let Some(target) = pointer.current_focus() else {
+            return;
+        };
+        let canvas_pos_0 = pointer.current_location();
+        let screen_pos_0 = canvas_to_screen(CanvasPos(canvas_pos_0), self.camera(), self.zoom()).0;
+        let Some((focus, adjusted_0)) = self.pointer_focus_under(screen_pos_0, canvas_pos_0) else {
+            return;
+        };
+        if focus != target {
+            return;
+        }
+        let screen_loc = driftwm::canvas::screen_space_origin(
+            adjusted_0,
+            CanvasPos(canvas_pos_0),
+            driftwm::canvas::ScreenPos(screen_pos_0),
+        )
+        .0;
+        let start_data = GrabStartData {
+            focus: Some((focus, adjusted_0)),
+            button,
+            location: canvas_pos_0,
+        };
+        let grab = crate::grabs::ScreenSpaceClickGrab {
+            start_data,
+            screen_loc,
+        };
+        pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Keep);
+    }
+
     /// Dispatch a left/other button press over a screen-pinned window in screen
     /// coords: SSD decoration (close / title-bar move / resize border), then
     /// mouse-binding move/resize, else focus + forward the click to the client.
@@ -649,6 +653,9 @@ impl DriftWm {
             } else {
                 self.raise_and_focus(window, serial);
             }
+        }
+        if button_state == ButtonState::Pressed {
+            self.maybe_grab_screen_space_click(pointer, button, serial);
         }
         pointer.button(
             self,
