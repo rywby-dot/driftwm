@@ -139,15 +139,16 @@ impl DriftWm {
     /// Relaunch the app behind a suspended window: resolve its `Exec=`, mint a
     /// compositor-owned activation token stamped so the new window can be
     /// matched back, spawn the app with that token in the child env, and record
-    /// the pending relaunch (the label flips to "launching…"). No-op if a
-    /// relaunch is already in flight, or if the app no longer resolves to a
-    /// launchable entry (the window stays dormant).
-    pub fn relaunch_suspended(&mut self, id: SuspendedId) {
+    /// the pending relaunch (the label flips to "launching…"). Returns `false`
+    /// only when the app no longer resolves to a launchable entry (so `msg
+    /// relaunch` can report it); an already-in-flight relaunch is a `true`
+    /// no-op.
+    pub fn relaunch_suspended(&mut self, id: SuspendedId) -> bool {
         let Some(s) = self.find_suspended(id) else {
-            return;
+            return true;
         };
         if self.pending_relaunches.contains_key(&id) {
-            return;
+            return true;
         }
 
         // Resolve the command fresh — the app may have been uninstalled since
@@ -167,7 +168,7 @@ impl DriftWm {
             tracing::info!(
                 "relaunch of {id:?}: '{desktop_id}' no longer resolves to a launchable entry"
             );
-            return;
+            return false;
         };
 
         // Serial-less by design: `request_activation` honors the marker ahead
@@ -196,6 +197,7 @@ impl DriftWm {
 
         // The label reads the pending map — flip it to "launching…" now.
         self.mark_all_dirty();
+        true
     }
 
     /// Whether a suspended window is mid-relaunch, for the "launching…" label.
@@ -423,7 +425,13 @@ impl DriftWm {
     /// pre-resolved so a no-`.desktop` window closes honestly instead of
     /// vanishing forever.
     pub fn suspend_focused_window(&mut self, restore_rect: Option<Rectangle<i32, Logical>>) {
-        let Some(window) = self.focused_window().filter(|w| !w.is_widget()) else {
+        // Dialogs and modals are ineligible — same exclusion the
+        // `suspend_on_close` path applies. Suspending one would relaunch a
+        // whole fresh app instance, which is nonsense for a child dialog.
+        let Some(window) = self
+            .focused_window()
+            .filter(|w| !w.is_widget() && w.parent_surface().is_none() && !w.is_modal())
+        else {
             return;
         };
         // The prelude only exits fullscreen on the active output; cover a
@@ -548,6 +556,7 @@ impl DriftWm {
         &mut self,
         surface: &WlSurface,
         window: &Window,
+        fullscreen_restore_rect: Option<Rectangle<i32, Logical>>,
     ) -> Option<SuspendConversion> {
         // Consume both marks up front so neither leaks past this destroy, but
         // honor them only while unexpired — an idle event loop may dispatch this
@@ -585,9 +594,15 @@ impl DriftWm {
             return None;
         }
         let identity = self.resolve_identity(&app_id)?;
+        // A fullscreen self-close reports the fullscreen buffer size at its
+        // camera park, not the windowed rect — the pre-fullscreen saved rect
+        // (same source the explicit action and the shutdown serializer use)
+        // seats the stand-in where the window actually was.
+        let rect =
+            fullscreen_restore_rect.unwrap_or_else(|| self.markless_suspend_rect(window, surface));
         Some(SuspendConversion {
             identity,
-            rect: self.markless_suspend_rect(window, surface),
+            rect,
             title,
         })
     }
@@ -664,6 +679,7 @@ impl DriftWm {
         self.stage.drop_from_focus_history(window);
         self.stage.clear_fit(window);
         self.stage.clear_restore_size(window);
+        self.stage.clear_fill(window);
         self.stage.take_pin(window);
         self.stage.set_position(window, conv.rect.loc);
         self.stage.replace(window, new_element);

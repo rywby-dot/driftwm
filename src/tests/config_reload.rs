@@ -54,6 +54,46 @@ fn soft_warnings_surface_without_rejecting() {
 }
 
 #[test]
+fn reload_invalidates_suspended_label_cache() {
+    use smithay::utils::{Point, Size};
+    let mut f = Fixture::with_config(config("[decorations]\ndefault_mode = \"server\"\n"));
+    f.add_output(1, (1920, 1080));
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((100, 100)),
+        Size::from((300, 200)),
+        "s",
+        "S",
+    );
+    // Simulate a prior render having cached a label raster for this size/scale.
+    f.state()
+        .find_suspended(sid)
+        .unwrap()
+        .chrome
+        .borrow_mut()
+        .label_key = Some((300, 200, 1, false));
+
+    // A decorations-affecting reload resets the cached key so the centered label
+    // re-rasters, like every other decoration.
+    f.state()
+        .reload_config_from_contents("[decorations]\ndefault_mode = \"server\"\nfont_size = 16\n");
+    assert!(
+        f.state()
+            .find_suspended(sid)
+            .unwrap()
+            .chrome
+            .borrow()
+            .label_key
+            .is_none(),
+        "reload reset the suspended label cache"
+    );
+
+    // The headless fixture has no backend to drain a queued mode intent.
+    f.state().pending_mode_changes.clear();
+    f.state().dismiss_suspended(sid);
+}
+
+#[test]
 fn reload_to_preferred_mode_queues_intent() {
     let mut f = Fixture::with_config(config(""));
     f.add_output(1, (1920, 1080));

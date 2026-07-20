@@ -310,6 +310,19 @@ impl XdgActivationHandler for DriftWm {
                     .get(&sid)
                     .is_some_and(|p| p.maps_new_window(id))
             {
+                // A window a rule (or its own request) placed into fullscreen
+                // or pinned to the screen is where policy wants it. Adopting
+                // would rip it out of that membership — stranding the output's
+                // camera park and leaving the client acked-Fullscreen at body
+                // size. Drop the stand-in and the pending relaunch instead, and
+                // leave the window untouched.
+                if self.is_window_fullscreen(&window) || self.is_pinned(&window) {
+                    tracing::debug!(
+                        "relaunch adopt of {sid:?} skipped: window is fullscreen/pinned; dismissing stand-in"
+                    );
+                    self.dismiss_suspended(sid);
+                    return;
+                }
                 self.adopt_relaunched(&window, &root, sid);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.send_configure();

@@ -387,6 +387,75 @@ fn identity_fallback_expiry_yields_normal_placement() {
     client_close(&mut f, cid, &surface);
 }
 
+/// A relaunched window that entered fullscreen (its own request or a rule)
+/// before presenting a late token must NOT be adopted: adoption would rip it out
+/// of the fullscreen map and strand the camera park. The late-token arm dismisses
+/// the stand-in and leaves the window fullscreen, camera restore intact.
+#[test]
+fn late_token_does_not_adopt_a_fullscreen_window() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    // No camera override: leaving the camera output-aligned keeps the fullscreen
+    // park a no-op, so the blur-generation counter returns to baseline.
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (400, 300), (500, 350));
+    f.state().focus_and_raise_suspended(sid);
+    assert!(f.state().relaunch_suspended(sid));
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    // Expire the identity fallback so the window maps normally (not adopted at
+    // first commit) — only the late token could adopt it.
+    f.state().expire_relaunch_fallback_for_test(sid);
+
+    // The relaunched window maps, then enters fullscreen (own request) before the
+    // token lands.
+    let cid = f.add_client();
+    let surface = map_window(&mut f, cid, "myapp", (300, 200));
+    f.client(cid).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(cid);
+    let window = mapped_client(&mut f, "myapp").expect("mapped");
+    assert!(
+        f.state().is_window_fullscreen(&window),
+        "the window entered fullscreen"
+    );
+
+    // The late token arrives: adoption is refused.
+    present_token(&mut f, cid, &surface, token);
+
+    assert!(
+        f.state().is_window_fullscreen(&window),
+        "the window stays fullscreen — not ripped out of the map"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "the obsolete stand-in was dismissed"
+    );
+    assert_eq!(
+        f.state().debug_counters()["pending_relaunches"],
+        0,
+        "the pending relaunch was consumed"
+    );
+    assert_eq!(token_count(&mut f), 0, "the token was deregistered");
+
+    // Camera restore intact: fullscreen exits cleanly (the debug_assert_eq in
+    // exit_fullscreen_on would fire if the fullscreen halves had diverged).
+    let out_name = f
+        .state()
+        .stage
+        .fullscreen_output_of(&window)
+        .unwrap()
+        .to_string();
+    let output = f.state().output_by_name(&out_name).unwrap();
+    f.state().exit_fullscreen_on(&output);
+    assert!(
+        !f.state().stage.has_fullscreen(),
+        "fullscreen exited cleanly"
+    );
+
+    client_close(&mut f, cid, &surface);
+}
+
 /// A dismiss while a relaunch is in flight cancels it: the token is deregistered
 /// on the spot, so a late presentation is a no-op and the window maps normally.
 #[test]

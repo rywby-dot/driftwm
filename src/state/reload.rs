@@ -175,6 +175,16 @@ impl DriftWm {
             deco.width = -1;
         }
 
+        // A suspended stand-in's centered label lives on its `Rc`, outside the
+        // decoration map, and caches on size/scale/launching only — reset the
+        // key so a font/size/weight/color edit re-rasters it like every other
+        // decoration.
+        for element in self.stage.windows() {
+            if let Some(s) = element.suspended() {
+                s.chrome.borrow_mut().label_key = None;
+            }
+        }
+
         self.apply_output_rules_after_reload();
         self.recompute_decoration_scale();
 

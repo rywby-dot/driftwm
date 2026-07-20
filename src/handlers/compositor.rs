@@ -337,6 +337,13 @@ impl CompositorHandler for DriftWm {
                         // positioning, and the fullscreen-background check are
                         // all skipped for an adopted window.
                         self.adopt_relaunched(&window, &root, sid);
+                        // An adopted window keeps the stand-in's canvas rect;
+                        // drop any fullscreen/fit intent the client queued
+                        // before its first commit so it can't apply against the
+                        // adopted slot later (the rule-driven insert below is
+                        // skipped for the adopted case too).
+                        self.pending_fullscreen.remove(&root);
+                        self.pending_fit.remove(&root);
                     } else if let Some(ref applied) = applied
                         && let Some((w, h)) = applied.size
                         && self.pending_size.insert(root.clone())
@@ -564,7 +571,9 @@ impl CompositorHandler for DriftWm {
                             self.decorations
                                 .insert(DecorationKey::Surface(root.id()), deco);
                         }
-                        if applied.as_ref().is_some_and(|a| a.fullscreen == Some(true)) {
+                        if adopted_sid.is_none()
+                            && applied.as_ref().is_some_and(|a| a.fullscreen == Some(true))
+                        {
                             self.pending_fullscreen.entry(root.clone()).or_insert(None);
                         }
 

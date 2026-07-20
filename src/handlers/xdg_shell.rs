@@ -237,6 +237,15 @@ impl XdgShellHandler for DriftWm {
         // visibility against the home output's camera, which stays parked
         // until this runs.)
         let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
+        // Captured before the teardown drops the entry: a markless
+        // (suspend_on_close) conversion of a fullscreen self-close must seat
+        // the stand-in at the pre-fullscreen rect, not the fullscreen-sized
+        // buffer parked at the camera origin.
+        let fullscreen_restore_rect = fs_output.as_ref().and_then(|output| {
+            self.stage
+                .fullscreen_on(&output.name())
+                .map(|entry| Rectangle::new(entry.saved_location, entry.saved_size))
+        });
         if let Some(ref output) = fs_output {
             self.stage.take_fullscreen(&output.name());
             // Two statements, not one `if let`: the scrutinee's MutexGuard
@@ -256,7 +265,8 @@ impl XdgShellHandler for DriftWm {
         // focus-follow / unmap path below and before `cleanup_surface_state`,
         // which the conversion relies on to purge the surface-keyed state.
         if let Some(window) = &window
-            && let Some(conv) = self.resolve_suspend_conversion(&wl_surface, window)
+            && let Some(conv) =
+                self.resolve_suspend_conversion(&wl_surface, window, fullscreen_restore_rect)
         {
             self.convert_to_suspended(window, &wl_surface, conv);
             self.cleanup_surface_state(&wl_surface);
