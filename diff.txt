@@ -1,3 +1,4 @@
+```diff
 diff --git a/config.reference.toml b/config.reference.toml
 index 83f3f8a..8416941 100644
 --- a/config.reference.toml
@@ -4129,3 +4130,4 @@ index 9699958..77da0e9 100644
 +        "a redraw commit after clear_fill must not translate the filled window"
 +    );
 +}
+```diff
