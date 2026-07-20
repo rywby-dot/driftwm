@@ -229,9 +229,24 @@ impl CompositorHandler for DriftWm {
                     let has_size = geo.size.w > 0 && geo.size.h > 0;
                     let is_fullscreen = self.stage.is_fullscreen(&window);
 
+                    // A relaunched app's first sized commit adopts a pending
+                    // suspended window: it takes that window's slot instead of
+                    // being placed fresh. Resolved (and the token stash
+                    // consumed) here so it precedes all placement below.
+                    let adopted_sid = if has_size {
+                        self.adoption_target(&root, &window)
+                    } else {
+                        None
+                    };
+
                     // Capture preferred size once; later updated only on
-                    // user resize-grab completion.
-                    if has_size && !self.stage.is_fit(&window) && !is_fullscreen {
+                    // user resize-grab completion. Adoption sets its own
+                    // restore size (the body rect).
+                    if has_size
+                        && !self.stage.is_fit(&window)
+                        && !is_fullscreen
+                        && adopted_sid.is_none()
+                    {
                         self.stage.set_restore_size_if_missing(&window, geo.size);
                     }
 
@@ -316,7 +331,13 @@ impl CompositorHandler for DriftWm {
                     // re-forcing later, so the user can still resize.
                     let mut force_pending = false;
 
-                    if let Some(ref applied) = applied
+                    if let Some(sid) = adopted_sid {
+                        // The body-size configure rides the decoration tail's
+                        // `send_configure` below; placement, cursor/auto/background
+                        // positioning, and the fullscreen-background check are
+                        // all skipped for an adopted window.
+                        self.adopt_relaunched(&window, &root, sid);
+                    } else if let Some(ref applied) = applied
                         && let Some((w, h)) = applied.size
                         && self.pending_size.insert(root.clone())
                     {
@@ -553,10 +574,13 @@ impl CompositorHandler for DriftWm {
                         // have no canvas position to navigate the camera to.
                         let deferred_fit_or_fs = self.pending_fit.contains(&root)
                             || self.pending_fullscreen.contains_key(&root);
+                        // Adopted windows keep the suspended rect and z-slot —
+                        // never navigate the camera or raise on adopt.
                         if !is_widget
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
+                            && adopted_sid.is_none()
                         {
                             let reset = self.config.zoom_reset_on_new_window;
                             // Cursor mode is "stay put" by default; only
@@ -583,16 +607,21 @@ impl CompositorHandler for DriftWm {
                         self.pending_size.remove(&root);
                         // Snapshot is one-shot; later commits use mapped state.
                         self.auto_anchor_snapshot.remove(&root);
-                        // Cache the auto-placed (pre-fit/-fullscreen) rect.
-                        // `fit_window_snapped` overwrites with the post-fit
-                        // rect; non-snapped fit and fullscreen keep this.
-                        self.refresh_stable_snap_rect(&window);
+                        if adopted_sid.is_none() {
+                            // Cache the auto-placed (pre-fit/-fullscreen) rect.
+                            // `fit_window_snapped` overwrites with the post-fit
+                            // rect; non-snapped fit and fullscreen keep this.
+                            // Skipped for an adopted window: its settled rect is
+                            // the body size the client hasn't acked yet, so it
+                            // establishes a stable rect on its next settle.
+                            self.refresh_stable_snap_rect(&window);
 
-                        if let Some(client_output) = self.pending_fullscreen.remove(&root) {
-                            let target = self.resolve_fullscreen_output(&root, client_output);
-                            self.enter_fullscreen(&window, target);
-                        } else if self.pending_fit.remove(&root) {
-                            self.decoration_fit(&window);
+                            if let Some(client_output) = self.pending_fullscreen.remove(&root) {
+                                let target = self.resolve_fullscreen_output(&root, client_output);
+                                self.enter_fullscreen(&window, target);
+                            } else if self.pending_fit.remove(&root) {
+                                self.decoration_fit(&window);
+                            }
                         }
                     } else if !has_size {
                         self.pending_center.insert(root.clone());

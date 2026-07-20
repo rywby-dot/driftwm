@@ -276,6 +276,48 @@ impl XdgActivationHandler for DriftWm {
             self.cursor.exec_cursor_deadline = None;
         }
 
+        // A compositor-minted relaunch token adopts its target suspended window
+        // instead of following the normal activation path. Honored before the
+        // serial gate (our tokens carry no serial) and before the zero-size
+        // early return (a pre-first-commit adopt is stashed for the placement
+        // arm). A stale marker (target dismissed/expired) falls through to the
+        // normal path.
+        if let Some(sid) = token_data
+            .user_data
+            .get::<crate::state::RelaunchMarker>()
+            .map(|m| m.0)
+            && self.pending_relaunches.contains_key(&sid)
+            && self.find_suspended(sid).is_some()
+        {
+            let root = self
+                .window_for_surface(&surface)
+                .and_then(|w| w.wl_surface().map(|s| s.into_owned()))
+                .unwrap_or_else(|| surface.clone());
+            if self.pending_center.contains(&root) {
+                // Not yet placed: the first-commit placement arm adopts it.
+                self.pending_adoptions.insert(root, sid);
+                return;
+            }
+            // Already placed. Only a window mapped since the relaunch was
+            // spawned can be the relaunched one; an already-open window
+            // presenting our token (a single-instance app forwarding the
+            // startup id to its running instance) must not be hijacked. Leave
+            // it be — the pending reverts to dormant when its deadline sweeps.
+            if let Some(window) = self.window_for_surface(&surface)
+                && let Some(id) = self.stage.id_of(&window)
+                && self
+                    .pending_relaunches
+                    .get(&sid)
+                    .is_some_and(|p| p.maps_new_window(id))
+            {
+                self.adopt_relaunched(&window, &root, sid);
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_configure();
+                }
+                return;
+            }
+        }
+
         // Only honor tokens created from user input (has a serial).
         // Tokens without a serial are spontaneous attention requests from
         // background apps — ignore those to prevent focus stealing.

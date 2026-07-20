@@ -26,7 +26,7 @@ pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
 pub use session_store::SessionStore;
 pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
-pub use suspended::SuspendMark;
+pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark};
 
 use smithay::{
     desktop::{PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window},
@@ -594,6 +594,15 @@ pub struct DriftWm {
     /// Monotonic source of per-process suspended-window ids. Durable session
     /// keys are layered on top later (session restore).
     pub next_suspended_id: u64,
+    /// In-flight relaunches, keyed by the suspended window being relaunched
+    /// (the suspended window itself holds no pending state). Drives the
+    /// "launching…" label ([`Self::is_suspended_launching`]) and both match
+    /// signals; see [`PendingRelaunch`].
+    pub pending_relaunches: BTreeMap<SuspendedId, PendingRelaunch>,
+    /// A relaunched surface that presented its activation token before its
+    /// first-commit placement, awaiting adoption into the suspended window it
+    /// names. Purged with the surface if the client dies before mapping.
+    pub pending_adoptions: HashMap<WlSurface, SuspendedId>,
     /// Durable session store (session restore): the `session.json` path, dirty
     /// timer, carried-forward entries, and fresh-boot camera seed.
     pub session_store: SessionStore,
@@ -1026,6 +1035,10 @@ impl DriftWm {
             .capture_state
             .remove(&format!("cap-tl:{:?}", id));
         self.image_copy_capture_state.remove_toplevel(surface);
+        // A relaunched surface that died before adoption must not leave its
+        // stash behind (the pending relaunch itself is keyed by suspended id and
+        // GC'd on its own deadline).
+        self.pending_adoptions.remove(surface);
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
         // Keep `None`-anchor entries (user had no focus — unrelated).
@@ -2272,6 +2285,8 @@ impl DriftWm {
             ("stable_snap_rects", self.stable_snap_rects.len()),
             ("suspend_marks", self.suspend_marks.len()),
             ("real_close_marks", self.real_close_marks.len()),
+            ("pending_relaunches", self.pending_relaunches.len()),
+            ("pending_adoptions", self.pending_adoptions.len()),
             (
                 "idle_inhibiting_surfaces",
                 self.idle_inhibiting_surfaces.len(),

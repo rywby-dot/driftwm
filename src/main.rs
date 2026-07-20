@@ -381,10 +381,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(None, &mut data, |data| {
         backend::udev::render_if_needed(data);
         data.refresh_and_flush_clients();
-        // Expire suspend / real-close marks a refused close left behind. The
-        // fixture drives this with an injected `now`; production uses the wall
-        // clock here (the only wall-clock read for mark deadlines).
-        data.sweep_marks(std::time::Instant::now());
+        // Expire suspend / real-close marks a refused close left behind, and
+        // garbage-collect pending relaunches past their deadline. The fixture
+        // drives these with an injected `now`; production uses the wall clock
+        // here (the only wall-clock read for these deadlines).
+        let now = std::time::Instant::now();
+        data.sweep_marks(now);
+        data.sweep_pending_relaunches(now);
     })?;
 
     // Both Action::Quit and SIGTERM/SIGHUP reach here via event_loop.run()

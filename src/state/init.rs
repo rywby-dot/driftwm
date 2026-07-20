@@ -344,6 +344,8 @@ impl DriftWm {
             real_close_marks: HashMap::new(),
             desktop_entry_cache: None,
             next_suspended_id: 0,
+            pending_relaunches: BTreeMap::new(),
+            pending_adoptions: HashMap::new(),
             session_store: super::SessionStore::default(),
             window_focus: None,
             on_demand_layer: None,
