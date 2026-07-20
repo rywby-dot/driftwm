@@ -389,6 +389,8 @@ impl XdgShellHandler for DriftWm {
             let Some(output) = self.active_output() else {
                 return;
             };
+            // Moving re-anchors the window, invalidating any fill restore point.
+            self.stage.clear_fill(&window);
             let grab = MoveSurfaceGrab::new(
                 start_data,
                 window,
@@ -433,6 +435,8 @@ impl XdgShellHandler for DriftWm {
             // of the grab — so cancel the client's sequence before the compositor
             // takes over the drag, or it keeps receiving the whole sequence.
             touch.cancel(self);
+            // Moving re-anchors the window, invalidating any fill restore point.
+            self.stage.clear_fill(&window);
             let grab = MoveSurfaceGrab::new_touch(
                 touch_start,
                 window,
@@ -478,8 +482,9 @@ impl XdgShellHandler for DriftWm {
             return;
         };
 
-        // Clear fit state — user took manual control
+        // Clear fit/fill state — user took manual control
         self.stage.clear_fit(&window);
+        self.stage.clear_fill(&window);
 
         // Pinned windows resize in screen space (see start_compositor_resize_with_edge).
         let pinned_site = self.stage.pin_of(&window).cloned();

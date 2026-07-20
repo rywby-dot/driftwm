@@ -53,6 +53,10 @@ struct Entry<W> {
     /// geometry because some clients (Chromium) shrink their reported
     /// geometry after each sized configure.
     restore_size: Option<Size<i32, Logical>>,
+    /// `Some((pre-fill position, pre-fill size))` while the window is filled.
+    /// Unlike fit, fill restores position too — a filled window grows in place
+    /// rather than centering, so the exact origin must round-trip.
+    fill_saved: Option<(Point<i32, Logical>, Size<i32, Logical>)>,
     /// `Some` while the window is pinned to an output's screen space.
     pinned: Option<PinnedSite>,
 }
@@ -110,6 +114,7 @@ impl<W: StageElement> Stage<W> {
                 position,
                 fit_saved_size: None,
                 restore_size: None,
+                fill_saved: None,
                 pinned: None,
             });
         }
@@ -370,6 +375,37 @@ impl<W: StageElement> Stage<W> {
         }
     }
 
+    /// Mark `window` filled, saving its pre-fill position and size for restore.
+    pub fn set_fill(
+        &mut self,
+        window: &W,
+        saved_position: Point<i32, Logical>,
+        saved_size: Size<i32, Logical>,
+    ) {
+        if let Some(e) = self.entry_mut(window) {
+            e.fill_saved = Some((saved_position, saved_size));
+        }
+    }
+
+    pub fn is_fill(&self, window: &W) -> bool {
+        self.entry(window).is_some_and(|e| e.fill_saved.is_some())
+    }
+
+    /// Clear fill state, returning the saved pre-fill position and size (the
+    /// unfill path).
+    pub fn take_fill_saved(
+        &mut self,
+        window: &W,
+    ) -> Option<(Point<i32, Logical>, Size<i32, Logical>)> {
+        self.entry_mut(window).and_then(|e| e.fill_saved.take())
+    }
+
+    pub fn clear_fill(&mut self, window: &W) {
+        if let Some(e) = self.entry_mut(window) {
+            e.fill_saved = None;
+        }
+    }
+
     pub fn restore_size(&self, window: &W) -> Option<Size<i32, Logical>> {
         self.entry(window).and_then(|e| e.restore_size)
     }
@@ -474,6 +510,12 @@ impl<W: StageElement> Stage<W> {
                 assert!(
                     saved.w > 0 && saved.h > 0,
                     "fit window has empty saved size"
+                );
+            }
+            if let Some((_, saved)) = e.fill_saved {
+                assert!(
+                    saved.w > 0 && saved.h > 0,
+                    "fill window has empty saved size"
                 );
             }
             if e.pinned.is_some() {

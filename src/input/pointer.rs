@@ -296,6 +296,9 @@ impl DriftWm {
                                     button,
                                     location: pos,
                                 };
+                                // Moving re-anchors the window, so a fill restore
+                                // point (which includes position) no longer applies.
+                                self.stage.clear_fill(&window);
                                 let grab = MoveSurfaceGrab::new(
                                     start_data,
                                     window,
@@ -364,6 +367,12 @@ impl DriftWm {
                             } else {
                                 (Vec::new(), HashSet::new())
                             };
+                            // Re-anchoring invalidates any fill restore point —
+                            // for the primary and every member dragged along.
+                            self.stage.clear_fill(&window);
+                            for (member, _) in &cluster_members {
+                                self.stage.clear_fill(member);
+                            }
                             let grab = MoveSurfaceGrab::new(
                                 start_data,
                                 window,
@@ -714,8 +723,9 @@ impl DriftWm {
             return;
         };
 
-        // Clear fit state — user took manual control
+        // Clear fit/fill state — user took manual control
         self.stage.clear_fit(window);
+        self.stage.clear_fill(window);
 
         // Pinned windows resize in screen space; capture their `screen_pos` and
         // fixed output so the grab and the commit-time reposition use the right

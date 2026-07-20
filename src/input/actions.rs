@@ -57,6 +57,8 @@ impl DriftWm {
                 if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w))
                     && let Some(loc) = self.stage.position_of(&window)
                 {
+                    // Nudging re-anchors the window, invalidating any fill restore point.
+                    self.stage.clear_fill(&window);
                     let step = self.config.nudge_step;
                     let (ux, uy) = dir.to_unit_vec();
                     let offset = (
@@ -384,6 +386,11 @@ impl DriftWm {
                     self.toggle_fit_window_snapped(&window);
                 }
             }
+            Action::FillWindow => {
+                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
+                    self.toggle_fill_window(&window);
+                }
+            }
             Action::SendToOutput(dir) => {
                 let Some(window) = self.focused_window().filter(|w| !w.is_widget()) else {
                     return;
@@ -431,6 +438,9 @@ impl DriftWm {
                         (center_x - geo.size.w as f64 / 2.0) as i32,
                         (center_y - geo.size.h as f64 / 2.0) as i32,
                     ));
+                    // Relocating to another output re-anchors the window,
+                    // invalidating any fill restore point.
+                    self.stage.clear_fill(&window);
                     self.map_window(window.clone(), new_loc, true);
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.raise_and_focus(&window, serial);

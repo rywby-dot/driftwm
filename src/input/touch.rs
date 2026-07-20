@@ -340,6 +340,7 @@ impl DriftWm {
             .unwrap_or(output);
 
         self.stage.clear_fit(window);
+        self.stage.clear_fill(window);
 
         with_states(&wl_surface, |states| {
             states
@@ -608,6 +609,8 @@ impl DriftWm {
             return;
         };
         self.raise_and_focus(window, serial);
+        // Moving re-anchors the window, invalidating any fill restore point.
+        self.stage.clear_fill(window);
         let start = TouchGrabStartData {
             focus: None,
             slot,

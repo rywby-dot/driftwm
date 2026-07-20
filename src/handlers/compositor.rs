@@ -897,7 +897,13 @@ impl DriftWm {
         if !matches!(resize_state, ResizeState::Idle) {
             return;
         }
-        if self.is_window_fullscreen(window) || self.stage.is_fit(window) {
+        // A filled window is deliberately grown in place and may retain an
+        // unresolvable overlap; reflowing it here would translate it (violating
+        // fill's never-move contract) off a now-stale stable snap rect.
+        if self.is_window_fullscreen(window)
+            || self.stage.is_fit(window)
+            || self.stage.is_fill(window)
+        {
             return;
         }
 
