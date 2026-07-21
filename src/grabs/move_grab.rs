@@ -340,7 +340,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             // Disarm edge-pan on the current output, else it keeps scrolling
             // that monitor's camera while the drag is parked — the grab is the
             // only thing that disarms it.
-            data.set_edge_pan_velocity(&self.output, None);
+            data.clear_edge_pan(&self.output);
             handle.motion(data, None, event);
             return;
         }
@@ -376,7 +376,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             let entry_edge = Self::entry_edge(&self.output, &new_output);
 
             // Clear edge-pan on the old output before switching.
-            data.set_edge_pan_velocity(&self.output, None);
+            data.clear_edge_pan(&self.output);
 
             self.start_canvas = event.location;
             self.initial_window_location = Point::from((
@@ -426,7 +426,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            data.set_edge_pan_velocity(&self.output, None);
+            data.clear_edge_pan(&self.output);
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
                 if member.alive() {
@@ -438,7 +438,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut DriftWm) {
-        data.set_edge_pan_velocity(&self.output, None);
+        data.clear_edge_pan(&self.output);
     }
 
     crate::grabs::forward_pointer_grab_methods!();
@@ -643,7 +643,7 @@ impl MoveSurfaceGrab {
                 velocity
             };
 
-            data.set_edge_pan_velocity(&self.output, effective_velocity);
+            data.update_edge_pan_request(&self.output, effective_velocity, screen_pos);
         }
     }
 }
@@ -676,7 +676,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         // leak out of grab routing.
         if event.slot == self.touch_start.as_ref().expect("touch move grab").slot {
             // Stop edge-panning now that the controlling finger lifted.
-            data.set_edge_pan_velocity(&self.output, None);
+            data.clear_edge_pan(&self.output);
             data.touch_state.edge_pan = None;
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
@@ -747,7 +747,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         handle: &mut TouchInnerHandle<'_, DriftWm>,
         seq: Serial,
     ) {
-        data.set_edge_pan_velocity(&self.output, None);
+        data.clear_edge_pan(&self.output);
         handle.cancel(data, seq);
         handle.unset_grab(self, data);
     }
@@ -777,7 +777,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut DriftWm) {
-        data.set_edge_pan_velocity(&self.output, None);
+        data.clear_edge_pan(&self.output);
         data.touch_state.edge_pan = None;
     }
 }
