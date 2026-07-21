@@ -1026,9 +1026,9 @@ Supported fields:
 - `mode` — "preferred", "max", "WxH", or "WxH@Hz" (see above; default: preferred).
 - `hot_corners` — per-output screen-corner action bindings (see below).
 
-Hot-corners bind any keyboard action to a screen corner. The action fires when the cursor enters that corner of THIS output (per-monitor setting), and re-arms when the cursor leaves. The whole `[[outputs]]` block can be omitted if you don't need any hot corners on a particular monitor.
+Hot-corners bind any keyboard action to a screen corner. The action fires when the cursor enters that corner of THIS output (per-monitor setting), and re-arms when the cursor leaves. The whole `[[outputs]]` block can be omitted if you don't need any hot corners on a particular monitor. A `name = "*"` entry's hot corners apply to any output without an exact-name `[[outputs]]` entry; an exact entry replaces the wildcard wholesale (fields don't merge), so an exact entry with no `hot_corners` table gets none.
 
-Supported actions: any of the actions documented in `[keybindings]` / `[mouse]` (exec, exec-terminal, exec-launcher, spawn, zoom-to-fit, cycle-windows, reload-config, quit, ...). Pass "none" to leave a corner unbound.
+Corner actions: any action from the [keybindings] Actions list. Pass "none" to leave a corner unbound.
 
 **Example:**
 
@@ -1046,7 +1046,7 @@ scale = 1.0
 mode = "1920x1080@60"
 
 [outputs.hot_corners]
-threshold = 4         # activation radius in logical px (default: 4)
+threshold = 4         # corner zone size in logical px (default: 4)
 top_left = "zoom-to-fit"
 top_right = "none"
 bottom_left = "spawn grim - | wl-copy"
