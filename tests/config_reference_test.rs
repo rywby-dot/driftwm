@@ -382,6 +382,55 @@ fn keybinding_actions_are_all_documented() {
     );
 }
 
+/// Guards the threshold-exception claim in the `[gestures]`/`[touch]` docs: the
+/// set of `[keybindings]` actions a per-direction swipe (a threshold-only
+/// trigger) rejects must equal the documented exception list. The claim is
+/// defined by subtraction, so a keyboard action added without a
+/// `parse_threshold_action` arm would silently become an undocumented
+/// exception; this forces the docs and code to move together. Touch
+/// per-direction swipes share the same recognizer, so covering gestures suffices.
+#[test]
+fn threshold_gesture_exceptions_match_docs() {
+    const EXCEPTIONS: &[&str] = &["nudge-window", "go-to", "cycle-windows", "pan-viewport"];
+
+    for (name, sample) in ACTION_NAMES {
+        let toml = format!("[gestures.anywhere]\n\"4-finger-swipe-up\" = \"{sample}\"\n");
+        let (_, warnings) = Config::from_toml_collect(&toml)
+            .unwrap_or_else(|e| panic!("gesture binding for {sample:?} failed to parse: {e}"));
+        let rejected = !warnings.is_empty();
+
+        // center-nearest's directional keyboard form is rejected here — the
+        // gesture takes its direction from the swipe — but it is not a
+        // documented exception, so it sits outside the EXCEPTIONS comparison.
+        if *name == "center-nearest" {
+            assert!(
+                rejected,
+                "directional `{sample}` must be rejected on a per-direction swipe"
+            );
+            continue;
+        }
+
+        assert_eq!(
+            rejected,
+            EXCEPTIONS.contains(name),
+            "`{name}` (sample `{sample}`) swipe-up rejected={rejected}, but the \
+             [gestures]/[touch] threshold paragraphs in config.reference.toml list \
+             exceptions {EXCEPTIONS:?}: extend the documented list (rejected but \
+             undocumented) or shrink it (documented but now parses)"
+        );
+    }
+
+    // The docs' swipe-only sentence: bare center-nearest takes its direction
+    // from the swipe and parses clean.
+    let toml = "[gestures.anywhere]\n\"4-finger-swipe-up\" = \"center-nearest\"\n";
+    let (_, warnings) =
+        Config::from_toml_collect(toml).expect("bare center-nearest gesture binding must parse");
+    assert!(
+        warnings.is_empty(),
+        "bare `center-nearest` on a swipe trigger should parse clean: {warnings:?}"
+    );
+}
+
 /// The body of every ```` ```toml ```` fence in a markdown document.
 fn toml_fences(md: &str) -> Vec<String> {
     let mut fences = Vec::new();
