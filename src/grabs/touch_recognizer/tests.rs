@@ -228,6 +228,37 @@ fn four_finger_swipe_fires_exactly_one_threshold() {
     );
 }
 
+#[test]
+fn named_swipe_direction_is_physical() {
+    // Named per-direction triggers fire in physical finger direction (unlike bare
+    // center-nearest, which stays content-oriented). Base swipe and pinch unbound
+    // so the one-shot direction engine runs cleanly. Fingers move up → swipe-up.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-swipe\" = \"none\"\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-swipe-up\" = \"home-toggle\"\n",
+    )
+    .unwrap();
+    let seq = vec![
+        down(0, 500.0, 800.0, false, 0),
+        down(1, 600.0, 800.0, false, 5),
+        down(2, 700.0, 800.0, false, 10),
+        motion(0, 500.0, 720.0, 20),
+        motion(1, 600.0, 720.0, 25),
+        motion(2, 700.0, 720.0, 30),
+        motion(0, 500.0, 640.0, 40),
+        motion(1, 600.0, 640.0, 45),
+        motion(2, 700.0, 640.0, 50),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "a physical up-swipe must fire the swipe-up binding, got {decs:?}"
+    );
+}
+
 fn is_grab(d: &Decision) -> bool {
     matches!(d, Decision::StartWindowGrab { .. })
 }

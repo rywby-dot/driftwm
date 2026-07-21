@@ -821,7 +821,7 @@ Gesture bindings: `"Modifier+N-finger-<type>" = "action"` Context-aware: on-wind
 Gesture types (2–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
-- `N-finger-swipe-up/down/left/right` — threshold only, checked before swipe fallback
+- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction, checked before swipe fallback
 - `3-finger-doubletap-swipe` — continuous only (window grabs; 3-finger tap then swipe)
 - `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
 - `N-finger-pinch-in/out` — threshold only
@@ -836,7 +836,7 @@ Continuous actions, locked to their triggers:
 - `resize-window` — swipe or doubletap-swipe
 - `resize-window-snapped` — swipe or doubletap-swipe
 
-Threshold actions: any action from the [keybindings] Actions list. center-nearest may also be bound bare — the direction then comes from the swipe itself (swipe triggers only).
+Threshold actions: any action from the [keybindings] Actions list. center-nearest may also be bound bare — its direction is the pan direction of the swipe (fingers left looks right), unlike the named per-direction triggers above which are physical (swipe triggers only).
 
 ## `[gestures.on-window]`
 
@@ -894,7 +894,7 @@ Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Cont
 Touch gesture types (1–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
-- `N-finger-swipe-up/down/left/right` — threshold only, checked before swipe fallback
+- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction, checked before swipe fallback
 - `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-tap` — threshold only (quick touch, no movement)
