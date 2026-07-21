@@ -1176,21 +1176,9 @@ impl DriftWm {
                                 os.overview_return = None;
                                 os.momentum.stop();
                             });
-
-                            // Suspended-aware cascade, as a real motion would use.
-                            let screen_pos =
-                                canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
-                            let under = self.pointer_focus_under(screen_pos, pos);
-                            let serial = SERIAL_COUNTER.next_serial();
-                            pointer.motion(
-                                self,
-                                under,
-                                &MotionEvent {
-                                    location: pos,
-                                    serial,
-                                    time: Event::time_msec(&event),
-                                },
-                            );
+                            // No resync here: zoom is unchanged until the
+                            // animation ticks, which warp through the guarded
+                            // focus path.
                         }
                     }
                 }
