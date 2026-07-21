@@ -1,6 +1,6 @@
 # Summary
 
-- [Introduction](index.md)
+- [Home](index.md)
 - [Configuration](config.md)
 - [Window rules](window-rules.md)
 - [IPC](ipc.md)
