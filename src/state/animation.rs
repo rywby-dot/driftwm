@@ -246,7 +246,7 @@ impl DriftWm {
         self.with_output_state(|os| {
             os.camera_target = None;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
             os.overview_return = None;
             os.momentum.accumulate(delta, time_ms);
             os.camera.x += delta.x;
@@ -268,7 +268,7 @@ impl DriftWm {
             let mut os = super::output_state(output);
             os.camera_target = None;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
             os.overview_return = None;
             os.momentum.accumulate(delta, time_ms);
             os.camera.x += delta.x;
@@ -370,8 +370,8 @@ impl DriftWm {
     }
 
     /// Advance zoom animation toward `zoom_target` using frame-rate independent lerp.
-    /// When `zoom_animation_center` is set (combined zoom+camera animation), lerps
-    /// the on-screen center directly and derives camera, preventing lateral drift.
+    /// When `zoom_animation_anchor` is set (combined zoom+camera animation), keeps
+    /// its screen-space anchor stable while deriving camera, preventing drift.
     /// Otherwise just adjusts pointer so cursor stays at the same screen position.
     pub fn apply_zoom_animation(&mut self, dt: Duration) {
         let Some(target) = self.zoom_target() else {
@@ -384,39 +384,50 @@ impl DriftWm {
         let factor = self.animation_factor(dt);
 
         let dz = target - old_zoom;
-        if dz.abs() < 0.001 {
+        let zoom_close = dz.abs() < 0.001;
+        if zoom_close {
             self.set_zoom(target);
-            self.set_zoom_target(None);
+            if self.zoom_animation_anchor().is_none() {
+                self.set_zoom_target(None);
+            }
         } else {
             self.set_zoom(old_zoom + dz * factor);
         }
 
-        if let Some(target_center) = self.zoom_animation_center() {
-            // Combined zoom+camera: lerp the on-screen center, derive camera
-            let vc = self.usable_center_screen();
-            let current_center: Point<f64, Logical> = Point::from((
-                old_camera.x + vc.x / old_zoom,
-                old_camera.y + vc.y / old_zoom,
+        if let Some(anchor) = self.zoom_animation_anchor() {
+            // Combined zoom+camera: lerp the canvas point at the fixed screen
+            // anchor, then derive camera. The anchor can be the viewport center
+            // (keyboard/fit) or the pointer position (wheel zoom).
+            let current_anchor: Point<f64, Logical> = Point::from((
+                old_camera.x + anchor.screen.x / old_zoom,
+                old_camera.y + anchor.screen.y / old_zoom,
             ));
-            let cx = current_center.x + (target_center.x - current_center.x) * factor;
-            let cy = current_center.y + (target_center.y - current_center.y) * factor;
+            let cx = current_anchor.x + (anchor.canvas.x - current_anchor.x) * factor;
+            let cy = current_anchor.y + (anchor.canvas.y - current_anchor.y) * factor;
 
             let cur_zoom = self.zoom();
-            self.set_camera(Point::from((cx - vc.x / cur_zoom, cy - vc.y / cur_zoom)));
+            self.set_camera(Point::from((
+                cx - anchor.screen.x / cur_zoom,
+                cy - anchor.screen.y / cur_zoom,
+            )));
             self.update_output_from_camera();
 
             // Suppress camera_animation — we set camera directly
             self.set_camera_target(None);
 
-            if self.zoom_target().is_none() {
-                // Zoom snapped — hand off final convergence to camera_animation
+            let center_dx = anchor.canvas.x - current_anchor.x;
+            let center_dy = anchor.canvas.y - current_anchor.y;
+            if zoom_close && center_dx * center_dx + center_dy * center_dy < 0.25 {
+                // Finish both coordinates together to avoid a camera-only tail.
                 let cur_zoom = self.zoom();
                 let final_camera = Point::from((
-                    target_center.x - vc.x / cur_zoom,
-                    target_center.y - vc.y / cur_zoom,
+                    anchor.canvas.x - anchor.screen.x / cur_zoom,
+                    anchor.canvas.y - anchor.screen.y / cur_zoom,
                 ));
-                self.set_zoom_animation_center(None);
-                self.set_camera_target(Some(final_camera));
+                self.set_zoom_target(None);
+                self.clear_zoom_animation_anchor();
+                self.set_camera(final_camera);
+                self.update_output_from_camera();
             }
 
             // Warp pointer: compensate for both camera and zoom change
@@ -485,7 +496,7 @@ impl DriftWm {
                 let mut os = output_state(output);
                 os.camera_target = None;
                 os.zoom_target = None;
-                os.zoom_animation_center = None;
+                os.zoom_animation_anchor = None;
             }
             self.tick_zoom_animation_on(output, is_active, dt);
             self.tick_camera_animation_on(output, is_active, dt);
@@ -575,54 +586,61 @@ impl DriftWm {
     }
 
     fn tick_zoom_animation_on(&mut self, output: &Output, is_active: bool, dt: Duration) {
-        let (target, old_zoom, old_camera, anim_center) = {
+        let (target, old_zoom, old_camera, anim_anchor) = {
             let os = output_state(output);
             let Some(target) = os.zoom_target else { return };
-            (target, os.zoom, os.camera, os.zoom_animation_center)
+            (target, os.zoom, os.camera, os.zoom_animation_anchor)
         };
 
         let factor = self.animation_factor(dt);
 
         let dz = target - old_zoom;
+        let zoom_close = dz.abs() < 0.001;
         {
             let mut os = output_state(output);
-            if dz.abs() < 0.001 {
+            if zoom_close {
                 os.zoom = target;
-                os.zoom_target = None;
+                if anim_anchor.is_none() {
+                    os.zoom_target = None;
+                }
                 drop(os);
             } else {
                 os.zoom = old_zoom + dz * factor;
             }
         }
 
-        if let Some(target_center) = anim_center {
-            let vc = super::usable_center_for_output(output);
-
-            let current_center: Point<f64, Logical> = Point::from((
-                old_camera.x + vc.x / old_zoom,
-                old_camera.y + vc.y / old_zoom,
+        if let Some(anchor) = anim_anchor {
+            let current_anchor: Point<f64, Logical> = Point::from((
+                old_camera.x + anchor.screen.x / old_zoom,
+                old_camera.y + anchor.screen.y / old_zoom,
             ));
-            let cx = current_center.x + (target_center.x - current_center.x) * factor;
-            let cy = current_center.y + (target_center.y - current_center.y) * factor;
+            let cx = current_anchor.x + (anchor.canvas.x - current_anchor.x) * factor;
+            let cy = current_anchor.y + (anchor.canvas.y - current_anchor.y) * factor;
 
             let cur_zoom = output_state(output).zoom;
             self.set_camera_on(
                 output,
-                Point::from((cx - vc.x / cur_zoom, cy - vc.y / cur_zoom)),
+                Point::from((
+                    cx - anchor.screen.x / cur_zoom,
+                    cy - anchor.screen.y / cur_zoom,
+                )),
             );
             {
                 let mut os = output_state(output);
                 // Suppress camera_animation — we set camera directly
                 os.camera_target = None;
 
-                if os.zoom_target.is_none() {
-                    // Zoom snapped — hand off final convergence to camera_animation
+                let center_dx = anchor.canvas.x - current_anchor.x;
+                let center_dy = anchor.canvas.y - current_anchor.y;
+                if zoom_close && center_dx * center_dx + center_dy * center_dy < 0.25 {
                     let final_camera = Point::from((
-                        target_center.x - vc.x / cur_zoom,
-                        target_center.y - vc.y / cur_zoom,
+                        anchor.canvas.x - anchor.screen.x / cur_zoom,
+                        anchor.canvas.y - anchor.screen.y / cur_zoom,
                     ));
-                    os.zoom_animation_center = None;
-                    os.camera_target = Some(final_camera);
+                    os.zoom_target = None;
+                    os.zoom_animation_anchor = None;
+                    drop(os);
+                    self.set_camera_on(output, final_camera);
                 }
             }
 

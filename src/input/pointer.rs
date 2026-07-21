@@ -22,7 +22,9 @@ use smithay::wayland::seat::WaylandFocus;
 
 use crate::decorations::DecorationHit;
 use crate::grabs::{MoveSurfaceGrab, NavigateGrab, PanGrab, ResizeState, ResizeSurfaceGrab};
-use crate::state::{ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick};
+use crate::state::{
+    ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick, ZoomAnimationAnchor,
+};
 use driftwm::canvas::{self, CanvasPos, canvas_to_screen};
 use driftwm::config::{self, BindingContext, MouseAction};
 use driftwm::window_ext::WindowExt;
@@ -992,22 +994,23 @@ impl DriftWm {
                         let steps = -v / 30.0 * self.config.zoom_mouse_speed;
                         let factor = self.config.zoom_step.powf(steps);
                         let cur_zoom = self.zoom();
-                        let new_zoom = (cur_zoom * factor).clamp(self.min_zoom(), canvas::MAX_ZOOM);
+                        let base_zoom = self.zoom_target().unwrap_or(cur_zoom);
+                        let target_zoom =
+                            (base_zoom * factor).clamp(self.min_zoom(), canvas::MAX_ZOOM);
 
-                        if new_zoom != cur_zoom {
+                        if target_zoom != base_zoom {
                             let screen_pos =
                                 canvas_to_screen(CanvasPos(pos), self.camera(), cur_zoom).0;
-                            let new_camera = canvas::zoom_anchor_camera(pos, screen_pos, new_zoom);
                             self.with_output_state(|os| {
-                                os.camera = new_camera;
-                                os.zoom = new_zoom;
-                                os.zoom_target = None;
-                                os.zoom_animation_center = None;
+                                os.zoom_target = Some(target_zoom);
+                                os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
+                                    canvas: pos,
+                                    screen: screen_pos,
+                                });
                                 os.camera_target = None;
                                 os.overview_return = None;
                                 os.momentum.stop();
                             });
-                            self.update_output_from_camera();
 
                             let under = self.surface_under(pos, None);
                             let serial = SERIAL_COUNTER.next_serial();

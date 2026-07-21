@@ -165,7 +165,7 @@ impl DriftWm {
             let mut os = super::output_state(&output);
             os.zoom = 1.0;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
             os.camera_target = None;
             os.momentum.stop();
             os.overview_return = None;
@@ -321,7 +321,7 @@ impl DriftWm {
             os.zoom = zoom;
             os.camera_target = None;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
         }
         self.update_output_from_camera();
 
