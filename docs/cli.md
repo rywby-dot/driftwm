@@ -196,7 +196,7 @@ Blur caveat: a scene capture (viewport/`all`/`region`) shows a translucent windo
 Reply: `{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}`.
 
 - `--scale <SCALE>` — Pixels per canvas unit — higher captures more detail than the screen shows, independent of zoom (default: `1`)
-- `-o, --output <OUTPUT>` — Output PNG path, or `-` for stdout [default: ./driftwm-screenshot-<time>.png]
+- `-o, --output <OUTPUT>` — Output PNG path, or `-` for stdout [default: `./driftwm-screenshot-<time>.png`]
 
 ##### `driftwm msg screenshot window`
 

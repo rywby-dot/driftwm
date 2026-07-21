@@ -182,7 +182,7 @@ pub enum Msg {
         /// Pixels per canvas unit — higher captures more detail than the screen shows, independent of zoom.
         #[arg(long, default_value_t = 1.0, global = true)]
         scale: f64,
-        /// Output PNG path, or `-` for stdout [default: ./driftwm-screenshot-<time>.png].
+        /// Output PNG path, or `-` for stdout [default: `./driftwm-screenshot-<time>.png`].
         #[arg(short, long, global = true)]
         output: Option<String>,
     },

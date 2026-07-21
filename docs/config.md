@@ -801,7 +801,7 @@ Default: `1.15`
 
 scale above which pinch-out fires (1.0 = no pinch)
 
-Gesture bindings: "Modifier+N-finger-<type>" = "action" Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" unbinds (prevents anywhere fallback, still forwards).
+Gesture bindings: `"Modifier+N-finger-<type>" = "action"` Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" unbinds (prevents anywhere fallback, still forwards).
 
 Gesture types:
 
@@ -812,7 +812,7 @@ Gesture types:
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-hold` — threshold only (fires on release)
 
-Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, fill-window, exec <cmd>, etc.
+Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, fill-window, `exec <cmd>`, etc.
 
 ## `[gestures.on-window]`
 
@@ -865,7 +865,7 @@ Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resiz
 
 Touchscreen gesture BINDINGS. Distinct from [input.touch], which holds the touch *device* settings (enable, map_to_output) — put those there, not here (same split as [gestures] bindings vs [input.trackpad] device settings).
 
-Bindings: "N-finger-<type>" = "action"  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context (under [touch.anywhere] it also drops the anywhere fallback). A fully unbound gesture forwards to the app.
+Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context (under [touch.anywhere] it also drops the anywhere fallback). A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):
 
@@ -878,7 +878,7 @@ Touch gesture types (1–5 fingers):
 - `N-finger-doubletap-swipe` — continuous only (tap then drag)
 - `N-finger-hold-swipe` — continuous only (dwell then drag)
 
-Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, exec <cmd>, etc.
+Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, `exec <cmd>`, etc.
 
 Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
 
