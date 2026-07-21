@@ -24,6 +24,7 @@ mod config_reload;
 mod configure_sequences;
 mod cycle_windows;
 mod focus_timing;
+mod hot_corners;
 mod hotplug;
 mod opacity;
 mod popups;
