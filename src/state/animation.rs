@@ -412,7 +412,10 @@ impl DriftWm {
     /// Synthetic pointer motion keeps cursor at the same screen position and
     /// lets the active MoveSurfaceGrab reposition the window automatically.
     pub fn apply_edge_pan(&mut self) {
-        let Some(velocity) = self.edge_pan_velocity() else {
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let Some(velocity) = self.effective_edge_pan_velocity(&output, Instant::now()) else {
             return;
         };
         // velocity is screen-space speed; convert to canvas delta
@@ -727,11 +730,11 @@ impl DriftWm {
     }
 
     fn tick_edge_pan_on(&mut self, output: &Output, is_active: bool) {
+        let Some(velocity) = self.effective_edge_pan_velocity(output, Instant::now()) else {
+            return;
+        };
         let canvas_delta = {
             let os = output_state(output);
-            let Some(velocity) = os.edge_pan_velocity else {
-                return;
-            };
             Point::from((velocity.x / os.zoom, velocity.y / os.zoom))
         };
 
