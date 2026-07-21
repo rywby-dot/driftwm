@@ -346,7 +346,7 @@ render_elements! {
     TileBgChunk=PixelSnapRescaleElement<TileShaderElement>,
     WallpaperBg=TileShaderElement,
     Decoration=PixelSnapRescaleElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
-    SuspendedBody=RescaleRenderElement<SolidColorRenderElement>,
+    SuspendedBody=PixelSnapRescaleElement<SolidColorRenderElement>,
     Window=PixelSnapRescaleElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     CsdWindow=PixelSnapRescaleElement<RoundedCornerElement>,
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,

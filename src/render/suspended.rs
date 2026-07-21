@@ -13,7 +13,6 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
-use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::gles::{GlesPixelProgram, GlesRenderer};
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
@@ -184,7 +183,7 @@ pub(super) fn push_suspended_element(
             let body_elem =
                 SolidColorRenderElement::from_buffer(buf, loc_phys, scale, 1.0, Kind::Unspecified);
             target.push(OutputRenderElements::SuspendedBody(
-                RescaleRenderElement::from_element(
+                PixelSnapRescaleElement::from_element(
                     body_elem,
                     Point::<i32, Physical>::from((0, 0)),
                     zoom,
