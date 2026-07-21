@@ -67,6 +67,7 @@ pub enum Action {
     ToggleFullscreen,
     FitWindow,
     FitWindowSnapped,
+    FillWindow,
     SendToOutput(Direction),
     SendCursorToOutput(Direction),
     FocusCenter,
@@ -89,6 +90,26 @@ impl Action {
                 | Action::CycleWindows { .. }
                 | Action::Spawn(_)
         )
+    }
+
+    /// Actions the fullscreen guard lets run in place — everything else
+    /// exits fullscreen before executing.
+    pub fn runs_during_fullscreen(&self) -> bool {
+        matches!(
+            self,
+            Action::ToggleFullscreen
+                | Action::Spawn(_)
+                | Action::ReloadConfig
+                | Action::SwitchLayout(_)
+                | Action::ToggleCursorPan
+                | Action::SendToOutput(_)
+        )
+    }
+
+    /// Whether dispatching this during fullscreen ends it — either the guard
+    /// exits first, or the action itself does (ToggleFullscreen).
+    pub fn ends_fullscreen(&self) -> bool {
+        !self.runs_during_fullscreen() || matches!(self, Action::ToggleFullscreen)
     }
 }
 
@@ -268,6 +289,10 @@ pub enum GestureTrigger {
     PinchIn { fingers: u32 },
     PinchOut { fingers: u32 },
     Hold { fingers: u32 },
+    // Touch-only triggers (never produced by the trackpad gesture parser).
+    Tap { fingers: u32 },
+    Doubletap { fingers: u32 },
+    HoldSwipe { fingers: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -282,6 +307,9 @@ pub enum ContinuousAction {
     PanViewport,
     Zoom,
     MoveWindow,
+    /// Same as `MoveWindow` plus cluster drag: every snapped neighbor moves
+    /// with the grabbed window. Opt-in via explicit binding.
+    MoveSnappedWindows,
     ResizeWindow,
     /// Same as `ResizeWindow` plus cluster propagation: delta applies to the
     /// focused window's snap-cluster neighbors. Opt-in via explicit binding.
@@ -293,6 +321,15 @@ pub enum ContinuousAction {
 pub enum ThresholdAction {
     CenterNearest,
     Fixed(Action),
+}
+
+impl ThresholdAction {
+    pub fn ends_fullscreen(&self) -> bool {
+        match self {
+            ThresholdAction::CenterNearest => true, // fires Action::CenterNearest
+            ThresholdAction::Fixed(a) => a.ends_fullscreen(),
+        }
+    }
 }
 
 /// Resolved at parse time from trigger + action combination.
@@ -400,6 +437,7 @@ pub struct MouseDeviceSettings {
     pub accel_speed: f64,
     pub accel_profile: AccelProfile,
     pub natural_scroll: bool,
+    pub left_handed: bool,
 }
 
 impl Default for MouseDeviceSettings {
@@ -408,6 +446,7 @@ impl Default for MouseDeviceSettings {
             accel_speed: 0.0,
             accel_profile: AccelProfile::Flat,
             natural_scroll: false,
+            left_handed: false,
         }
     }
 }
@@ -607,6 +646,7 @@ pub struct WindowRule {
     // ── One-time placement effects ────────────────────────────────────
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
+    pub fullscreen: Option<bool>,
     /// Widget windows are pinned (immovable), excluded from navigation/alt-tab,
     /// and always stacked below normal windows.
     pub widget: bool,
@@ -636,6 +676,11 @@ pub struct WindowRule {
     /// the client-requested output; `None` defers to the client's request, then
     /// the active output.
     pub output: Option<String>,
+    /// Stacking order among layer-shell surfaces sharing the same wlr-layer
+    /// (the protocol has no z-index within a layer, so map order decides by
+    /// default). Higher stacks on top; ties keep map order. Ignored for
+    /// regular windows.
+    pub layer_order: Option<i32>,
 }
 
 impl WindowRule {
@@ -657,8 +702,9 @@ impl WindowRule {
 /// Built by merging ALL matching `WindowRule`s in config order
 /// (later rules override earlier ones for scalar fields; boolean flags
 /// are sticky-on).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AppliedWindowRule {
+    pub fullscreen: Option<bool>,
     pub widget: bool,
     pub pinned_to_screen: bool,
     pub decoration: Option<DecorationMode>,
@@ -675,6 +721,7 @@ pub struct AppliedWindowRule {
     pub corner_radius: Option<i32>,
     pub shadow: Option<bool>,
     pub output: Option<String>,
+    pub layer_order: Option<i32>,
 }
 
 impl AppliedWindowRule {
@@ -705,6 +752,9 @@ impl AppliedWindowRule {
         if let Some(sz) = rule.size {
             self.size = Some(sz);
         }
+        if let Some(fs) = rule.fullscreen {
+            self.fullscreen = Some(fs);
+        }
         if let Some(bw) = rule.border_width {
             self.border_width = Some(bw);
         }
@@ -723,6 +773,9 @@ impl AppliedWindowRule {
         if rule.output.is_some() {
             self.output = rule.output.clone();
         }
+        if let Some(lo) = rule.layer_order {
+            self.layer_order = Some(lo);
+        }
     }
 }
 
@@ -737,12 +790,14 @@ impl From<&WindowRule> for AppliedWindowRule {
             pass_keys: rule.pass_keys.clone(),
             position: rule.position,
             size: rule.size,
+            fullscreen: rule.fullscreen,
             border_width: rule.border_width,
             border_color: rule.border_color,
             border_color_focused: rule.border_color_focused,
             corner_radius: rule.corner_radius,
             shadow: rule.shadow,
             output: rule.output.clone(),
+            layer_order: rule.layer_order,
         }
     }
 }
@@ -1025,6 +1080,8 @@ pub enum OutputMode {
     Size(i32, i32),
     /// WxH@Hz — approximate match (DRM reports millihertz).
     SizeRefresh(i32, i32, u32),
+    /// Highest resolution (w*h), then highest refresh.
+    Max,
 }
 
 /// Built-in dot grid shader — used when no background source is configured.
@@ -1073,4 +1130,42 @@ pub struct BackgroundConfig {
     /// shader-bake cache (`cache_shader`) and gigapixel-TIFF wallpapers. The
     /// cache LRU-evicts to stay under this; lower it on low-memory machines.
     pub cache_budget_mb: u32,
+    /// Frame-rate cap for animated (`u_time`) background shaders. 0 = every
+    /// output frame (default). Slow-moving shaders look identical well below
+    /// the refresh rate, and between animation ticks the compositor reuses the
+    /// composited result instead of re-evaluating the shader.
+    pub animate_fps: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runs_during_fullscreen_allowlist() {
+        assert!(Action::ToggleFullscreen.runs_during_fullscreen());
+        assert!(Action::Spawn("foo".into()).runs_during_fullscreen());
+        assert!(Action::ReloadConfig.runs_during_fullscreen());
+        assert!(Action::SwitchLayout(LayoutSwitch::Next).runs_during_fullscreen());
+        assert!(Action::ToggleCursorPan.runs_during_fullscreen());
+        assert!(Action::SendToOutput(Direction::Right).runs_during_fullscreen());
+        assert!(!Action::CloseWindow.runs_during_fullscreen());
+        assert!(!Action::ZoomIn.runs_during_fullscreen());
+        assert!(!Action::CenterNearest(Direction::Up).runs_during_fullscreen());
+    }
+
+    #[test]
+    fn action_ends_fullscreen() {
+        // ends it via its own handler despite being allowlisted
+        assert!(Action::ToggleFullscreen.ends_fullscreen());
+        assert!(!Action::Spawn("foo".into()).ends_fullscreen());
+        assert!(Action::CloseWindow.ends_fullscreen());
+    }
+
+    #[test]
+    fn threshold_action_ends_fullscreen() {
+        assert!(ThresholdAction::CenterNearest.ends_fullscreen());
+        assert!(!ThresholdAction::Fixed(Action::Spawn("foo".into())).ends_fullscreen());
+        assert!(ThresholdAction::Fixed(Action::CloseWindow).ends_fullscreen());
+    }
 }

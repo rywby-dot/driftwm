@@ -26,27 +26,46 @@ use smithay::wayland::compositor::RegionAttributes;
 
 use crate::decorations::DecorationHit;
 use crate::state::{DriftWm, FocusTarget};
-use driftwm::canvas::{ScreenPos, screen_to_canvas};
+use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
 use driftwm::config::HotCorner;
 use driftwm::protocols::output_power::OutputPowerHandler;
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
-/// whenever the cursor sits within `zone` px of a screen edge, directed away
-/// from the edge(s) it's near. Unlike the window-drag joystick curve, the
-/// magnitude does not ramp with depth — so the speed stays the same no matter
-/// how hard the cursor is pushed into the edge. Diagonals are normalized so a
-/// corner doesn't pan √2 faster. Returns `None` outside the zone.
+/// whenever the cursor sits within `zone` px of an edge of the *usable* area
+/// (output minus layer-shell exclusive zones), directed away from the edge(s)
+/// it's near. Measuring from the usable area rather than the raw output keeps
+/// the pan zone reachable below a bar that reserves an exclusive zone — against
+/// the raw output, a bar taller than `zone` swallows that edge's zone entirely
+/// and panning toward it becomes impossible. Unlike the window-drag joystick
+/// curve, the magnitude does not ramp with depth — so the speed stays the same
+/// no matter how hard the cursor is pushed into the edge. Diagonals are
+/// normalized so a corner doesn't pan √2 faster. Returns `None` outside the
+/// zone.
 fn cursor_edge_pan_velocity(
     screen_pos: Point<f64, Logical>,
-    output_w: f64,
-    output_h: f64,
+    usable: smithay::utils::Rectangle<i32, Logical>,
     zone: f64,
     speed: f64,
 ) -> Option<Point<f64, Logical>> {
-    let dist_left = screen_pos.x;
-    let dist_right = output_w - screen_pos.x;
-    let dist_top = screen_pos.y;
-    let dist_bottom = output_h - screen_pos.y;
+    let usable_x = usable.loc.x as f64;
+    let usable_y = usable.loc.y as f64;
+    let usable_right = usable_x + usable.size.w as f64;
+    let usable_bottom = usable_y + usable.size.h as f64;
+
+    // Outside the usable area (e.g. over a bar's reserved space) the distances
+    // below go negative, which would read as "even deeper in the zone" and pan.
+    if screen_pos.x < usable_x
+        || screen_pos.x > usable_right
+        || screen_pos.y < usable_y
+        || screen_pos.y > usable_bottom
+    {
+        return None;
+    }
+
+    let dist_left = screen_pos.x - usable_x;
+    let dist_right = usable_right - screen_pos.x;
+    let dist_top = screen_pos.y - usable_y;
+    let dist_bottom = usable_bottom - screen_pos.y;
 
     let mut vx: f64 = 0.0;
     let mut vy: f64 = 0.0;
@@ -76,10 +95,10 @@ fn window_origin_for_surface(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<Point<f64, smithay::utils::Logical>> {
     let window = state
-        .space
-        .elements()
+        .stage
+        .windows()
         .find(|w| w.wl_surface().as_deref() == Some(surface))?;
-    Some(state.space.element_location(window)?.to_f64())
+    Some(state.stage.position_of(window)?.to_f64())
 }
 
 impl DriftWm {
@@ -92,7 +111,7 @@ impl DriftWm {
         output: &smithay::output::Output,
         screen_pos: Point<f64, smithay::utils::Logical>,
     ) {
-        let Some(cfg) = self.config.output_config(&output.name()).cloned() else {
+        let Some(cfg) = self.config.output_config(&output.name()) else {
             return;
         };
         if cfg.hot_corners.bindings.is_empty() {
@@ -102,6 +121,7 @@ impl DriftWm {
         // disable_when_fullscreen: any fullscreen window on this output silences
         // hot-corners for that output.
         if cfg.hot_corners.disable_when_fullscreen && self.is_output_fullscreen(output) {
+            self.hot_corners_armed.remove(output);
             return;
         }
 
@@ -295,10 +315,11 @@ impl DriftWm {
     }
 
     /// Hit-test the pointer against all surface layers in z-order. Sets
-    /// `self.pointer_over_layer` as a side effect. The caller is responsible
-    /// for issuing `pointer.motion()` / `pointer.relative_motion()` /
-    /// `pointer.frame()` and calling `update_decoration_cursor()` so that
-    /// absolute and relative motion events agree on the same target surface.
+    /// `self.pointer_over_layer` and `self.pointer_over_screen_space` as side
+    /// effects. The caller is responsible for issuing `pointer.motion()` /
+    /// `pointer.relative_motion()` / `pointer.frame()` and calling
+    /// `update_decoration_cursor()` so that absolute and relative motion events
+    /// agree on the same target surface.
     fn pointer_focus_under(
         &mut self,
         screen_pos: Point<f64, smithay::utils::Logical>,
@@ -320,30 +341,35 @@ impl DriftWm {
         };
         if let Some(hit) = self.layer_surface_under(screen_pos, canvas_pos, above) {
             self.pointer_over_layer = true;
+            self.pointer_over_screen_space = true;
             return Some(hit);
         }
 
         // Screen-pinned windows: above normal canvas windows, below Top/Overlay.
         if let Some(hit) = self.pinned_window_under(screen_pos, canvas_pos) {
             self.pointer_over_layer = false;
+            self.pointer_over_screen_space = true;
             return Some(hit);
         }
 
         // Non-widget canvas windows (visually above canvas layers)
         if let Some(hit) = self.surface_under(canvas_pos, Some(false)) {
             self.pointer_over_layer = false;
+            self.pointer_over_screen_space = false;
             return Some(hit);
         }
 
         // Canvas-positioned layer surfaces
         if let Some(hit) = self.canvas_layer_under(canvas_pos) {
             self.pointer_over_layer = false;
+            self.pointer_over_screen_space = false;
             return Some(hit);
         }
 
         // Widget canvas windows (visually below canvas layers)
         if let Some(hit) = self.surface_under(canvas_pos, Some(true)) {
             self.pointer_over_layer = false;
+            self.pointer_over_screen_space = false;
             return Some(hit);
         }
 
@@ -356,10 +382,12 @@ impl DriftWm {
             )
         {
             self.pointer_over_layer = true;
+            self.pointer_over_screen_space = true;
             return Some(hit);
         }
 
         self.pointer_over_layer = false;
+        self.pointer_over_screen_space = false;
         None
     }
 
@@ -377,7 +405,7 @@ impl DriftWm {
         // On a fullscreen output the window owns focus; re-assert it rather than
         // hit-testing for a hover target. This reclaims focus that hover moved to
         // another output's window, which nothing else here would restore.
-        if let Some(window) = self.active_fullscreen().map(|fs| fs.window.clone()) {
+        if let Some(window) = self.active_fullscreen_window() {
             let focus_surface = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
             let already_focused = focus_surface
                 .as_ref()
@@ -856,7 +884,7 @@ impl DriftWm {
         let outputs: Vec<_> = self.space.outputs().cloned().collect();
         for o in &outputs {
             if active.as_ref() != Some(o) {
-                crate::state::output_state(o).edge_pan_velocity = None;
+                self.clear_edge_pan(o);
             }
         }
 
@@ -866,7 +894,7 @@ impl DriftWm {
         // A fullscreen window owns the whole viewport — edge-panning the camera
         // out from under it just breaks the fullscreen surface.
         if self.is_output_fullscreen(&output) {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.clear_edge_pan(&output);
             return;
         }
 
@@ -879,28 +907,38 @@ impl DriftWm {
             driftwm::canvas::canvas_to_screen(driftwm::canvas::CanvasPos(canvas_pos), camera, zoom)
                 .0;
 
-        let map = layer_map_for_output(&output);
         // Floating bars/docks may reserve no exclusive zone, so there's nothing
         // to measure against -- hit-test directly instead, or hovering the bar
         // to click it also pans and fights the click with pointer warps.
         // Only Top/Overlay: Background/Bottom usually hold a full-output
         // wallpaper surface, which would match everywhere and kill cursor-pan.
-        let over_layer_surface = [WlrLayer::Top, WlrLayer::Overlay]
-            .iter()
-            .any(|&layer| map.layer_under(layer, screen_pos).is_some());
+        //
+        // surface_under() on every surface rather than a bare layer_under():
+        // a bar often spans the full width while only drawing a few clusters,
+        // and a pass-through overlay's bbox may cover a bar beneath it — the
+        // input regions make this exactly "would a click here hit a bar?".
+        let over_layer_surface = [WlrLayer::Top, WlrLayer::Overlay].iter().any(|&layer| {
+            self.layers_on_sorted(&output, layer)
+                .iter()
+                .any(|(surface, geo)| {
+                    let surface_local = screen_pos - geo.loc.to_f64();
+                    surface
+                        .surface_under(surface_local, WindowSurfaceType::ALL)
+                        .is_some()
+                })
+        });
         if over_layer_surface {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.clear_edge_pan(&output);
             return;
         }
-        let size = crate::state::output_logical_size(&output);
+        let usable = layer_map_for_output(&output).non_exclusive_zone();
         let velocity = cursor_edge_pan_velocity(
             screen_pos,
-            size.w as f64,
-            size.h as f64,
+            usable,
             self.config.edge_pan_cursor_zone,
             self.config.edge_pan_max,
         );
-        crate::state::output_state(&output).edge_pan_velocity = velocity;
+        self.update_edge_pan_request(&output, velocity, screen_pos);
     }
 
     /// True when `surface`'s window is fullscreen on an output *other* than the
@@ -916,45 +954,62 @@ impl DriftWm {
             .is_some_and(|fs| active.as_ref() != Some(&fs))
     }
 
-    /// Isolation-aware `Space::element_under`: the same hit-test, but skips a
-    /// window fullscreen on another output (see `fullscreen_on_other_output`).
-    /// Every canvas-space pointer path must use this rather than
-    /// `self.space.element_under`, or an off-output fullscreen window leaks into
+    /// Stage-side `Space::element_under` (bbox filter, render_location, input
+    /// region), minus the windows `skip` rejects.
+    fn element_under_skipping(
+        &self,
+        point: Point<f64, Logical>,
+        mut skip: impl FnMut(&Window) -> bool,
+    ) -> Option<(&Window, Point<i32, Logical>)> {
+        self.stage
+            .windows()
+            .rev()
+            .filter(|w| !skip(w))
+            .filter(|w| {
+                self.window_bbox_with_popups(w)
+                    .is_some_and(|bbox| bbox.to_f64().contains(point))
+            })
+            .find_map(|w| {
+                let render_location = self.stage.position_of(w)? - w.geometry().loc;
+                w.is_in_input_region(&(point - render_location.to_f64()))
+                    .then_some((w, render_location))
+            })
+    }
+
+    /// Isolation-aware hit-test: skips a window fullscreen on an output other
+    /// than the pointer's (see `fullscreen_on_other_output`). Every canvas-space
+    /// pointer path must use this, or an off-output fullscreen window leaks into
     /// focus / grab / binding-context lookups on the other monitor.
     pub(crate) fn element_under(
         &self,
         point: Point<f64, Logical>,
     ) -> Option<(&Window, Point<i32, Logical>)> {
         let active = self.active_output();
-        // Fast path: smithay's native O(n) hit-test. Reuse it verbatim unless
-        // the top hit is an off-output fullscreen window — the only case the
-        // skip matters (and only possible while some output is fullscreen).
-        let hit = self.space.element_under(point);
-        let needs_skip = matches!(&hit, Some((w, _))
-            if w.wl_surface().is_some_and(|s| self.fullscreen_on_other_output(&s, &active)));
-        if !needs_skip {
-            return hit;
+        self.element_under_skipping(point, |w| {
+            w.wl_surface()
+                .is_some_and(|s| self.fullscreen_on_other_output(&s, &active))
+        })
+    }
+
+    /// Hit-test without the off-output-fullscreen skip, for paths whose point
+    /// is not anchored to the pointer's active output (touch: the finger may be
+    /// on the very output the skip would key against).
+    pub(crate) fn element_under_raw(
+        &self,
+        point: Point<f64, Logical>,
+    ) -> Option<(&Window, Point<i32, Logical>)> {
+        self.element_under_skipping(point, |_| false)
+    }
+
+    /// The screen-pinned window under an output-relative screen position:
+    /// `pinned_window_under` resolved from focus surface to window element.
+    pub(crate) fn pinned_element_under(&self, screen_pos: Point<f64, Logical>) -> Option<Window> {
+        let (target, _) = self.pinned_window_under(screen_pos, screen_pos)?;
+        let mut root = target.0;
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
         }
-        // Rare: redo the hit-test skipping off-output fullscreen windows, so a
-        // window beneath one on this output is still found. Mirrors smithay's
-        // `Space::element_under` (bbox filter, render_location, input region).
-        self.space
-            .elements()
-            .rev()
-            .filter(|w| {
-                w.wl_surface()
-                    .is_none_or(|s| !self.fullscreen_on_other_output(&s, &active))
-            })
-            .filter(|w| {
-                self.space
-                    .element_bbox(w)
-                    .is_some_and(|bbox| bbox.to_f64().contains(point))
-            })
-            .find_map(|w| {
-                let render_location = self.space.element_location(w)? - w.geometry().loc;
-                w.is_in_input_region(&(point - render_location.to_f64()))
-                    .then_some((w, render_location))
-            })
+        self.window_for_surface(&root)
     }
 
     /// Find the Wayland surface and local coordinates under the given canvas position.
@@ -971,7 +1026,7 @@ impl DriftWm {
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active_output = self.active_output();
 
-        for window in self.space.elements().rev() {
+        for window in self.stage.windows().rev() {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -993,7 +1048,7 @@ impl DriftWm {
                 }
             }
 
-            let Some(loc) = self.space.element_location(window) else {
+            let Some(loc) = self.stage.position_of(window) else {
                 continue;
             };
 
@@ -1054,7 +1109,7 @@ impl DriftWm {
         screen_pos: Point<f64, smithay::utils::Logical>,
         canvas_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return None;
         }
         let output = self.active_output()?;
@@ -1062,17 +1117,18 @@ impl DriftWm {
         if self.is_output_fullscreen(&output) {
             return None;
         }
+        let output_name = output.name();
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
-        for window in self.space.elements().rev() {
+        for window in self.stage.windows().rev() {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&wl_surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
-            if p.output != output {
+            if p.output != output_name {
                 continue;
             }
             // Surface-tree (buffer) origin in output-relative screen coords.
@@ -1082,7 +1138,11 @@ impl DriftWm {
                 window.surface_under(screen_pos - surface_origin.to_f64(), WindowSurfaceType::ALL)
             {
                 let screen_loc = (surface_loc + surface_origin).to_f64();
-                let adjusted = screen_loc + (canvas_pos - screen_pos);
+                let adjusted = screen_space_focus_loc(
+                    ScreenPos(screen_loc),
+                    CanvasPos(canvas_pos),
+                    ScreenPos(screen_pos),
+                );
                 return Some((FocusTarget(surface), adjusted));
             }
 
@@ -1107,7 +1167,11 @@ impl DriftWm {
                 )
                 .is_some()
                 {
-                    let adjusted = p.screen_pos.to_f64() + (canvas_pos - screen_pos);
+                    let adjusted = screen_space_focus_loc(
+                        ScreenPos(p.screen_pos.to_f64()),
+                        CanvasPos(canvas_pos),
+                        ScreenPos(screen_pos),
+                    );
                     return Some((FocusTarget((*wl_surface).clone()), adjusted));
                 }
             } else {
@@ -1123,7 +1187,11 @@ impl DriftWm {
                     )
                     .is_some()
                 {
-                    let adjusted = p.screen_pos.to_f64() + (canvas_pos - screen_pos);
+                    let adjusted = screen_space_focus_loc(
+                        ScreenPos(p.screen_pos.to_f64()),
+                        CanvasPos(canvas_pos),
+                        ScreenPos(screen_pos),
+                    );
                     return Some((FocusTarget((*wl_surface).clone()), adjusted));
                 }
             }
@@ -1140,7 +1208,7 @@ impl DriftWm {
         screen_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(Window, crate::decorations::DecorationHit)> {
         use crate::decorations::DecorationHit;
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return None;
         }
         let output = self.active_output()?;
@@ -1148,17 +1216,18 @@ impl DriftWm {
         if self.is_output_fullscreen(&output) {
             return None;
         }
+        let output_name = output.name();
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
-        for window in self.space.elements().rev() {
+        for window in self.stage.windows().rev() {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
-            let Some(p) = self.pinned.get(&wl_surface.id()) else {
+            let Some(p) = self.stage.pin_of(window) else {
                 continue;
             };
-            if p.output != output {
+            if p.output != output_name {
                 continue;
             }
             let loc = p.screen_pos;
@@ -1304,8 +1373,8 @@ impl DriftWm {
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active = self.active_output();
 
-        // Iterate in z-order (topmost first, matching space.elements().rev())
-        for window in self.space.elements().rev() {
+        // Iterate in z-order (topmost first, matching stage.windows().rev())
+        for window in self.stage.windows().rev() {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1320,7 +1389,7 @@ impl DriftWm {
             if self.fullscreen_on_other_output(&wl_surface, &active) {
                 continue;
             }
-            let Some(loc) = self.space.element_location(window) else {
+            let Some(loc) = self.stage.position_of(window) else {
                 continue;
             };
             let size = window.geometry().size;
@@ -1373,7 +1442,8 @@ impl DriftWm {
         &self,
         canvas_pos: Point<f64, smithay::utils::Logical>,
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
-        for cl in &self.canvas_layers {
+        for idx in self.canvas_layer_indices_sorted() {
+            let cl = &self.canvas_layers[idx];
             let Some(pos) = cl.position else {
                 continue;
             };
@@ -1403,18 +1473,22 @@ impl DriftWm {
         layers: &[WlrLayer],
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
         let output = self.active_output()?;
-        let output = &output;
-        let map = layer_map_for_output(output);
         for &layer in layers {
-            if let Some(surface) = map.layer_under(layer, screen_pos) {
-                let geo = map.layer_geometry(surface).unwrap_or_default();
+            // Try every surface in the layer, topmost first: the top surface's
+            // *input region* may exclude the point (a pass-through overlay)
+            // even though its bbox contains it, and the surface beneath must
+            // still receive the input.
+            for (surface, geo) in self.layers_on_sorted(&output, layer) {
                 let surface_local = screen_pos - geo.loc.to_f64();
                 if let Some((wl_surface, sub_loc)) =
                     surface.surface_under(surface_local, WindowSurfaceType::ALL)
                 {
                     let screen_loc = (sub_loc + geo.loc).to_f64();
-                    // Adjust so: canvas_pos - adjusted = screen_pos - screen_loc
-                    let adjusted = screen_loc + (canvas_pos - screen_pos);
+                    let adjusted = screen_space_focus_loc(
+                        ScreenPos(screen_loc),
+                        CanvasPos(canvas_pos),
+                        ScreenPos(screen_pos),
+                    );
                     return Some((FocusTarget(wl_surface), adjusted));
                 }
             }

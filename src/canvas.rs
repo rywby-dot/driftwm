@@ -36,6 +36,30 @@ pub fn canvas_to_screen(canvas: CanvasPos, camera: Point<f64, Logical>, zoom: f6
     )))
 }
 
+/// Focus location for a screen-space surface (wlr layer, screen-pinned window):
+/// smithay derives surface-local coords as `location - focus_loc` with the
+/// pointer/touch location in canvas coords, so the surface's screen origin is
+/// shifted by (canvas - screen) to make the subtraction come out in screen space.
+#[inline]
+pub fn screen_space_focus_loc(
+    origin: ScreenPos,
+    canvas: CanvasPos,
+    screen: ScreenPos,
+) -> Point<f64, Logical> {
+    origin.0 + (canvas.0 - screen.0)
+}
+
+/// Inverse of [`screen_space_focus_loc`]: recover the surface's screen origin
+/// from an adjusted focus location.
+#[inline]
+pub fn screen_space_origin(
+    focus_loc: Point<f64, Logical>,
+    canvas: CanvasPos,
+    screen: ScreenPos,
+) -> ScreenPos {
+    ScreenPos(focus_loc - (canvas.0 - screen.0))
+}
+
 /// Convert internal canvas coords (top-left origin, Y-down) to the user-facing
 /// window-rule convention (center, Y-up) used by config rules, the state file, and IPC.
 #[inline]
@@ -48,6 +72,41 @@ pub fn internal_to_rule(loc: Point<i32, Logical>, size: Size<i32, Logical>) -> (
 #[inline]
 pub fn rule_to_internal(x: i32, y: i32, size: Size<i32, Logical>) -> Point<i32, Logical> {
     Point::from((x - size.w / 2, -y - size.h / 2))
+}
+
+/// A screen-pinned window's top-left screen position (output-relative, top-left
+/// origin, Y-down) for a window-rule `position` `(x, y)` — window center,
+/// output-center origin, Y-up — on an output of `output_size`. Callers clamp the
+/// result into the output. Inverse of [`screen_top_left_to_rule`].
+#[inline]
+pub fn rule_to_screen_top_left(
+    x: i32,
+    y: i32,
+    size: Size<i32, Logical>,
+    output_size: Size<i32, Logical>,
+) -> Point<i32, Logical> {
+    let internal = rule_to_internal(x, y, size);
+    Point::from((
+        output_size.w / 2 + internal.x,
+        output_size.h / 2 + internal.y,
+    ))
+}
+
+/// Inverse of [`rule_to_screen_top_left`]: a screen-pinned window's top-left
+/// screen position back to window-rule coords (window center, output-center
+/// origin, Y-up) — the numbers a `pinned_to_screen` rule's `position` takes, so
+/// `driftwm msg state` values paste straight into a rule.
+#[inline]
+pub fn screen_top_left_to_rule(
+    screen_pos: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    output_size: Size<i32, Logical>,
+) -> (i32, i32) {
+    let internal = Point::from((
+        screen_pos.x - output_size.w / 2,
+        screen_pos.y - output_size.h / 2,
+    ));
+    internal_to_rule(internal, size)
 }
 
 /// The viewport center in canvas coords, in the user-facing convention (Y-up).
@@ -473,6 +532,24 @@ mod tests {
     #[test]
     fn rule_coords_center_y_up() {
         assert_eq!(internal_to_rule((0, 0).into(), vp(100, 100)), (50, -50));
+    }
+
+    #[test]
+    fn pinned_rule_screen_round_trip() {
+        // rule coords -> screen top-left -> rule coords is identity, including
+        // odd window/output sizes where integer halving truncates (the same
+        // truncated halves cancel in both directions).
+        for (rule, size, out) in [
+            ((0, 0), (320, 240), (1920, 1080)),
+            ((200, -150), (640, 480), (1920, 1080)),
+            ((-37, 61), (101, 51), (1365, 767)),
+            ((450, 320), (100, 100), (801, 601)),
+        ] {
+            let size = vp(size.0, size.1);
+            let out = vp(out.0, out.1);
+            let screen = rule_to_screen_top_left(rule.0, rule.1, size, out);
+            assert_eq!(screen_top_left_to_rule(screen, size, out), rule);
+        }
     }
 
     #[test]

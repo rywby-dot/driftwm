@@ -1,9 +1,9 @@
 //! Cluster snapshots captured at drag/resize grab start: cluster membership
 //! plus per-member offsets / classifications for the motion loop. Only reads
-//! `space`, `decorations`, and `config.snap_gap`.
+//! `stage`, `decorations`, and `config.snap_gap`.
 
 use smithay::{
-    desktop::{Space, Window},
+    desktop::Window,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{Resource, protocol::wl_surface::WlSurface},
@@ -74,11 +74,13 @@ impl ClusterResizeSnapshot {
     }
 
     /// Compute shifts, reposition every affected cluster member, and re-map
-    /// the primary to the tail of `Space::elements` so it stays on top of
-    /// its own cluster.
+    /// the primary to the top of the z-order so it stays on top of its own
+    /// cluster. Writes go through the stage (the map_window contract, inlined
+    /// here because the grab owns this snapshot, not `DriftWm`).
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_member_shifts(
         &mut self,
-        space: &mut Space<Window>,
+        stage: &mut driftwm::stage::Stage<Window>,
         primary: &Window,
         initial_size: Size<i32, Logical>,
         new_w: i32,
@@ -98,14 +100,16 @@ impl ClusterResizeSnapshot {
             if !m.window.alive() {
                 continue;
             }
+            // Shifting a member re-anchors it, invalidating any fill restore point.
+            stage.clear_fill(&m.window);
             let new_pos = m.initial_pos + Point::from((*dx, *dy));
-            space.map_element(m.window.clone(), new_pos, false);
+            stage.map(m.window.clone(), new_pos);
         }
 
         if !shifts.is_empty()
-            && let Some(cur) = space.element_location(primary)
+            && let Some(cur) = stage.position_of(primary)
         {
-            space.map_element(primary.clone(), cur, false);
+            stage.map(primary.clone(), cur);
         }
     }
 
@@ -208,7 +212,7 @@ impl DriftWm {
         // already drops widgets, pinned, and fullscreen windows; here we only
         // additionally skip the primary itself and its frozen cluster.
         let mut others = Vec::new();
-        for w in self.space.elements() {
+        for w in self.stage.windows() {
             let Some(surface) = w.wl_surface() else {
                 continue;
             };
@@ -225,8 +229,8 @@ impl DriftWm {
     /// Every non-widget window with its `SnapRect`. Feeds `cluster_of` at
     /// drag start; BFS needs `Window` identity, not surface.
     pub fn all_windows_with_snap_rects(&self) -> Vec<(Window, driftwm::layout::snap::SnapRect)> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .filter_map(|w| self.snap_rect_for(w).map(|rect| (w.clone(), rect)))
             .collect()
     }
@@ -240,7 +244,7 @@ impl DriftWm {
         if self.is_pinned(w) || self.is_window_fullscreen(w) {
             return None;
         }
-        window_snap_rect(&self.space, &self.decorations, &self.config.decorations, w)
+        window_snap_rect(&self.stage, &self.decorations, &self.config.decorations, w)
             .map(|(_, r)| r)
     }
 
@@ -283,7 +287,7 @@ impl DriftWm {
             if &m == window {
                 continue;
             }
-            let Some(pos) = self.space.element_location(&m) else {
+            let Some(pos) = self.stage.position_of(&m) else {
                 continue;
             };
             let offset = pos - primary_pos;
@@ -415,7 +419,7 @@ impl DriftWm {
             if &m == window {
                 continue;
             }
-            let Some(initial_pos) = self.space.element_location(&m) else {
+            let Some(initial_pos) = self.stage.position_of(&m) else {
                 continue;
             };
             let Some(initial_rect) = rect_of.get(&m).copied() else {
@@ -460,7 +464,7 @@ impl DriftWm {
 /// so snap/cluster math operates on the visible footprint. `None` for
 /// widgets / unmapped / surfaceless.
 fn window_snap_rect(
-    space: &Space<Window>,
+    stage: &driftwm::stage::Stage<Window>,
     decorations: &HashMap<smithay::reexports::wayland_server::backend::ObjectId, WindowDecoration>,
     decoration_config: &driftwm::config::DecorationConfig,
     w: &Window,
@@ -470,7 +474,7 @@ fn window_snap_rect(
     if applied.as_ref().is_some_and(|r| r.widget) {
         return None;
     }
-    let loc = space.element_location(w)?;
+    let loc = stage.position_of(w)?;
     let size = w.geometry().size;
     let bar = if decorations.contains_key(&surface.id()) {
         decoration_config.title_bar_height

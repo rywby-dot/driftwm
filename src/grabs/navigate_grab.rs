@@ -68,7 +68,12 @@ impl PointerGrab<DriftWm> for NavigateGrab {
 
             if mag_sq >= THRESHOLD_SQ {
                 let dir = direction_from_vector(self.cumulative);
-                data.execute_action(&Action::CenterNearest(dir));
+                // Deferred: the action can exit fullscreen, which warps the
+                // pointer — outer pointer calls from inside this grab callback
+                // would deadlock on the pointer mutex.
+                data.loop_handle.insert_idle(move |data| {
+                    data.execute_action(&Action::CenterNearest(dir));
+                });
                 self.fired = true;
             }
         }

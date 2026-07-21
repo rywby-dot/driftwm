@@ -86,8 +86,30 @@ impl DriftWm {
         let pointer = self.seat.get_pointer().unwrap();
 
         if self.pointer_constraint_active() {
-            pointer.set_location(new_pos);
-            return;
+            // A camera warp can slide another surface under a screen-fixed
+            // cursor, stranding input on a stale lock. Reactivates itself once
+            // the cursor returns.
+            let same_surface_under_cursor = pointer.current_focus().is_some_and(|current| {
+                self.focus_under(new_pos)
+                    .is_some_and(|(under, _)| under == current)
+            });
+            if same_surface_under_cursor {
+                pointer.set_location(new_pos);
+                return;
+            }
+            if let Some(focus) = pointer.current_focus() {
+                smithay::wayland::pointer_constraints::with_pointer_constraint(
+                    &focus.0,
+                    &pointer,
+                    |c| {
+                        if let Some(c) = c
+                            && c.is_active()
+                        {
+                            c.deactivate();
+                        }
+                    },
+                );
+            }
         }
 
         if pointer.is_grabbed() {
@@ -193,7 +215,10 @@ impl DriftWm {
     /// Synthetic pointer motion keeps cursor at the same screen position and
     /// lets the active MoveSurfaceGrab reposition the window automatically.
     pub fn apply_edge_pan(&mut self) {
-        let Some(velocity) = self.edge_pan_velocity() else {
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let Some(velocity) = self.effective_edge_pan_velocity(&output, Instant::now()) else {
             return;
         };
         // velocity is screen-space speed; convert to canvas delta
@@ -456,7 +481,7 @@ impl DriftWm {
             // A fullscreen output's camera is locked (set_camera_on refuses to
             // move it). Drop any pending pan/zoom target so it can't fire the
             // moment fullscreen exits; the ticks then no-op on the None targets.
-            if self.fullscreen.contains_key(output) {
+            if self.is_output_fullscreen(output) {
                 let mut os = output_state(output);
                 os.camera_target = None;
                 os.zoom_target = None;
@@ -494,11 +519,11 @@ impl DriftWm {
     }
 
     fn tick_edge_pan_on(&mut self, output: &Output, is_active: bool) {
+        let Some(velocity) = self.effective_edge_pan_velocity(output, Instant::now()) else {
+            return;
+        };
         let canvas_delta = {
             let os = output_state(output);
-            let Some(velocity) = os.edge_pan_velocity else {
-                return;
-            };
             Point::from((velocity.x / os.zoom, velocity.y / os.zoom))
         };
 

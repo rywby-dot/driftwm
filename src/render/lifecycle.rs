@@ -19,11 +19,19 @@ const FRAME_CALLBACK_THROTTLE: Duration = Duration::from_millis(995);
 pub fn refresh_foreign_toplevels(state: &mut crate::state::DriftWm) {
     let keyboard = state.seat.get_keyboard().unwrap();
     let focused = keyboard.current_focus().map(|f| f.0);
-    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+    // Skip virtual placeholders for disconnected monitors — their wl_output
+    // global is gone, so advertising them to new toplevels would reference a
+    // proxy clients have already destroyed.
+    let outputs: Vec<Output> = state
+        .space
+        .outputs()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
     driftwm::protocols::foreign_toplevel::refresh::<crate::state::DriftWm>(
         &mut state.foreign_toplevel_state,
         &mut state.foreign_toplevel_list_state,
-        &state.space,
+        &state.stage,
         focused.as_ref(),
         &outputs,
     );
@@ -63,7 +71,7 @@ pub fn update_primary_scanout_output(
     use smithay::wayland::compositor::TraversalAction;
     use smithay::wayland::compositor::with_surface_tree_downward;
 
-    for window in state.space.elements() {
+    for window in state.stage.windows() {
         window.with_surfaces(|surface, surface_data| {
             update_surface_primary_scanout_output(
                 surface,
@@ -145,7 +153,7 @@ pub fn take_presentation_feedback(
 
     let mut feedback = OutputPresentationFeedback::new(output);
 
-    for window in state.space.elements() {
+    for window in state.stage.windows() {
         window.take_presentation_feedback(
             &mut feedback,
             surface_primary_scanout_output,
@@ -197,12 +205,12 @@ pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
     let viewport_size = crate::state::output_logical_size(output);
     let visible_rect = canvas::visible_canvas_rect(camera.to_i32_round(), viewport_size, zoom);
 
-    for window in state.space.elements() {
-        let Some(loc) = state.space.element_location(window) else {
+    for window in state.stage.windows() {
+        let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
         let geom_loc = window.geometry().loc;
-        let mut bbox = window.bbox();
+        let mut bbox = window.bbox_with_popups();
         bbox.loc += loc - geom_loc;
         let on_screen = visible_rect.overlaps(bbox);
 
@@ -231,7 +239,7 @@ pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
     // off-screen like toplevels (unlike the screen-fixed layer surfaces above).
     for cl in &state.canvas_layers {
         let on_screen = cl.position.is_none_or(|pos| {
-            let sb = cl.surface.bbox();
+            let sb = cl.surface.bbox_with_popups();
             let bbox = smithay::utils::Rectangle::new(
                 (pos.x + sb.loc.x, pos.y + sb.loc.y).into(),
                 sb.size,
@@ -269,9 +277,12 @@ pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
     }
 
     // Cleanup
-    state.space.refresh();
+    state.stage.retain_alive();
+    state.refresh_window_outputs();
     state.popups.cleanup();
     layer_map_for_output(output).cleanup();
+    #[cfg(debug_assertions)]
+    state.verify_stage_invariants();
 
     state.refresh_idle_inhibit();
 }
@@ -291,7 +302,7 @@ pub fn send_frame_callbacks_fallback(state: &mut crate::state::DriftWm) {
     let Some(output) = state.space.outputs().next().cloned() else {
         return;
     };
-    for window in state.space.elements() {
+    for window in state.stage.windows() {
         window.send_frame(&output, time, Some(FRAME_CALLBACK_THROTTLE), |_, _| None);
     }
     for cl in &state.canvas_layers {

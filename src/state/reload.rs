@@ -22,8 +22,14 @@ impl DriftWm {
                 return;
             }
         };
+        self.reload_config_from_contents(&contents);
+    }
+
+    /// Apply a config from raw TOML text, bypassing disk I/O so tests can
+    /// drive reload without a config file.
+    pub fn reload_config_from_contents(&mut self, contents: &str) {
         let (mut new_config, config_errors) =
-            match driftwm::config::Config::from_toml_collect(&contents) {
+            match driftwm::config::Config::from_toml_collect(contents) {
                 Ok((c, errs)) => (c, errs),
                 Err(e) => {
                     tracing::error!("Config reload: parse error: {e}");
@@ -184,13 +190,13 @@ impl DriftWm {
     /// Re-apply per-output rules (mode/scale/transform/position). Mode
     /// changes go through `pending_mode_changes`; everything else applies
     /// in-place via `Output::change_current_state`. Same lookup as
-    /// `create_surface` so reload and startup compute identically.
+    /// `output_connected` so reload and startup compute identically.
     fn apply_output_rules_after_reload(&mut self) {
         use driftwm::config::{OutputMode as ConfigOutputMode, OutputPosition};
         use smithay::utils::Transform;
 
         let outputs: Vec<smithay::output::Output> = self.space.outputs().cloned().collect();
-        // Cumulative width for auto-positioning, mirroring `create_surface`.
+        // Cumulative width for auto-positioning, mirroring `output_connected`.
         // Widths read post-change_current_state so a scale change affects
         // subsequent outputs' auto positions.
         let mut auto_x: i32 = 0;
@@ -219,27 +225,24 @@ impl DriftWm {
                             refresh_mhz: *hz as i32 * 1000,
                         })
                     }
-                    ConfigOutputMode::Preferred => {
-                        // We don't currently re-modeset when reverting to
-                        // "preferred" — log so users know why their old
-                        // custom mode is still active.
-                        tracing::info!(
-                            "Config reload: output '{name}' rule is 'preferred', \
-                             but reverting from a custom mode isn't supported live — \
-                             restart driftwm or replug to apply"
-                        );
-                        None
+                    // The state layer has no EDID/connector knowledge, so it
+                    // can't resolve "preferred"/"max" or tell whether the
+                    // current mode already satisfies the rule. Queue
+                    // unconditionally; the backend skips no-op modesets.
+                    // Not on winit: nothing drains the queue there, and the
+                    // default-rule intent would sit in debug counters forever.
+                    ConfigOutputMode::Preferred | ConfigOutputMode::Max
+                        if !matches!(self.backend, Some(crate::backend::Backend::Winit(_))) =>
+                    {
+                        Some(match &want_mode {
+                            ConfigOutputMode::Max => crate::state::ModeIntent::Max,
+                            _ => crate::state::ModeIntent::Preferred,
+                        })
                     }
                     _ => None,
                 };
                 if let Some(intent) = intent {
-                    self.pending_mode_changes.insert(
-                        name.clone(),
-                        crate::state::PendingMode {
-                            intent,
-                            retry_count: 0,
-                        },
-                    );
+                    self.pending_mode_changes.insert(name.clone(), intent);
                 }
             }
 

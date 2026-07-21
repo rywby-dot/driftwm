@@ -34,22 +34,48 @@ thread_local! {
 /// Ellipsis appended to truncated titles.
 const ELLIPSIS: char = '…';
 
+// Callbacks awaiting the scan. Guarding on scan *started* (a non-empty queue)
+// rather than on `FONT_SYSTEM` being set matters: the scan takes ~1s, and a
+// caller arriving during it must not spawn a redundant scan thread (the
+// multi-instance test harness hit a stampede of them).
+static PENDING_ON_LOADED: Mutex<Vec<Box<dyn FnOnce() + Send>>> = Mutex::new(Vec::new());
+
 /// Start scanning system fonts on a background thread. Idempotent; call once at
 /// startup to keep the scan cost off the event-loop thread. `on_loaded` runs on
 /// the worker thread once fonts are available (hence `Send`).
 pub fn warm_fonts(on_loaded: impl FnOnce() + Send + 'static) {
-    if FONT_SYSTEM.get().is_some() {
-        on_loaded();
-        return;
+    {
+        let mut pending = PENDING_ON_LOADED.lock().unwrap();
+        // The scan thread publishes FONT_SYSTEM *before* draining the queue
+        // under this same lock, so a callback pushed while it is unset is
+        // always drained, and one pushed after can't be — run it inline.
+        if FONT_SYSTEM.get().is_some() {
+            drop(pending);
+            on_loaded();
+            return;
+        }
+        pending.push(Box::new(on_loaded));
+        if pending.len() > 1 {
+            return;
+        }
     }
+
     let spawned = std::thread::Builder::new()
         .name("driftwm-font-warm".into())
-        .spawn(move || {
+        .spawn(|| {
             let _ = FONT_SYSTEM.set(Mutex::new(FontSystem::new()));
-            on_loaded();
+            let callbacks = std::mem::take(&mut *PENDING_ON_LOADED.lock().unwrap());
+            for callback in callbacks {
+                callback();
+            }
         });
     if let Err(err) = spawned {
         tracing::warn!("failed to spawn font-warm thread: {err}");
+        // The queued callbacks would otherwise never fire.
+        let callbacks = std::mem::take(&mut *PENDING_ON_LOADED.lock().unwrap());
+        for callback in callbacks {
+            callback();
+        }
     }
 }
 

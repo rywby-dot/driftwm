@@ -8,6 +8,7 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         title: title.map(|s| Pattern::Glob(s.to_string())),
         position: None,
         size: None,
+        fullscreen: None,
         widget: false,
         pinned_to_screen: false,
         decoration: None,
@@ -20,6 +21,7 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         corner_radius: None,
         shadow: None,
         output: None,
+        layer_order: None,
     }
 }
 
@@ -351,6 +353,51 @@ fn resolve_window_rules_no_matching_rule_returns_none() {
     "#;
     let config = Config::from_toml(toml).unwrap();
     assert!(config.resolve_window_rules("firefox", "title").is_none());
+}
+
+#[test]
+fn resolve_window_rules_layer_order_parses_and_merges_last_wins() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "*"
+        layer_order = 5
+
+        [[window_rules]]
+        app_id = "wvkbd"
+        layer_order = 10
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("wvkbd", "")
+            .unwrap()
+            .layer_order,
+        Some(10)
+    );
+    assert_eq!(
+        config
+            .resolve_window_rules("touchview", "")
+            .unwrap()
+            .layer_order,
+        Some(5)
+    );
+}
+
+#[test]
+fn resolve_window_rules_layer_order_defaults_to_none() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "wvkbd"
+        blur = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("wvkbd", "")
+            .unwrap()
+            .layer_order,
+        None
+    );
 }
 
 #[test]

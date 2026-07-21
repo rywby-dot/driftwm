@@ -24,7 +24,7 @@ use crate::decorations::DecorationHit;
 use crate::grabs::{MoveSurfaceGrab, NavigateGrab, PanGrab, ResizeState, ResizeSurfaceGrab};
 use crate::state::{ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick};
 use driftwm::canvas::{self, CanvasPos, canvas_to_screen};
-use driftwm::config::{self, Action, BindingContext, MouseAction};
+use driftwm::config::{self, BindingContext, MouseAction};
 use driftwm::window_ext::WindowExt;
 use smithay::reexports::wayland_server::Resource;
 
@@ -71,12 +71,6 @@ impl DriftWm {
     /// 2. Normal click on window → focus + raise + forward to client
     /// 3. Left-click on empty canvas → pan canvas
     pub(super) fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
-        // Outputs can transiently disappear (cable unplug, GPU resume race);
-        // bail out so downstream active_output() / element_location() can't panic.
-        if self.space.outputs().next().is_none() {
-            return;
-        }
-        let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
         let button_state = event.state();
         if button_state == ButtonState::Pressed {
@@ -84,6 +78,13 @@ impl DriftWm {
         } else {
             self.held_buttons.remove(&button);
         }
+
+        // Outputs can transiently disappear (cable unplug, GPU resume race);
+        // bail out so downstream active_output() / position lookups can't panic.
+        if self.space.outputs().next().is_none() {
+            return;
+        }
+        let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.seat.get_pointer().unwrap();
 
         // Buffer BTN_MIDDLE release while a pending click is waiting
@@ -96,6 +97,11 @@ impl DriftWm {
         }
 
         if button_state == ButtonState::Pressed {
+            // A new press is a fresh interaction, so drop any armed/deferred
+            // navigate unconditionally — unlike resolve's button-mismatch branch,
+            // which keeps the pending because another held button lifting isn't
+            // a new interaction.
+            self.cancel_click_navigate();
             self.set_last_scroll_pan(None);
             self.with_output_state(|os| os.momentum.stop());
 
@@ -142,52 +148,56 @@ impl DriftWm {
             let keyboard = self.seat.get_keyboard().unwrap();
             let mods = keyboard.modifier_state();
 
-            // During fullscreen: bound clicks exit fullscreen first and
-            // proceed to compositor grabs; plain clicks forward to the app.
-            // ToggleFullscreen is special — exiting IS the action, so return immediately.
+            // During fullscreen the window fills the screen, so bindings resolve
+            // in the OnWindow context. Grab bindings exit fullscreen up front and
+            // dispatch on the restored canvas; discrete actions dispatch like
+            // keybindings (execute_action's guard exits when needed); unbound
+            // clicks forward to the app.
             if self.is_fullscreen() {
-                // In fullscreen the window fills the screen — treat as OnWindow
-                let fs_lookup =
-                    self.config
-                        .mouse_button_lookup_ctx(&mods, button, BindingContext::OnWindow);
-                if matches!(
-                    fs_lookup,
-                    Some(MouseAction::Action(
-                        Action::ToggleFullscreen | Action::FitWindow | Action::FitWindowSnapped
-                    ))
-                ) {
-                    self.exit_fullscreen_remap_pointer(pos);
-                    return;
-                } else if fs_lookup.is_some() {
-                    pos = self.exit_fullscreen_remap_pointer(pos);
-                } else {
-                    // Reclaim keyboard focus for the fullscreen window before
-                    // forwarding — hover on another output may have moved focus
-                    // to its window, and a plain forward wouldn't restore it.
-                    // Skip when it already holds focus so a click doesn't re-emit
-                    // a keyboard enter (and a popup grab keeps its focus).
-                    if let Some(surface) = self
-                        .active_fullscreen()
-                        .and_then(|fs| fs.window.wl_surface())
-                        .map(|s| FocusTarget(s.into_owned()))
-                    {
-                        let already = self.window_focus.as_ref().is_some_and(|f| f.0 == surface.0);
-                        if !already {
-                            let focus_serial = SERIAL_COUNTER.next_serial();
-                            self.set_window_focus(Some(surface), focus_serial);
-                        }
+                let fs_lookup = self
+                    .config
+                    .mouse_button_lookup_ctx(&mods, button, BindingContext::OnWindow)
+                    .cloned();
+                match fs_lookup {
+                    Some(MouseAction::Action(_)) => {
+                        // Deferring to execute_action keeps its was_fullscreen
+                        // snapshot live — no pre-exit stash that could strand
+                        // if the post-exit dispatch lookup missed.
                     }
-                    pointer.button(
-                        self,
-                        &ButtonEvent {
-                            button,
-                            state: button_state,
-                            serial,
-                            time: Event::time_msec(&event),
-                        },
-                    );
-                    pointer.frame(self);
-                    return;
+                    Some(_) => {
+                        // The exit warps the pointer to keep its screen spot.
+                        self.exit_fullscreen();
+                        pos = pointer.current_location();
+                    }
+                    None => {
+                        // Reclaim keyboard focus for the fullscreen window before
+                        // forwarding — hover on another output may have moved focus
+                        // to its window, and a plain forward wouldn't restore it.
+                        // Skip when it already holds focus so a click doesn't re-emit
+                        // a keyboard enter (and a popup grab keeps its focus).
+                        if let Some(surface) = self
+                            .active_fullscreen_window()
+                            .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())))
+                        {
+                            let already =
+                                self.window_focus.as_ref().is_some_and(|f| f.0 == surface.0);
+                            if !already {
+                                let focus_serial = SERIAL_COUNTER.next_serial();
+                                self.set_window_focus(Some(surface), focus_serial);
+                            }
+                        }
+                        pointer.button(
+                            self,
+                            &ButtonEvent {
+                                button,
+                                state: button_state,
+                                serial,
+                                time: Event::time_msec(&event),
+                            },
+                        );
+                        pointer.frame(self);
+                        return;
+                    }
                 }
             }
 
@@ -197,6 +207,7 @@ impl DriftWm {
                 if button_state == ButtonState::Pressed {
                     let layer = pointer.current_focus().map(|f| f.0);
                     self.focus_layer_if_on_demand(layer, serial);
+                    self.maybe_grab_screen_space_click(&pointer, button, serial);
                 }
                 pointer.button(
                     self,
@@ -272,8 +283,13 @@ impl DriftWm {
                                 // cluster drag is a separate explicit action
                                 // (`MoveSnappedWindows`, default Alt+Shift+Left).
                                 self.raise_and_focus(&window, serial);
-                                let Some(initial_window_location) =
-                                    self.space.element_location(&window)
+                                // A clean press-release here is still a focus click
+                                // (a bottom-clipped SSD window may show only its
+                                // title bar); a real title-bar drag exceeds the slop.
+                                // Defer: the title bar's own double-click-fit must
+                                // beat the pan.
+                                self.arm_click_navigate(&window, pos, button, true);
+                                let Some(initial_window_location) = self.stage.position_of(&window)
                                 else {
                                     return;
                                 };
@@ -285,6 +301,9 @@ impl DriftWm {
                                     button,
                                     location: pos,
                                 };
+                                // Moving re-anchors the window, so a fill restore
+                                // point (which includes position) no longer applies.
+                                self.stage.clear_fill(&window);
                                 let grab = MoveSurfaceGrab::new(
                                     start_data,
                                     window,
@@ -334,8 +353,7 @@ impl DriftWm {
                         {
                             self.raise_and_focus(&window, serial);
 
-                            let Some(initial_window_location) =
-                                self.space.element_location(&window)
+                            let Some(initial_window_location) = self.stage.position_of(&window)
                             else {
                                 return;
                             };
@@ -354,6 +372,12 @@ impl DriftWm {
                             } else {
                                 (Vec::new(), HashSet::new())
                             };
+                            // Re-anchoring invalidates any fill restore point —
+                            // for the primary and every member dragged along.
+                            self.stage.clear_fill(&window);
+                            for (member, _) in &cluster_members {
+                                self.stage.clear_fill(member);
+                            }
                             let grab = MoveSurfaceGrab::new(
                                 start_data,
                                 window,
@@ -443,6 +467,11 @@ impl DriftWm {
                 if !is_widget {
                     // Normal window: raise + focus (with modal redirect)
                     self.raise_and_focus(window, serial);
+                    // Arm auto-navigate; resolved on this button's release so a
+                    // click-drag inside the client never slides the canvas. No
+                    // defer: content clicks pan immediately (protecting a client's
+                    // double-click isn't the compositor's job).
+                    self.arm_click_navigate(window, pos, button, false);
                 } else if let Some((focus, _)) = self.canvas_layer_under(pos) {
                     // Widget window but a canvas layer is above it: grant the
                     // layer keyboard focus only if it requests it (on-demand).
@@ -469,6 +498,57 @@ impl DriftWm {
             },
         );
         pointer.frame(self);
+
+        // Resolve only after the release forwards to the client, so the app
+        // still sees the click.
+        if button_state == ButtonState::Released {
+            self.resolve_click_navigate(button, pointer.current_location());
+        }
+    }
+
+    /// Keep a click-drag on the screen-space target under the pointer (wlr
+    /// layer or pinned window) in screen coordinates: smithay's default click
+    /// grab would freeze the canvas-adjusted focus offset for the whole drag,
+    /// scaling the motion the client sees at zoom != 1. No-op while another
+    /// grab is live — e.g. a layer's own popup grab must keep routing the
+    /// click, since replacing it only releases its keyboard half and the popup
+    /// would linger with no dismiss-on-click-outside.
+    fn maybe_grab_screen_space_click(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) {
+        if pointer.is_grabbed() {
+            return;
+        }
+        let Some(target) = pointer.current_focus() else {
+            return;
+        };
+        let canvas_pos_0 = pointer.current_location();
+        let screen_pos_0 = canvas_to_screen(CanvasPos(canvas_pos_0), self.camera(), self.zoom()).0;
+        let Some((focus, adjusted_0)) = self.pointer_focus_under(screen_pos_0, canvas_pos_0) else {
+            return;
+        };
+        if focus != target {
+            return;
+        }
+        let screen_loc = driftwm::canvas::screen_space_origin(
+            adjusted_0,
+            CanvasPos(canvas_pos_0),
+            driftwm::canvas::ScreenPos(screen_pos_0),
+        )
+        .0;
+        let start_data = GrabStartData {
+            focus: Some((focus, adjusted_0)),
+            button,
+            location: canvas_pos_0,
+        };
+        let grab = crate::grabs::ScreenSpaceClickGrab {
+            start_data,
+            screen_loc,
+        };
+        pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Keep);
     }
 
     /// Dispatch a left/other button press over a screen-pinned window in screen
@@ -486,7 +566,7 @@ impl DriftWm {
         mods: smithay::input::keyboard::ModifiersState,
         time: u32,
     ) -> bool {
-        if self.pinned.is_empty() {
+        if !self.stage.has_pinned() {
             return false;
         }
         let screen_pos = canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
@@ -547,9 +627,10 @@ impl DriftWm {
                 MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped => {
                     self.raise_and_focus(window, serial);
                     // Infer the edge in screen space against the pinned rect.
-                    let edge = window
-                        .wl_surface()
-                        .and_then(|s| self.pinned.get(&s.id()).map(|p| p.screen_pos))
+                    let edge = self
+                        .stage
+                        .pin_of(window)
+                        .map(|site| site.screen_pos)
                         .map(|sp| edges_from_position(screen_pos, sp, window.geometry().size));
                     self.start_compositor_resize_with_edge(
                         pointer, window, pos, button, serial, edge, false,
@@ -568,7 +649,19 @@ impl DriftWm {
             }
         }
         if let Some(ref window) = pinned_window {
-            self.raise_and_focus(window, serial);
+            // Same policy as the unpinned click branch: a widget takes keyboard
+            // focus without a raise (or MRU entry).
+            if window.is_widget() {
+                self.set_window_focus(
+                    window.wl_surface().map(|s| FocusTarget(s.into_owned())),
+                    serial,
+                );
+            } else {
+                self.raise_and_focus(window, serial);
+            }
+        }
+        if button_state == ButtonState::Pressed {
+            self.maybe_grab_screen_space_click(pointer, button, serial);
         }
         pointer.button(
             self,
@@ -593,16 +686,13 @@ impl DriftWm {
         button: u32,
         serial: smithay::utils::Serial,
     ) {
-        let Some(id) = window.wl_surface().map(|s| s.id()) else {
+        let Some(site) = self.stage.pin_of(window).cloned() else {
             return;
         };
-        let Some((output, screen_pos)) = self
-            .pinned
-            .get(&id)
-            .map(|p| (p.output.clone(), p.screen_pos))
-        else {
+        let Some(output) = self.output_by_name(&site.output) else {
             return;
         };
+        let screen_pos = site.screen_pos;
         let (camera, zoom) = {
             let os = crate::state::output_state(&output);
             (os.camera, os.zoom)
@@ -656,7 +746,7 @@ impl DriftWm {
         explicit_edge: Option<xdg_toplevel::ResizeEdge>,
         want_cluster: bool,
     ) {
-        let Some(initial_window_location) = self.space.element_location(window) else {
+        let Some(initial_window_location) = self.stage.position_of(window) else {
             return;
         };
         let initial_window_size = window.geometry().size;
@@ -666,10 +756,9 @@ impl DriftWm {
             // screen rect, since the canvas-space inference is wrong at zoom != 1.
             // (Pinned dispatch already passes an explicit edge; this keeps the
             // function correct for any future inferred-edge caller.)
-            if let Some((sp, output)) = window.wl_surface().and_then(|s| {
-                self.pinned
-                    .get(&s.id())
-                    .map(|p| (p.screen_pos, p.output.clone()))
+            if let Some((sp, output)) = self.stage.pin_of(window).and_then(|site| {
+                self.output_by_name(&site.output)
+                    .map(|o| (site.screen_pos, o))
             }) {
                 let (camera, zoom) = {
                     let os = crate::state::output_state(&output);
@@ -687,14 +776,18 @@ impl DriftWm {
             return;
         };
 
-        // Clear fit state — user took manual control
-        crate::state::fit::clear_fit_state(&wl_surface);
+        // Clear fit/fill state — user took manual control
+        self.stage.clear_fit(window);
+        self.stage.clear_fill(window);
 
         // Pinned windows resize in screen space; capture their `screen_pos` and
         // fixed output so the grab and the commit-time reposition use the right
         // anchor. `None` for normal canvas windows.
-        let pinned_initial_screen_pos = self.pinned.get(&wl_surface.id()).map(|p| p.screen_pos);
-        let pinned_output = self.pinned.get(&wl_surface.id()).map(|p| p.output.clone());
+        let pinned_site = self.stage.pin_of(window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let pinned_output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output));
 
         with_states(&wl_surface, |states| {
             states
@@ -711,7 +804,7 @@ impl DriftWm {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Resizing);
-                // Mirror the FitState clear above so the client's view stays
+                // Mirror the fit-state clear above so the client's view stays
                 // in sync — otherwise its own restore button dispatches an
                 // unmaximize_request that `unfit_window` would silently drop.
                 state.states.unset(xdg_toplevel::State::Maximized);
@@ -776,7 +869,7 @@ impl DriftWm {
         let keyboard = self.seat.get_keyboard().unwrap();
         let mods = keyboard.modifier_state();
         let pointer = self.seat.get_pointer().unwrap();
-        let pos = pointer.current_location();
+        let mut pos = pointer.current_location();
         let source = event.source();
 
         // Discrete wheel-notch bindings (wheel-up / wheel-down) run any
@@ -824,20 +917,29 @@ impl DriftWm {
             }
         }
 
-        // During fullscreen: bound scroll exits fullscreen first; plain scroll forwards.
+        // During fullscreen the window fills the screen. Scroll dispatch only
+        // implements continuous pan/zoom, so exit fullscreen for those and run
+        // them on the restored canvas; any other bound scroll falls through
+        // unexited (a no-op below); unbound scroll forwards to the app.
         if self.is_fullscreen() {
-            if self
+            match self
                 .config
                 .mouse_scroll_lookup_ctx(&mods, source, BindingContext::OnWindow)
-                .is_some()
+                .cloned()
             {
-                self.exit_fullscreen_remap_pointer(pos);
-                // Fall through to dispatch below
-            } else {
-                let frame = build_client_axis_frame::<I>(&event);
-                pointer.axis(self, frame);
-                pointer.frame(self);
-                return;
+                Some(MouseAction::PanViewport | MouseAction::Zoom) => {
+                    // Dispatch below anchors pan/zoom on `pos`, so it must be
+                    // the post-exit position (the exit warps the pointer).
+                    self.exit_fullscreen();
+                    pos = pointer.current_location();
+                }
+                Some(_) => {}
+                None => {
+                    let frame = build_client_axis_frame::<I>(&event);
+                    pointer.axis(self, frame);
+                    pointer.frame(self);
+                    return;
+                }
             }
         }
 

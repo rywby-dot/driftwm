@@ -8,7 +8,7 @@ mod types;
 pub use parse::{
     parse_action, parse_direction, parse_gesture_binding, parse_gesture_config_entry,
     parse_gesture_trigger, parse_key_combo, parse_mouse_action, parse_mouse_binding,
-    parse_tap_combo,
+    parse_tap_combo, parse_touch_config_entry, parse_touch_trigger,
 };
 pub use toml::config_path;
 pub use types::*;
@@ -21,7 +21,9 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use smithay::utils::Transform;
 use smithay::utils::{Logical, Point};
 
-use defaults::{default_bindings, default_gesture_bindings, default_mouse_bindings};
+use defaults::{
+    default_bindings, default_gesture_bindings, default_mouse_bindings, default_touch_bindings,
+};
 use parse_helpers::{
     Warnings, clamp_warn, collect_warn, non_negative, parse_backend_config,
     parse_decoration_config, parse_effects_config, parse_output_outline, parse_output_rule,
@@ -68,12 +70,19 @@ pub struct Config {
     pub edge_pan_cursor: bool,
     /// Cursor edge-pan activation zone, px from the edge.
     pub edge_pan_cursor_zone: f64,
+    /// Edge auto-pan: delay at an edge bordering another output (ms). Gives a
+    /// brief grace period for crossing monitors without changing the feel of
+    /// outer edges. Applies to window-drag and bare-cursor edge-pan.
+    pub edge_pan_latency_ms: u64,
     /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
     /// Lower = smoother; 1 = instant; 0 would freeze the camera.
     pub animation_speed: f64,
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
     pub auto_navigate_on_close: bool,
+    /// On a completed click on a partially off-screen window, pan the camera to
+    /// bring it fully into view (true). A fully visible window keeps focus-only.
+    pub auto_navigate_on_click: bool,
     /// Modifiers held during Alt-Tab window cycling, derived from the
     /// `cycle-windows forward` binding. Releasing them commits the selection.
     pub cycle_hold: Modifiers,
@@ -152,6 +161,9 @@ pub struct Config {
     /// explicitly for those.
     pub decoration_fit_snapped: bool,
     pub gestures: ContextBindings<GestureBinding, GestureConfigEntry>,
+    /// Touch gesture bindings (`[touch]`), keyed by bare trigger (no modifiers).
+    /// Named `touch_gestures` because `touch` is the `[input.touch]` device settings.
+    pub touch_gestures: ContextBindings<GestureTrigger, GestureConfigEntry>,
     pub num_lock: bool,
     pub caps_lock: bool,
 }
@@ -235,11 +247,24 @@ impl Config {
         self.gestures.lookup(&binding, context)
     }
 
-    /// Find the output config for a given connector name (e.g. "eDP-1").
+    /// Look up a touch gesture action by trigger and context. Touch has no
+    /// modifiers, so the trigger is the key directly.
+    pub fn touch_lookup(
+        &self,
+        trigger: &GestureTrigger,
+        context: BindingContext,
+    ) -> Option<&GestureConfigEntry> {
+        self.touch_gestures.lookup(trigger, context)
+    }
+
+    /// Find the output config for a given connector name (e.g. "eDP-1"). An
+    /// exact-name entry always wins; a `name = "*"` entry is the fallback for
+    /// any output without one.
     pub fn output_config(&self, connector_name: &str) -> Option<&OutputConfig> {
         self.output_configs
             .iter()
             .find(|c| c.name == connector_name)
+            .or_else(|| self.output_configs.iter().find(|c| c.name == "*"))
     }
 
     /// Parse a TOML string into a Config. Useful for testing and config reload.
@@ -504,11 +529,45 @@ impl Config {
             }
         }
 
+        let mut touch_bindings = default_touch_bindings();
+        for (ctx, section) in [
+            (BindingContext::OnWindow, raw.touch.on_window),
+            (BindingContext::OnCanvas, raw.touch.on_canvas),
+            (BindingContext::Anywhere, raw.touch.anywhere),
+        ] {
+            if let Some(entries) = section {
+                for (key_str, action_str) in &entries {
+                    match parse_touch_trigger(key_str) {
+                        Ok(trigger) => {
+                            if action_str == "none" {
+                                touch_bindings.remove(ctx, &trigger);
+                            } else {
+                                match parse_touch_config_entry(&trigger, action_str) {
+                                    Ok(entry) => {
+                                        touch_bindings.insert(ctx, trigger, entry);
+                                    }
+                                    Err(e) => {
+                                        warn_and_collect!(
+                                            "config: invalid touch binding '{key_str}' = '{action_str}': {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn_and_collect!("config: invalid touch binding '{key_str}': {e}")
+                        }
+                    }
+                }
+            }
+        }
+
         let background = BackgroundConfig {
             mirror_tile: raw.background.mirror_tile.unwrap_or(false),
             cache_shader: raw.background.cache_shader.unwrap_or(false),
             transparent_shader: raw.background.transparent_shader.unwrap_or(false),
             cache_budget_mb: raw.background.cache_budget_mb.unwrap_or(128),
+            animate_fps: raw.background.animate_fps.unwrap_or(0).min(1000),
             kind: resolve_background_kind(raw.background, &mut errors),
         };
 
@@ -562,6 +621,7 @@ impl Config {
                 ),
                 accel_profile,
                 natural_scroll: m.natural_scroll.unwrap_or(false),
+                left_handed: m.left_handed.unwrap_or(false),
             }
         };
 
@@ -630,7 +690,7 @@ impl Config {
         let output_configs = {
             let mut configs: Vec<OutputConfig> = Vec::new();
             for rule in raw.outputs.unwrap_or_default() {
-                match parse_output_rule(rule) {
+                match parse_output_rule(rule, &mut errors) {
                     Ok(config) => {
                         if configs.iter().any(|c| c.name == config.name) {
                             warn_and_collect!(
@@ -770,8 +830,10 @@ impl Config {
                 "navigation.edge_pan.cursor_zone",
                 &mut errors,
             ),
+            edge_pan_latency_ms: raw.navigation.edge_pan.latency_ms.unwrap_or(120),
             animation_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
+            auto_navigate_on_click: raw.navigation.auto_navigate_on_click.unwrap_or(false),
             cycle_hold,
             zoom_step: non_negative(raw.zoom.step.unwrap_or(1.1), "zoom.step", &mut errors),
             zoom_touch_speed: non_negative(
@@ -860,6 +922,7 @@ impl Config {
             decoration_resize_snapped,
             decoration_fit_snapped,
             gestures: gesture_bindings,
+            touch_gestures: touch_bindings,
             num_lock: raw.input.keyboard.num_lock.unwrap_or(true),
             caps_lock: raw.input.keyboard.caps_lock.unwrap_or(false),
         };
@@ -997,6 +1060,7 @@ fn resolve_background_kind(
         cache_shader: _,
         transparent_shader: _,
         cache_budget_mb: _,
+        animate_fps: _,
     } = raw;
     let texture = texture.as_deref().map(expand_tilde);
     if let Some(t) = kind.as_deref() {
@@ -1303,6 +1367,35 @@ mod tests {
     }
 
     #[test]
+    fn output_config_wildcard_is_fallback_exact_wins() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+            scale = 1.5
+
+            [[outputs]]
+            name = "*"
+            scale = 2.0
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.output_config("eDP-1").unwrap().scale, Some(1.5));
+        assert_eq!(config.output_config("HDMI-A-1").unwrap().scale, Some(2.0));
+        assert_eq!(config.output_config("DP-3").unwrap().scale, Some(2.0));
+    }
+
+    #[test]
+    fn wildcard_fixed_position_warns_and_falls_back_to_auto() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "*"
+            position = [100, 200]
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert_eq!(config.output_configs[0].position, OutputPosition::Auto);
+        assert!(warnings.iter().any(|w| w.contains("wildcard")));
+    }
+
+    #[test]
     fn no_outputs_section_produces_empty_vec() {
         let config = Config::from_toml("").unwrap();
         assert!(config.output_configs.is_empty());
@@ -1402,6 +1495,357 @@ mod tests {
         let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
         assert!(
             !warnings.iter().any(|w| w.contains("tap binding")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn touch_trigger_allows_one_finger() {
+        assert_eq!(
+            parse_touch_trigger("1-finger-swipe"),
+            Ok(GestureTrigger::Swipe { fingers: 1 })
+        );
+    }
+
+    #[test]
+    fn touch_trigger_allows_five_fingers() {
+        assert!(parse_touch_trigger("5-finger-swipe").is_ok());
+    }
+
+    #[test]
+    fn touch_trigger_rejects_zero_fingers() {
+        assert!(parse_touch_trigger("0-finger-swipe").is_err());
+    }
+
+    #[test]
+    fn touch_trigger_rejects_six_fingers() {
+        assert!(parse_touch_trigger("6-finger-swipe").is_err());
+    }
+
+    #[test]
+    fn touch_trigger_parses_tap() {
+        assert_eq!(
+            parse_touch_trigger("3-finger-tap"),
+            Ok(GestureTrigger::Tap { fingers: 3 })
+        );
+    }
+
+    #[test]
+    fn touch_trigger_parses_doubletap() {
+        assert_eq!(
+            parse_touch_trigger("3-finger-doubletap"),
+            Ok(GestureTrigger::Doubletap { fingers: 3 })
+        );
+    }
+
+    #[test]
+    fn touch_trigger_parses_doubletap_swipe() {
+        assert_eq!(
+            parse_touch_trigger("3-finger-doubletap-swipe"),
+            Ok(GestureTrigger::DoubletapSwipe { fingers: 3 })
+        );
+    }
+
+    #[test]
+    fn touch_trigger_parses_hold_swipe() {
+        assert_eq!(
+            parse_touch_trigger("3-finger-hold-swipe"),
+            Ok(GestureTrigger::HoldSwipe { fingers: 3 })
+        );
+    }
+
+    #[test]
+    fn touch_trigger_rejects_plain_hold() {
+        assert!(parse_touch_trigger("3-finger-hold").is_err());
+    }
+
+    #[test]
+    fn touch_trigger_rejects_unknown_type() {
+        assert!(parse_touch_trigger("3-finger-bogus").is_err());
+    }
+
+    #[test]
+    fn touch_tap_accepts_center_window() {
+        let trigger = GestureTrigger::Tap { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "center-window"),
+            Ok(GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::CenterWindow
+            )))
+        );
+    }
+
+    #[test]
+    fn touch_doubletap_accepts_fit_window() {
+        let trigger = GestureTrigger::Doubletap { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "fit-window"),
+            Ok(GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::FitWindow
+            )))
+        );
+    }
+
+    #[test]
+    fn touch_tap_rejects_continuous_action() {
+        let trigger = GestureTrigger::Tap { fingers: 3 };
+        assert!(parse_touch_config_entry(&trigger, "pan-viewport").is_err());
+    }
+
+    #[test]
+    fn touch_tap_rejects_center_nearest() {
+        // center-nearest needs a swipe direction, which a tap doesn't carry.
+        let trigger = GestureTrigger::Tap { fingers: 3 };
+        assert!(parse_touch_config_entry(&trigger, "center-nearest").is_err());
+    }
+
+    #[test]
+    fn touch_swipe_accepts_pan_viewport() {
+        let trigger = GestureTrigger::Swipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "pan-viewport"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_swipe_accepts_threshold_action() {
+        let trigger = GestureTrigger::Swipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "center-nearest"),
+            Ok(GestureConfigEntry::Threshold(
+                ThresholdAction::CenterNearest
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_swipe_rejects_move_window() {
+        // Window grabs on a plain swipe belong to doubletap-swipe/hold-swipe.
+        let trigger = GestureTrigger::Swipe { fingers: 3 };
+        assert!(parse_touch_config_entry(&trigger, "move-window").is_err());
+    }
+
+    #[test]
+    fn touch_swipe_rejects_zoom() {
+        let trigger = GestureTrigger::Swipe { fingers: 3 };
+        assert!(parse_touch_config_entry(&trigger, "zoom").is_err());
+    }
+
+    #[test]
+    fn touch_hold_swipe_accepts_resize_window() {
+        let trigger = GestureTrigger::HoldSwipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "resize-window"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindow
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_hold_swipe_accepts_move_window() {
+        let trigger = GestureTrigger::HoldSwipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-window"),
+            Ok(GestureConfigEntry::Continuous(ContinuousAction::MoveWindow))
+        );
+    }
+
+    #[test]
+    fn touch_hold_swipe_accepts_snapped_window_grabs() {
+        // Touch shares the trackpad's window-grab action set, snapped included.
+        let trigger = GestureTrigger::HoldSwipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "resize-window-snapped"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindowSnapped
+            ))
+        );
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_doubletap_swipe_accepts_snapped_window_grabs() {
+        let trigger = GestureTrigger::DoubletapSwipe { fingers: 3 };
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "resize-window-snapped"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindowSnapped
+            ))
+        );
+    }
+
+    #[test]
+    fn gesture_doubletap_swipe_accepts_move_snapped_windows() {
+        // The trackpad path shares the same window-grab action set.
+        let trigger = GestureTrigger::DoubletapSwipe { fingers: 3 };
+        assert_eq!(
+            parse_gesture_config_entry(&trigger, "move-snapped-windows"),
+            Ok(GestureConfigEntry::Continuous(
+                ContinuousAction::MoveSnappedWindows
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_hold_swipe_rejects_pan_viewport() {
+        let trigger = GestureTrigger::HoldSwipe { fingers: 3 };
+        assert!(parse_touch_config_entry(&trigger, "pan-viewport").is_err());
+    }
+
+    #[test]
+    fn default_touch_bindings_on_canvas_one_finger_swipe_pans() {
+        let bindings = default_touch_bindings();
+        assert_eq!(
+            bindings
+                .on_canvas
+                .get(&GestureTrigger::Swipe { fingers: 1 }),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport
+            ))
+        );
+    }
+
+    #[test]
+    fn default_touch_bindings_anywhere_three_finger_tap_centers_window() {
+        let bindings = default_touch_bindings();
+        assert_eq!(
+            bindings.anywhere.get(&GestureTrigger::Tap { fingers: 3 }),
+            Some(&GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::CenterWindow
+            )))
+        );
+    }
+
+    #[test]
+    fn default_touch_bindings_window_targeted_gestures_bind_on_window() {
+        let bindings = default_touch_bindings();
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::Doubletap { fingers: 3 }),
+            Some(&GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::FitWindow
+            )))
+        );
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::DoubletapSwipe { fingers: 3 }),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::MoveWindow
+            ))
+        );
+        assert_eq!(
+            bindings
+                .on_window
+                .get(&GestureTrigger::HoldSwipe { fingers: 3 }),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::ResizeWindow
+            ))
+        );
+        // Forwarding tiers (1-2 fingers on a window) stay unbound.
+        assert!(
+            !bindings
+                .on_window
+                .contains_key(&GestureTrigger::Swipe { fingers: 2 })
+        );
+    }
+
+    #[test]
+    fn touch_anywhere_override_replaces_default_action() {
+        let toml_str = r#"
+            [touch.anywhere]
+            "3-finger-swipe" = "center-nearest"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(
+            config.touch_lookup(
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::Anywhere
+            ),
+            Some(&GestureConfigEntry::Threshold(
+                ThresholdAction::CenterNearest
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_none_removes_default_binding() {
+        let toml_str = r#"
+            [touch.on-canvas]
+            "2-finger-pinch" = "none"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(
+            config.touch_lookup(
+                &GestureTrigger::Pinch { fingers: 2 },
+                BindingContext::OnCanvas
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn touch_lookup_on_window_falls_back_to_anywhere_default() {
+        let config = Config::from_toml("").unwrap();
+        assert_eq!(
+            config.touch_lookup(
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::OnWindow
+            ),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport
+            ))
+        );
+    }
+
+    #[test]
+    fn touch_lookup_on_canvas_falls_back_to_anywhere_default() {
+        let config = Config::from_toml("").unwrap();
+        assert_eq!(
+            config.touch_lookup(
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::OnCanvas
+            ),
+            Some(&GestureConfigEntry::Continuous(
+                ContinuousAction::PanViewport
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_touch_binding_is_skipped_and_default_remains() {
+        let toml_str = r#"
+            [touch.anywhere]
+            "3-finger-tap" = "pan-viewport"
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert_eq!(
+            config.touch_lookup(
+                &GestureTrigger::Tap { fingers: 3 },
+                BindingContext::Anywhere
+            ),
+            Some(&GestureConfigEntry::Threshold(ThresholdAction::Fixed(
+                Action::CenterWindow
+            )))
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("invalid touch binding")),
             "got: {warnings:?}"
         );
     }

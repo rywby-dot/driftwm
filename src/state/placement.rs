@@ -103,7 +103,7 @@ impl DriftWm {
         let mut rects: Vec<driftwm::layout::auto_placement::Rect> = Vec::new();
         let mut eligible: HashSet<usize> = HashSet::new();
         let mut anchor_idx: Option<usize> = None;
-        for w in self.space.elements() {
+        for w in self.stage.windows() {
             if w == placing {
                 continue;
             }
@@ -115,7 +115,7 @@ impl DriftWm {
             if widget || is_fs || self.is_pinned(w) {
                 continue;
             }
-            let Some(loc) = self.space.element_location(w) else {
+            let Some(loc) = self.stage.position_of(w) else {
                 continue;
             };
             let size = w.geometry().size;
@@ -191,16 +191,14 @@ impl DriftWm {
         let output = anchor
             .as_ref()
             .and_then(|a| {
-                self.fullscreen
-                    .iter()
-                    .find(|(_, fs)| &fs.window == a)
-                    .map(|(o, _)| o.clone())
+                let name = self.stage.fullscreen_output_of(a).map(str::to_owned)?;
+                self.output_by_name(&name)
             })
             .or_else(|| {
                 let out = self.active_output()?;
-                self.fullscreen.contains_key(&out).then_some(out)
+                self.is_output_fullscreen(&out).then_some(out)
             })?;
-        let fs = self.fullscreen.get(&output)?;
+        let fs = self.stage.fullscreen_on(&output.name())?;
 
         // Anchor rect = the fullscreen window's canvas home, reconstructed as a
         // frame rect (borders + SSD bar) exactly like `auto_placement_pos`.
@@ -220,7 +218,7 @@ impl DriftWm {
         let mut eligible: HashSet<usize> = HashSet::new();
         eligible.insert(0);
 
-        for w in self.space.elements() {
+        for w in self.stage.windows() {
             if w == new_window || w == &fs.window {
                 continue;
             }
@@ -231,7 +229,7 @@ impl DriftWm {
             if widget || self.is_window_fullscreen(w) || self.is_pinned(w) {
                 continue;
             }
-            let Some(loc) = self.space.element_location(w) else {
+            let Some(loc) = self.stage.position_of(w) else {
                 continue;
             };
             let size = w.geometry().size;
@@ -288,11 +286,11 @@ impl DriftWm {
     pub fn cascade_position(&self, mut pos: (i32, i32), skip: &Window) -> (i32, i32) {
         let step = self.config.decorations.title_bar_height;
         loop {
-            let dominated = self.space.elements().any(|w| {
+            let dominated = self.stage.windows().any(|w| {
                 w != skip
                     && self
-                        .space
-                        .element_location(w)
+                        .stage
+                        .position_of(w)
                         .is_some_and(|loc| (loc.x - pos.0).abs() <= 2 && (loc.y - pos.1).abs() <= 2)
             });
             if !dominated {

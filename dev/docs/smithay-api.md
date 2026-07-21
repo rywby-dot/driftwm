@@ -197,6 +197,25 @@ impl PopupManager {
 `render_output()` → `Window::render_elements()` → `PopupManager::popups_for_surface()` →
 `render_elements_from_surface_tree()` per popup. Fully automatic — no compositor render code needed.
 
+### Never track_popup in WlrLayerShellHandler::new_popup
+The protocol flow for a popup on a layer surface is `xdg_surface.get_popup(None, positioner)` then
+`zwlr_layer_surface_v1.get_popup(xdg_popup)`. The first call fires `XdgShellHandler::new_popup` with
+`parent = None`, and `track_popup` queues a parentless popup into `unmapped_popups`; the popup's
+first commit drains that entry and inserts it into the popup tree (the parent is set by then).
+Calling `track_popup` again from the layer handler inserts a second tree node — `PopupTree::insert`
+never dedupes — and `popups_for_surface` then yields the popup twice, so it renders twice
+(double-alpha on translucent pixels, doubled per-popup render work). The layer handler should only
+`unconstrain_popup`; the xdg-path unmapped entry handles tracking. `find_popup` searches
+`unmapped_popups` too, so the popup is resolvable in the pre-commit window.
+
+### Bounding boxes: `bbox()` vs `bbox_with_popups()`
+`Window::bbox()` / `LayerSurface::bbox()` cover the toplevel and its subsurfaces but **not** popups;
+the `_with_popups` variants merge in every popup from `PopupManager::popups_for_surface`.
+`SpaceElement::bbox` for `Window` is `bbox_with_popups()` — `Space` never used the popup-less box
+(source: `src/desktop/space/wayland/window.rs`). `Window::send_frame` and `LayerSurface::send_frame`
+both send frame callbacks to popup surface trees too, so throttling decisions keyed on a popup-less
+bbox starve visible popups.
+
 ## Selection / Clipboard
 
 ### Cross-app clipboard
@@ -233,6 +252,18 @@ let path = theme.load_icon("default")?;              // -> PathBuf
 let images = xcursor::parser::parse_xcursor(&std::fs::read(path)?)?;
 // Image { width, height, xhot, yhot, pixels_rgba: Vec<u8>, pixels_argb: Vec<u8>, size, delay }
 ```
+
+## DrmCompositor Mode Changes
+
+### `DrmCompositor::use_mode(mode)` is safe with a page flip in flight
+Source: `src/backend/drm/compositor/mod.rs` (`use_mode`), `src/backend/drm/surface/atomic.rs` (`AtomicDrmSurface::use_mode`); git checkout under `~/.cargo/git/checkouts/smithay-*/`.
+
+`use_mode` does **not** modeset immediately:
+1. `AtomicDrmSurface::use_mode` creates a mode property blob + a throwaway test buffer, submits a `TEST_ONLY` atomic commit to validate, and on success just stores the mode in the surface's `pending` state.
+2. `DrmCompositor::use_mode` then resizes the swapchain to the new dimensions.
+3. The **real** modeset lands with the next frame commit (`queue_frame` picks up the pending state, commits with `ALLOW_MODESET`).
+
+So it never races an in-flight page flip — the kernel serializes atomic commits per CRTC, and the pending frame's fb holds its own reference. niri calls `use_mode` unconditionally at config-apply time with no deferral (`tty.rs`, `on_output_config_changed`) and only handles the `Err`. Deferring/queueing around `frames_pending` before calling it is unnecessary.
 
 ## Gotchas
 
@@ -317,3 +348,15 @@ let images = xcursor::parser::parse_xcursor(&std::fs::read(path)?)?;
 
 - **Temporaries in `if let` live until end of block** — separate `let x = expr.cloned(); if let Some(x) = x {` when needing `&mut self` inside the block.
 - **DMA-BUF blocker uses let-chains** — `if let Some(dmabuf) = ... && let Ok((blocker, source)) = ... && let Some(client) = ... { }` is idiomatic Rust 2024.
+
+### Output membership (`SpaceElement` on `Window`)
+
+driftwm drives per-window `wl_surface.enter`/`leave` itself (`DriftWm::refresh_window_outputs`) instead of `Space::refresh`. The relevant `SpaceElement` methods on `Window` (`smithay::desktop::space::SpaceElement`; call fully-qualified — `Window` has inherent methods with clashing names):
+
+- **`SpaceElement::output_enter(&self, output, overlap)`** — inserts `overlap` (relative to the window origin) into the `Window`'s private `WindowOutputUserData` overlap map (keyed by a downgraded `Output`) and calls `refresh()` to push the enter to the toplevel + its popups. Idempotent per output; re-sends on a changed overlap.
+- **`SpaceElement::output_leave(&self, output)`** — drops `output` from that map and sends `wl_surface.leave` for the toplevel and every popup. No-op after `Output::leave_all()`.
+- **`SpaceElement::refresh(&self)`** — re-runs the per-surface `output_update` for the toplevel and popups from the `Window`'s own overlap map; keeps popup enter/leave fresh without a full diff.
+- **`SpaceElement::bbox(&self)`** = `Window::bbox_with_popups()`; **`geometry()`** = the window geometry (decoration-excluded). `Space::refresh` translated the bbox by `location - geometry().loc` before intersecting each output — replicate this when computing overlaps.
+- **`Space::refresh` semantics (replaced)** — retained alive elements, diffed each element's bbox against every mapped output's geometry (`output_geometry(o).unwrap_or_else(Rectangle::zero)`), sent `output_enter`/`output_leave` on change, called `SpaceElement::refresh` per element, then `Output::cleanup` per output.
+- **`Output::cleanup(&self)`** — prunes dead surfaces from the output's own enter tracking. **`Output::leave_all(&self)`** — sends `wl_surface.leave` for every surface currently entered on the output (used on placeholder-output teardown).
+- **`UserDataMap`** is a lock-free append-only boxed list: a `&T` from `get`/`get_or_insert` stays valid across a later `insert_if_missing` of a *different* type, so holding one userdata borrow while a `SpaceElement` method touches another userdata entry is sound.

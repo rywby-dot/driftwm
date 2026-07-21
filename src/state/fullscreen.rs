@@ -1,26 +1,45 @@
 use smithay::{
     desktop::Window,
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, Size},
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, FocusTarget, FullscreenState};
+use super::{DriftWm, FocusTarget};
 use driftwm::window_ext::WindowExt;
 
 impl DriftWm {
-    /// Resolve which output a window should fullscreen onto: a window-rule
-    /// `output` wins, then the client-requested output, then the active output.
-    /// Unknown output names fall through to the next choice.
+    /// Resolve which output a window should fullscreen onto. An already-fullscreen
+    /// window re-asserting with no requested output stays on its current output;
+    /// otherwise a window-rule `output` wins, then the client-requested output,
+    /// then the window's pin site output, then the active output. Unknown output
+    /// names fall through to the next choice.
+    ///
+    /// Fullscreen exit re-pins a pinned window to its pin output, so resolving
+    /// there on entry keeps enter/exit symmetric.
     pub fn resolve_fullscreen_output(
         &self,
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         client_output: Option<smithay::output::Output>,
     ) -> Option<smithay::output::Output> {
+        // Toolkits re-assert fullscreen (no requested output) on focus changes;
+        // an already-fullscreen window must stay put. Falling through would
+        // re-resolve down the chain and yank it to the pin or active (cursor)
+        // output, undoing a send-to-output move.
+        if client_output.is_none()
+            && let Some(current) = self.find_fullscreen_output_for_surface(surface)
+        {
+            return Some(current);
+        }
+
         driftwm::config::applied_rule(surface)
             .and_then(|r| r.output)
             .and_then(|name| self.space.outputs().find(|o| o.name() == name).cloned())
             .or(client_output)
+            .or_else(|| {
+                self.window_for_surface(surface)
+                    .and_then(|w| self.stage.pin_of(&w).map(|site| site.output.clone()))
+                    .and_then(|name| self.output_by_name(&name))
+            })
             .or_else(|| self.active_output())
     }
 
@@ -58,8 +77,8 @@ impl DriftWm {
         // buffer was never committed in between — so a later exit "restores" to
         // full size and toggling can never recover. Keep the existing saved_*.
         if self
-            .fullscreen
-            .get(&output)
+            .stage
+            .fullscreen_on(&output.name())
             .is_some_and(|fs| &fs.window == window)
         {
             window.enter_fullscreen_configure(super::output_logical_size(&output));
@@ -81,22 +100,21 @@ impl DriftWm {
         // A different window is taking over this output's fullscreen: exit first.
         // Must target `output`, not the active output — they can differ when
         // fullscreen is requested on a specific monitor.
-        if self.fullscreen.contains_key(&output) {
+        if self.is_output_fullscreen(&output) {
             self.exit_fullscreen_on(&output);
         }
 
         let viewport_size = super::output_logical_size(&output);
-        let saved_location = self.space.element_location(window).unwrap_or_default();
+        let saved_location = self.stage.position_of(window).unwrap_or_default();
 
         // If the window is fit, capture the fit-era geometry so exit_fullscreen
-        // restores it back to fit size with FitState still intact. Otherwise
-        // prefer RestoreSize over geometry to dodge Chromium's CSD shrink spiral.
-        let saved_size = if super::fit::is_fit(window) {
+        // restores it back to fit size with the fit state still intact. Otherwise
+        // prefer the restore size over geometry to dodge Chromium's CSD shrink spiral.
+        let saved_size = if self.stage.is_fit(window) {
             window.geometry().size
         } else {
-            window
-                .wl_surface()
-                .and_then(|s| super::fit::restore_size(&s))
+            self.stage
+                .restore_size(window)
                 .unwrap_or_else(|| window.geometry().size)
         };
 
@@ -107,7 +125,7 @@ impl DriftWm {
 
         // A game that maps straight into fullscreen commits its first buffer at
         // a throwaway default before it learns it's fullscreen, and that size is
-        // frozen into RestoreSize (X11 clients via xwayland-satellite often map
+        // frozen into the restore size (X11 clients via xwayland-satellite often map
         // 1x1 first). Restoring it verbatim on exit would shrink the window to
         // nothing, so a captured size below the client's min — or a floor, since
         // many clients declare none — falls back to a half-viewport default.
@@ -130,21 +148,15 @@ impl DriftWm {
         };
 
         // Unpin into the fullscreen viewport; exit_fullscreen_on re-pins.
-        let saved_pinned = window
-            .wl_surface()
-            .and_then(|s| self.pinned.remove(&s.id()));
+        let saved_pinned = self.stage.take_pin(window);
 
-        self.fullscreen.insert(
-            output.clone(),
-            FullscreenState {
-                window: window.clone(),
-                saved_location,
-                saved_camera,
-                saved_zoom,
-                saved_size,
-                saved_pinned,
-            },
-        );
+        self.stage
+            .set_fullscreen(&output.name(), window.clone(), saved_location, saved_size);
+        super::output_state(&output).fullscreen_return = Some(super::FullscreenReturn {
+            camera: saved_camera,
+            zoom: saved_zoom,
+            pinned: saved_pinned,
+        });
 
         window.enter_fullscreen_configure(viewport_size);
 
@@ -164,14 +176,14 @@ impl DriftWm {
         // Snap camera to integer for pixel-perfect alignment. Write the
         // output's state directly: `set_camera` refuses to move a fullscreen
         // output (the window is pinned to its camera-origin), and this output's
-        // FullscreenState is already inserted above.
+        // stage fullscreen entry is already set above.
         let camera_i32 = super::output_state(&output).camera.to_i32_round();
         super::output_state(&output).camera =
             Point::from((camera_i32.x as f64, camera_i32.y as f64));
 
         // Place window at viewport origin and raise
-        self.space.map_element(window.clone(), camera_i32, true);
-        self.space.raise_element(window, true);
+        self.map_window(window.clone(), camera_i32, true);
+        self.raise_window(window, true);
         self.enforce_below_windows();
         self.update_output_from_camera();
 
@@ -204,17 +216,29 @@ impl DriftWm {
                     },
                 );
             }
+            // Keep the cursor at the same on-screen spot across the zoom park:
+            // canvas position alone would land elsewhere (or off-output) once
+            // zoom != 1. Same geometric-visibility check as
+            // `restore_fullscreen_view` on the exit side.
             let canvas_pos = pointer.current_location();
-            let origin = self
-                .space
-                .element_location(window)
-                .unwrap_or_default()
-                .to_f64();
+            let in_saved_view = canvas_pos.x >= saved_camera.x
+                && canvas_pos.x < saved_camera.x + viewport_size.w as f64 / saved_zoom
+                && canvas_pos.y >= saved_camera.y
+                && canvas_pos.y < saved_camera.y + viewport_size.h as f64 / saved_zoom;
+            let new_pos = if in_saved_view {
+                Point::from((
+                    (canvas_pos.x - saved_camera.x) * saved_zoom + camera_i32.x as f64,
+                    (canvas_pos.y - saved_camera.y) * saved_zoom + camera_i32.y as f64,
+                ))
+            } else {
+                canvas_pos
+            };
+            let origin = self.stage.position_of(window).unwrap_or_default().to_f64();
             pointer.motion(
                 self,
                 Some((FocusTarget(wl_surface.into_owned()), origin)),
                 &smithay::input::pointer::MotionEvent {
-                    location: canvas_pos,
+                    location: new_pos,
                     serial,
                     time: self.start_time.elapsed().as_millis() as u32,
                 },
@@ -234,39 +258,114 @@ impl DriftWm {
 
     /// Exit fullscreen on a specific output.
     pub fn exit_fullscreen_on(&mut self, output: &smithay::output::Output) {
-        let Some(fs) = self.fullscreen.remove(output) else {
+        // Take both halves unconditionally before bailing — a one-sided take
+        // would strand the other half if they ever diverged.
+        let ret = super::output_state(output).fullscreen_return.take();
+        let entry = self.stage.take_fullscreen(&output.name());
+        debug_assert_eq!(
+            ret.is_some(),
+            entry.is_some(),
+            "fullscreen halves diverged for {}",
+            output.name()
+        );
+        let (Some(ret), Some(entry)) = (ret, entry) else {
             return;
         };
 
-        fs.window.exit_fullscreen_configure(fs.saved_size);
+        entry.window.exit_fullscreen_configure(entry.saved_size);
 
         // Restore window position, camera, zoom on the specific output
-        self.space
-            .map_element(fs.window.clone(), fs.saved_location, false);
+        self.map_window(entry.window.clone(), entry.saved_location, false);
+        // Re-pin if it was pinned before fullscreen, then snap its Space loc
+        // back to screen_pos (update_output_from_camera's sync only fires on a
+        // camera change, which restoring the saved camera may not be).
+        let was_pinned = ret.pinned.is_some();
+        if let Some(site) = ret.pinned {
+            // The window may have entered the MRU history while fullscreen
+            // (it wasn't pinned then); re-pinning takes it back out.
+            self.stage.drop_from_focus_history(&entry.window);
+            self.stage.set_pin(&entry.window, site);
+        }
+        self.restore_fullscreen_view(output, ret.camera, ret.zoom);
+        if was_pinned {
+            self.sync_pinned_locs();
+        }
+    }
+
+    /// Restore an output's camera/zoom after fullscreen ends. Drops any
+    /// animation targets set while the camera was locked (e.g. an activation
+    /// aimed at this output) — the per-tick fullscreen clear stops once the
+    /// stage entry is gone, and a stale target would animate a spurious jump.
+    ///
+    /// Keeps the cursor at the same on-screen spot when it was visible in the
+    /// parked view: its canvas position alone lands on a different screen
+    /// point whenever the restored zoom isn't the parked 1.0. Visibility is
+    /// judged geometrically (cursor inside the parked viewport) rather than by
+    /// pointer routing — touch flips `focused_output` while the mouse cursor
+    /// may sit on another output. Must not run inside a pointer-grab callback
+    /// (the warp's pointer calls would deadlock); every caller is plain
+    /// dispatch (NavigateGrab defers its action for this).
+    pub(crate) fn restore_fullscreen_view(
+        &mut self,
+        output: &smithay::output::Output,
+        camera: Point<f64, Logical>,
+        zoom: f64,
+    ) {
+        let (parked_camera, parked_zoom) = {
+            let os = super::output_state(output);
+            (os.camera, os.zoom)
+        };
         {
             let mut os = super::output_state(output);
-            os.camera = fs.saved_camera;
-            os.zoom = fs.saved_zoom;
-            // Match the enter path's clean slate: drop any animation targets
-            // that were set while the camera was locked (e.g. an activation
-            // aimed at this output). The per-tick fullscreen clear handles the
-            // steady state, but an exit in the same dispatch cycle — before any
-            // tick — would otherwise animate a spurious jump to the stale target.
+            os.camera = camera;
+            os.zoom = zoom;
             os.camera_target = None;
             os.zoom_target = None;
             os.zoom_animation_center = None;
         }
-        // Re-pin if it was pinned before fullscreen, then snap its Space loc
-        // back to screen_pos (update_output_from_camera's sync only fires on a
-        // camera change, which restoring the saved camera may not be).
-        let was_pinned = fs.saved_pinned.is_some();
-        if let (Some(pinned), Some(id)) = (fs.saved_pinned, fs.window.wl_surface().map(|s| s.id()))
-        {
-            self.pinned.insert(id, pinned);
-        }
         self.update_output_from_camera();
-        if was_pinned {
-            self.sync_pinned_locs();
+
+        let pointer = self.seat.get_pointer().unwrap();
+        let canvas_pos = pointer.current_location();
+        let size = super::output_logical_size(output);
+        let in_parked_view = canvas_pos.x >= parked_camera.x
+            && canvas_pos.x < parked_camera.x + size.w as f64 / parked_zoom
+            && canvas_pos.y >= parked_camera.y
+            && canvas_pos.y < parked_camera.y + size.h as f64 / parked_zoom;
+        if in_parked_view {
+            let new_pos = Point::from((
+                (canvas_pos.x - parked_camera.x) * parked_zoom / zoom + camera.x,
+                (canvas_pos.y - parked_camera.y) * parked_zoom / zoom + camera.y,
+            ));
+            if new_pos != canvas_pos {
+                self.warp_pointer(new_pos);
+            }
+        }
+    }
+
+    /// Tear down any fullscreen entry whose window is dead, restoring that
+    /// output's camera/zoom. The exit paths handle live windows; this covers
+    /// a client that crashed while fullscreen, whose entry would otherwise
+    /// keep the camera parked forever.
+    pub fn reap_dead_fullscreen(&mut self) {
+        use smithay::utils::IsAlive;
+        let dead: Vec<String> = self
+            .stage
+            .fullscreen_entries()
+            .filter(|(_, fs)| !fs.window.alive())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &dead {
+            self.stage.take_fullscreen(name);
+            let Some(output) = self.output_by_name(name) else {
+                continue;
+            };
+            // Two statements, not a let-chain: a chain scrutinee's MutexGuard
+            // lives to the end of the whole `if`, deadlocking the re-lock.
+            let ret = super::output_state(&output).fullscreen_return.take();
+            if let Some(ret) = ret {
+                self.restore_fullscreen_view(&output, ret.camera, ret.zoom);
+            }
         }
     }
 
@@ -279,7 +378,7 @@ impl DriftWm {
         output: &smithay::output::Output,
         new_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     ) {
-        let Some(fs) = self.fullscreen.get(output) else {
+        let Some(fs) = self.stage.fullscreen_on(&output.name()) else {
             return;
         };
         fs.window.enter_fullscreen_configure(new_size);
@@ -290,32 +389,11 @@ impl DriftWm {
         &self,
         wl_surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) -> Option<smithay::output::Output> {
-        self.fullscreen
-            .iter()
+        let name = self
+            .stage
+            .fullscreen_entries()
             .find(|(_, fs)| fs.window.wl_surface().as_deref() == Some(wl_surface))
-            .map(|(o, _)| o.clone())
-    }
-
-    /// Exit fullscreen and remap the pointer to maintain its screen position
-    /// under the restored camera/zoom. Returns the new canvas position.
-    pub fn exit_fullscreen_remap_pointer(
-        &mut self,
-        canvas_pos: Point<f64, Logical>,
-    ) -> Point<f64, Logical> {
-        let old_camera = self.camera();
-        let old_zoom = self.zoom();
-        self.exit_fullscreen();
-        let screen: Point<f64, Logical> = Point::from((
-            (canvas_pos.x - old_camera.x) * old_zoom,
-            (canvas_pos.y - old_camera.y) * old_zoom,
-        ));
-        let cur_zoom = self.zoom();
-        let cur_camera = self.camera();
-        let new_pos = Point::from((
-            screen.x / cur_zoom + cur_camera.x,
-            screen.y / cur_zoom + cur_camera.y,
-        ));
-        self.warp_pointer(new_pos);
-        new_pos
+            .map(|(name, _)| name.clone())?;
+        self.output_by_name(&name)
     }
 }

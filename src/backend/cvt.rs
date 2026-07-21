@@ -142,6 +142,9 @@ mod tests {
         // libdisplay-info reports the achieved refresh, not the requested one,
         // and our name encodes that for easier debugging from kernel logs.
         let m = synth_cvt(1920, 1080, 60).unwrap();
+        // c_char is u8 on aarch64 (cast flagged as redundant) but i8 on
+        // x86_64, where it's required.
+        #[allow(clippy::unnecessary_cast)]
         let bytes: Vec<u8> = m.name.iter().map(|&b| b as u8).collect();
         let nul = bytes.iter().position(|&b| b == 0).expect("NUL-terminated");
         let s = std::str::from_utf8(&bytes[..nul]).unwrap();

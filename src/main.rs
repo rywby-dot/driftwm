@@ -9,17 +9,24 @@ mod render;
 mod signals;
 mod state;
 mod surface_tree;
+#[cfg(test)]
+mod tests;
 mod xwayland;
 
 use clap::Parser;
 use state::{ClientState, DriftWm};
 use std::sync::Arc;
 
+/// A trackpad-first infinite canvas Wayland compositor.
+///
+/// With no subcommand, starts the compositor, auto-detecting the backend (udev
+/// on a TTY, winit when nested). The `msg` subcommand instead talks to an
+/// already-running instance over its IPC socket; see docs/ipc.md for the raw
+/// wire protocol.
 #[derive(Parser)]
 #[command(
     name = "driftwm",
     version,
-    about,
     after_help = concat!("Documentation & source: ", env!("CARGO_PKG_REPOSITORY"))
 )]
 struct Cli {
@@ -38,7 +45,13 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Sub {
-    /// Send a command to the running compositor
+    /// Send a command to the running compositor over its IPC socket.
+    ///
+    /// Auto-targets the instance named by `WAYLAND_DISPLAY` (override with
+    /// `DRIFTWM_SOCKET`). A subcommand with no arguments reads state; with
+    /// arguments it writes. Add `--json` for the raw JSON reply. A command that
+    /// fails (bad value, no match, no focused window) prints an error to stderr
+    /// and exits non-zero, so scripts can branch on it.
     Msg {
         /// Print the raw JSON reply
         #[arg(long, global = true)]
@@ -349,9 +362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting event loop — launch apps with: WAYLAND_DISPLAY={socket_name} <app>");
     event_loop.run(None, &mut data, |data| {
         backend::udev::render_if_needed(data);
-        data.space.refresh();
-        data.popups.cleanup();
-        data.display_handle.flush_clients().ok();
+        data.refresh_and_flush_clients();
     })?;
 
     state::remove_state_file();

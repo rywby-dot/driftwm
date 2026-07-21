@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use crate::grabs::{ResizeState, has_left, has_top};
 use crate::handlers::layer_shell::LayerDestroyedMarker;
-use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter, PinnedState};
+use crate::state::{ClientState, DriftWm, FocusTarget, PendingRecenter};
 use driftwm::window_ext::WindowExt;
 use smithay::desktop::layer_map_for_output;
 use smithay::utils::{Logical, Point, Rectangle};
@@ -49,15 +49,9 @@ impl CompositorHandler for DriftWm {
         // lock_surfaces is keyed by output — sweep values.
         self.lock_surfaces
             .retain(|_, ls| ls.wl_surface() != surface);
-        self.focus_history
-            .retain(|w| w.wl_surface().as_deref() != Some(surface));
-        if self.cycle_state.is_some() {
-            if self.focus_history.is_empty() {
-                self.cycle_state = None;
-            } else if let Some(ref mut idx) = self.cycle_state {
-                *idx = (*idx).min(self.focus_history.len() - 1);
-            }
-        }
+        self.stage
+            .remove_from_history_matching(|w| w.wl_surface().as_deref() == Some(surface));
+        self.reap_dead_fullscreen();
     }
 
     fn new_surface(
@@ -222,23 +216,19 @@ impl CompositorHandler for DriftWm {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            let window = self
-                .space
-                .elements()
-                .find(|w| w.wl_surface().as_deref() == Some(&root))
-                .cloned();
+            let window = self.window_for_surface(&root);
             if let Some(window) = window {
                 window.on_commit();
 
                 if self.pending_center.remove(&root) {
                     let geo = window.geometry();
                     let has_size = geo.size.w > 0 && geo.size.h > 0;
-                    let is_fullscreen = self.fullscreen.values().any(|fs| fs.window == window);
+                    let is_fullscreen = self.stage.is_fullscreen(&window);
 
                     // Capture preferred size once; later updated only on
                     // user resize-grab completion.
-                    if has_size && !crate::state::fit::is_fit(&window) && !is_fullscreen {
-                        crate::state::fit::set_restore_size_if_missing(&root, geo.size);
+                    if has_size && !self.stage.is_fit(&window) && !is_fullscreen {
+                        self.stage.set_restore_size_if_missing(&window, geo.size);
                     }
 
                     let (app_id, title) = with_states(&root, |states| {
@@ -339,22 +329,26 @@ impl CompositorHandler for DriftWm {
                     } else if applied.as_ref().is_some_and(|a| a.pinned_to_screen)
                         && has_size
                         && !is_fullscreen
-                        && let Some(output) = self.active_output()
+                        && let Some(output) = applied
+                            .as_ref()
+                            .and_then(|a| a.output.as_deref())
+                            .and_then(|name| self.output_by_name(name))
+                            .or_else(|| self.active_output())
                     {
-                        // Screen-pinned: live in the active output's screen
-                        // space, not the canvas. `position` (if any) is the
-                        // output-relative center, Y-up (output center = origin).
+                        // Screen-pinned: live in the chosen output's screen
+                        // space, not the canvas. A rule `output` picks the
+                        // display (else the active one); `position` (if any) is
+                        // that output's center, Y-up (output center = origin).
                         let (rx, ry) = applied.as_ref().and_then(|a| a.position).unwrap_or((0, 0));
                         let out_size = crate::state::output_logical_size(&output);
-                        let internal = driftwm::canvas::rule_to_internal(rx, ry, geo.size);
                         // Clamp the top-left into the output so an off-screen rule
                         // `position` (e.g. [1000, 1000] on a 1080p monitor) still
                         // lands fully visible. Mirrors `reassign_orphaned_pinned`.
+                        let top_left =
+                            driftwm::canvas::rule_to_screen_top_left(rx, ry, geo.size, out_size);
                         let screen_pos: Point<i32, Logical> = (
-                            (out_size.w / 2 + internal.x)
-                                .clamp(0, (out_size.w - geo.size.w).max(0)),
-                            (out_size.h / 2 + internal.y)
-                                .clamp(0, (out_size.h - geo.size.h).max(0)),
+                            top_left.x.clamp(0, (out_size.w - geo.size.w).max(0)),
+                            top_left.y.clamp(0, (out_size.h - geo.size.h).max(0)),
                         )
                             .into();
                         // Seed the Space loc to the canvas point this screen
@@ -372,10 +366,15 @@ impl CompositorHandler for DriftWm {
                         .0
                         .to_i32_round();
                         let activate = applied.as_ref().is_none_or(|a| !a.widget);
-                        self.pinned
-                            .insert(root.id(), PinnedState { output, screen_pos });
-                        self.space.map_element(window.clone(), canvas, activate);
-                    } else if has_size && !is_fullscreen && !crate::state::fit::is_fit(&window) {
+                        self.map_window(window.clone(), canvas, activate);
+                        self.stage.set_pin(
+                            &window,
+                            driftwm::stage::PinnedSite {
+                                output: output.name(),
+                                screen_pos,
+                            },
+                        );
+                    } else if has_size && !is_fullscreen && !self.stage.is_fit(&window) {
                         // Fullscreen / fit windows already sit at their final
                         // location — skip positioning so bar-shifted
                         // centering doesn't override that.
@@ -386,7 +385,7 @@ impl CompositorHandler for DriftWm {
                             (p.x, p.y)
                         } else if let Some(parent_surface) = window.parent_surface()
                             && let Some(parent_win) = self.window_for_surface(&parent_surface)
-                            && let Some(parent_loc) = self.space.element_location(&parent_win)
+                            && let Some(parent_loc) = self.stage.position_of(&parent_win)
                         {
                             let parent_size = parent_win.geometry().size;
                             (
@@ -458,7 +457,7 @@ impl CompositorHandler for DriftWm {
                         // fullscreen window focused and on top.
                         let activate =
                             !place_in_background && applied.as_ref().is_none_or(|a| !a.widget);
-                        self.space.map_element(window.clone(), pos, activate);
+                        self.map_window(window.clone(), pos.into(), activate);
                     }
 
                     if let Some(toplevel) = window.toplevel() {
@@ -512,8 +511,8 @@ impl CompositorHandler for DriftWm {
                         }
 
                         if applied.widget {
-                            self.focus_history.retain(|w| w != &window);
-                            if let Some(prev) = self.focus_history.first().cloned() {
+                            self.stage.drop_from_focus_history(&window);
+                            if let Some(prev) = self.stage.focus_history().first().cloned() {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                                 let focus = prev.wl_surface().map(|s| FocusTarget(s.into_owned()));
                                 self.set_window_focus(focus, serial);
@@ -537,6 +536,9 @@ impl CompositorHandler for DriftWm {
                             );
                             self.decorations.insert(root.id(), deco);
                         }
+                        if applied.as_ref().is_some_and(|a| a.fullscreen == Some(true)) {
+                            self.pending_fullscreen.entry(root.clone()).or_insert(None);
+                        }
 
                         let is_widget = applied.as_ref().is_some_and(|a| a.widget);
                         // Deferred fit/fullscreen will override camera/zoom/raise
@@ -548,7 +550,6 @@ impl CompositorHandler for DriftWm {
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs
-                            && !self.pinned.contains_key(&root.id())
                         {
                             let reset = self.config.zoom_reset_on_new_window;
                             // Cursor mode is "stay put" by default; only
@@ -556,7 +557,9 @@ impl CompositorHandler for DriftWm {
                             // zoomed out and asked for reset).
                             let cursor_overview_rescue =
                                 placed_at_cursor && reset && self.zoom() < 1.0 - 1e-9;
-                            if placed_at_cursor && !cursor_overview_rescue {
+                            if self.stage.is_pinned(&window)
+                                || placed_at_cursor && !cursor_overview_rescue
+                            {
                                 let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                                 self.raise_and_focus(&window, serial);
                             } else {
@@ -607,7 +610,7 @@ impl CompositorHandler for DriftWm {
                             (target_center.x - geo.size.w as f64 / 2.0) as i32,
                             (target_center.y - total_h as f64 / 2.0) as i32 + bar,
                         ));
-                        self.space.map_element(window.clone(), new_loc, false);
+                        self.map_window(window.clone(), new_loc, false);
                         self.refresh_stable_snap_rect(&window);
                         self.pending_recenter.remove(&root.id());
                     }
@@ -639,8 +642,8 @@ fn ensure_initial_configure(
     state: &DriftWm,
 ) {
     if let Some(window) = state
-        .space
-        .elements()
+        .stage
+        .windows()
         .find(|w| w.wl_surface().as_deref() == Some(surface))
     {
         let Some(toplevel) = window.toplevel() else {
@@ -819,23 +822,32 @@ impl DriftWm {
             if has_left(edges) {
                 new_sp.x = initial_screen_pos.x + (initial_window_size.w - current_geo.size.w);
             }
-            let output = self.pinned.get_mut(&surface.id()).map(|p| {
-                p.screen_pos = new_sp;
-                p.output.clone()
-            });
-            if let Some(output) = output {
-                let (camera, zoom) = {
-                    let os = crate::state::output_state(&output);
-                    (os.camera, os.zoom)
-                };
-                let canvas = driftwm::canvas::screen_to_canvas(
-                    driftwm::canvas::ScreenPos(new_sp.to_f64()),
-                    camera,
-                    zoom,
-                )
-                .0
-                .to_i32_round();
-                self.space.map_element(window.clone(), canvas, false);
+            let output_name = self.stage.pin_of(window).map(|site| site.output.clone());
+            if let Some(name) = output_name {
+                self.stage.set_pin(
+                    window,
+                    driftwm::stage::PinnedSite {
+                        output: name.clone(),
+                        screen_pos: new_sp,
+                    },
+                );
+                // Output gone: keep the screen_pos update, skip only the
+                // loc re-anchor — the tail below must still run to reset
+                // ResizeState.
+                if let Some(output) = self.output_by_name(&name) {
+                    let (camera, zoom) = {
+                        let os = crate::state::output_state(&output);
+                        (os.camera, os.zoom)
+                    };
+                    let canvas = driftwm::canvas::screen_to_canvas(
+                        driftwm::canvas::ScreenPos(new_sp.to_f64()),
+                        camera,
+                        zoom,
+                    )
+                    .0
+                    .to_i32_round();
+                    self.map_window(window.clone(), canvas, false);
+                }
             }
         } else {
             let mut new_loc = initial_window_location;
@@ -847,13 +859,13 @@ impl DriftWm {
                 new_loc.x =
                     initial_window_location.x + (initial_window_size.w - current_geo.size.w);
             }
-            self.space.map_element(window.clone(), new_loc, false);
+            self.map_window(window.clone(), new_loc, false);
         }
 
         if matches!(resize_state, ResizeState::WaitingForLastCommit { .. }) {
             // Anchor restore_size to the user's final choice so a subsequent
             // fit/fullscreen round-trip restores to this.
-            crate::state::fit::set_restore_size(surface, current_geo.size);
+            self.stage.set_restore_size(window, current_geo.size);
             with_states(surface, |states| {
                 states
                     .data_map
@@ -888,7 +900,13 @@ impl DriftWm {
         if !matches!(resize_state, ResizeState::Idle) {
             return;
         }
-        if self.is_window_fullscreen(window) || crate::state::fit::is_fit(window) {
+        // A filled window is deliberately grown in place and may retain an
+        // unresolvable overlap; reflowing it here would translate it (violating
+        // fill's never-move contract) off a now-stale stable snap rect.
+        if self.is_window_fullscreen(window)
+            || self.stage.is_fit(window)
+            || self.stage.is_fill(window)
+        {
             return;
         }
 
@@ -912,8 +930,8 @@ impl DriftWm {
 
         let gap = self.config.snap_gap;
         let others: Vec<(smithay::desktop::Window, driftwm::layout::snap::SnapRect)> = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .filter(|w| *w != window)
             .filter_map(|w| self.snap_rect_for(w).map(|r| (w.clone(), r)))
             .collect();
@@ -941,10 +959,10 @@ impl DriftWm {
             return;
         };
         let new_loc = Point::from((x, y));
-        if self.space.element_location(window) == Some(new_loc) {
+        if self.stage.position_of(window) == Some(new_loc) {
             return;
         }
-        self.space.map_element(window.clone(), new_loc, false);
+        self.map_window(window.clone(), new_loc, false);
         self.refresh_stable_snap_rect(window);
 
         // Recenter only when the reflow pushed the focused window (partly) out

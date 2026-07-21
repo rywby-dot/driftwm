@@ -116,7 +116,9 @@ mod move_grab;
 mod navigate_grab;
 mod pan_grab;
 mod resize_grab;
+mod screen_space_click;
 mod touch_gesture_grab;
+mod touch_recognizer;
 
 pub use move_grab::MoveSurfaceGrab;
 pub use navigate_grab::NavigateGrab;
@@ -124,4 +126,5 @@ pub use pan_grab::PanGrab;
 pub use resize_grab::{
     ResizeState, ResizeSurfaceGrab, SizeConstraints, has_bottom, has_left, has_right, has_top,
 };
+pub use screen_space_click::ScreenSpaceClickGrab;
 pub use touch_gesture_grab::TouchGestureGrab;

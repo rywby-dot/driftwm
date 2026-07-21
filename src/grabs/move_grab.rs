@@ -11,7 +11,7 @@ use smithay::{
         },
     },
     output::Output,
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{IsAlive, Logical, Point, Serial},
     wayland::seat::WaylandFocus,
 };
@@ -132,6 +132,35 @@ impl MoveSurfaceGrab {
             cluster_member_surfaces,
             last_mapped_loc: None,
             pinned_grab_offset: None,
+        }
+    }
+
+    /// Touch move grab for a screen-pinned window (see [`Self::new_pinned`]).
+    pub fn new_pinned_touch(
+        touch_start: TouchGrabStartData<DriftWm>,
+        window: Window,
+        output: Output,
+        grab_offset: Point<f64, Logical>,
+        slots: usize,
+    ) -> Self {
+        Self {
+            start_canvas: touch_start.location,
+            start_data: GrabStartData {
+                focus: None,
+                button: 0,
+                location: touch_start.location,
+            },
+            touch_start: Some(touch_start),
+            touch_slots: slots,
+            window,
+            initial_window_location: Point::from((0, 0)),
+            snap: SnapState::default(),
+            output,
+            inhibited_edge: None,
+            cluster_members: Vec::new(),
+            cluster_member_surfaces: HashSet::new(),
+            last_mapped_loc: None,
+            pinned_grab_offset: Some(grab_offset),
         }
     }
 
@@ -311,42 +340,17 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             // Disarm edge-pan on the current output, else it keeps scrolling
             // that monitor's camera while the drag is parked — the grab is the
             // only thing that disarms it.
-            output_state(&self.output).edge_pan_velocity = None;
+            data.clear_edge_pan(&self.output);
             handle.motion(data, None, event);
             return;
         }
 
-        // Screen-pinned move: track the cursor with a fixed screen-space offset.
-        // The window reassigns to whichever output the cursor is on (free
-        // multi-monitor move). No snap / cluster / edge-pan.
         if let Some(grab_offset) = self.pinned_grab_offset {
             let output = data
                 .focused_output
                 .clone()
                 .unwrap_or_else(|| self.output.clone());
-            let (camera, zoom) = {
-                let os = output_state(&output);
-                (os.camera, os.zoom)
-            };
-            let cursor_screen = canvas_to_screen(CanvasPos(event.location), camera, zoom).0;
-            let new_screen = cursor_screen + grab_offset;
-            let new_screen_pos =
-                Point::from((new_screen.x.round() as i32, new_screen.y.round() as i32));
-            self.output = output.clone();
-            if let Some(id) = self.window.wl_surface().map(|s| s.id())
-                && let Some(p) = data.pinned.get_mut(&id)
-            {
-                p.output = output.clone();
-                p.screen_pos = new_screen_pos;
-            }
-            let canvas = screen_to_canvas(ScreenPos(new_screen_pos.to_f64()), camera, zoom)
-                .0
-                .to_i32_round();
-            data.space.map_element(self.window.clone(), canvas, false);
-            if self.last_mapped_loc != Some(canvas) {
-                data.render.blur_geometry_generation += 1;
-                self.last_mapped_loc = Some(canvas);
-            }
+            self.apply_pinned_move(data, event.location, grab_offset, output);
             handle.motion(data, None, event);
             return;
         }
@@ -372,7 +376,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             let entry_edge = Self::entry_edge(&self.output, &new_output);
 
             // Clear edge-pan on the old output before switching.
-            output_state(&self.output).edge_pan_velocity = None;
+            data.clear_edge_pan(&self.output);
 
             self.start_canvas = event.location;
             self.initial_window_location = Point::from((
@@ -393,10 +397,9 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
                     continue;
                 }
                 let member_pos = self.initial_window_location + *offset;
-                data.space.map_element(member.clone(), member_pos, false);
+                data.map_window(member.clone(), member_pos, false);
             }
-            data.space
-                .map_element(self.window.clone(), self.initial_window_location, false);
+            data.map_window(self.window.clone(), self.initial_window_location, false);
 
             // Output crossing always invalidates blur (different camera/zoom,
             // different background sample region).
@@ -423,7 +426,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            output_state(&self.output).edge_pan_velocity = None;
+            data.clear_edge_pan(&self.output);
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
                 if member.alive() {
@@ -434,14 +437,56 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
         }
     }
 
-    fn unset(&mut self, _data: &mut DriftWm) {
-        output_state(&self.output).edge_pan_velocity = None;
+    fn unset(&mut self, data: &mut DriftWm) {
+        data.clear_edge_pan(&self.output);
     }
 
     crate::grabs::forward_pointer_grab_methods!();
 }
 
 impl MoveSurfaceGrab {
+    /// Screen-pinned move: track the cursor/finger at canvas-space `location`
+    /// with a fixed screen-space offset onto `output`. No snap / cluster /
+    /// edge-pan. The pointer path passes the cursor's output (free
+    /// multi-monitor move); touch passes the grab's own (a concurrent mouse
+    /// nudge must not teleport the window under the finger).
+    fn apply_pinned_move(
+        &mut self,
+        data: &mut DriftWm,
+        location: Point<f64, Logical>,
+        grab_offset: Point<f64, Logical>,
+        output: Output,
+    ) {
+        let (camera, zoom) = {
+            let os = output_state(&output);
+            (os.camera, os.zoom)
+        };
+        let cursor_screen = canvas_to_screen(CanvasPos(location), camera, zoom).0;
+        let new_screen = cursor_screen + grab_offset;
+        let new_screen_pos =
+            Point::from((new_screen.x.round() as i32, new_screen.y.round() as i32));
+        self.output = output.clone();
+        // Guarded: the pin may have been toggled off mid-drag, and an
+        // unconditional set_pin would silently re-pin.
+        if data.stage.is_pinned(&self.window) {
+            data.stage.set_pin(
+                &self.window,
+                driftwm::stage::PinnedSite {
+                    output: output.name(),
+                    screen_pos: new_screen_pos,
+                },
+            );
+        }
+        let canvas = screen_to_canvas(ScreenPos(new_screen_pos.to_f64()), camera, zoom)
+            .0
+            .to_i32_round();
+        data.map_window(self.window.clone(), canvas, false);
+        if self.last_mapped_loc != Some(canvas) {
+            data.render.blur_geometry_generation += 1;
+            self.last_mapped_loc = Some(canvas);
+        }
+    }
+
     /// Reposition the primary window (and any cluster members) to follow the
     /// cursor/finger at canvas-space `location`, applying magnetic snap. Returns
     /// `false` if the window surface is gone (caller should skip forwarding).
@@ -545,9 +590,9 @@ impl MoveSurfaceGrab {
                 continue;
             }
             let member_pos = new_loc + *offset;
-            data.space.map_element(member.clone(), member_pos, false);
+            data.map_window(member.clone(), member_pos, false);
         }
-        data.space.map_element(self.window.clone(), new_loc, false);
+        data.map_window(self.window.clone(), new_loc, false);
 
         // Sub-pixel motion that resolves to the same integer canvas position
         // doesn't actually shift the window, so blurred neighbours don't need
@@ -598,7 +643,7 @@ impl MoveSurfaceGrab {
                 velocity
             };
 
-            output_state(&self.output).edge_pan_velocity = effective_velocity;
+            data.update_edge_pan_request(&self.output, effective_velocity, screen_pos);
         }
     }
 }
@@ -631,7 +676,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         // leak out of grab routing.
         if event.slot == self.touch_start.as_ref().expect("touch move grab").slot {
             // Stop edge-panning now that the controlling finger lifted.
-            output_state(&self.output).edge_pan_velocity = None;
+            data.clear_edge_pan(&self.output);
             data.touch_state.edge_pan = None;
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
@@ -654,6 +699,13 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         seq: Serial,
     ) {
         if event.slot != self.touch_start.as_ref().expect("touch move grab").slot {
+            handle.motion(data, None, event, seq);
+            return;
+        }
+        // Pinned windows ignore the camera, so no edge-pan either.
+        if let Some(grab_offset) = self.pinned_grab_offset {
+            let output = self.output.clone();
+            self.apply_pinned_move(data, event.location, grab_offset, output);
             handle.motion(data, None, event, seq);
             return;
         }
@@ -695,7 +747,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         handle: &mut TouchInnerHandle<'_, DriftWm>,
         seq: Serial,
     ) {
-        output_state(&self.output).edge_pan_velocity = None;
+        data.clear_edge_pan(&self.output);
         handle.cancel(data, seq);
         handle.unset_grab(self, data);
     }
@@ -725,7 +777,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut DriftWm) {
-        output_state(&self.output).edge_pan_velocity = None;
+        data.clear_edge_pan(&self.output);
         data.touch_state.edge_pan = None;
     }
 }

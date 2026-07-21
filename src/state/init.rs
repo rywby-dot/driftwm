@@ -59,6 +59,23 @@ impl DriftWm {
         loop_handle: LoopHandle<'static, DriftWm>,
         loop_signal: LoopSignal,
     ) -> Self {
+        Self::new_with_config(
+            dh,
+            loop_handle,
+            loop_signal,
+            driftwm::config::Config::load_collect(),
+        )
+    }
+
+    /// Construct with an explicit config tuple instead of reading the user's
+    /// `config.toml`. The seam the in-process test harness builds on: it feeds a
+    /// parsed config so a live session's real config file never touches a test.
+    pub fn new_with_config(
+        dh: DisplayHandle,
+        loop_handle: LoopHandle<'static, DriftWm>,
+        loop_signal: LoopSignal,
+        config: (driftwm::config::Config, Vec<String>),
+    ) -> Self {
         // Scan system fonts off-thread so the first SSD title bar doesn't block
         // the event loop on a cold ~1s `FontSystem::new()`. The scan pings the
         // loop on completion to mark outputs dirty: udev renders are VBlank-gated,
@@ -181,10 +198,7 @@ impl DriftWm {
         let background_effect_state =
             smithay::wayland::background_effect::BackgroundEffectState::new::<Self>(&dh);
 
-        let (mut config, config_errors) = {
-            let (c, errs) = driftwm::config::Config::load_collect();
-            (c, errs)
-        };
+        let (mut config, config_errors) = config;
         let mut init_errors: BTreeMap<ErrorSource, String> = BTreeMap::new();
         if let Some(msg) = super::errors::summarize_config_errors(&config_errors) {
             init_errors.insert(ErrorSource::Config, msg);
@@ -253,6 +267,7 @@ impl DriftWm {
             display_handle: dh,
             loop_handle,
             loop_signal,
+            stage: driftwm::stage::Stage::new(),
             space: Space::default(),
             popups: PopupManager::default(),
             compositor_state,
@@ -266,8 +281,9 @@ impl DriftWm {
             dnd_icon: None,
             backend: None,
             ipc_server: None,
+            ipc_subscribers: Vec::new(),
+            ipc_last_event_hash: None,
             decorations: HashMap::new(),
-            pinned: HashMap::new(),
             pending_ssd: HashSet::new(),
             decoration_scale: 1,
             render: RenderCache::new(),
@@ -286,6 +302,7 @@ impl DriftWm {
             relative_pointer_state,
             keyboard_shortcuts_inhibit_state,
             virtual_keyboard_state,
+            virtual_kb_bindings: Default::default(),
             security_context_state,
             idle_inhibit_state,
             idle_inhibiting_surfaces: HashSet::new(),
@@ -313,6 +330,7 @@ impl DriftWm {
             session_lock: SessionLock::Unlocked,
             lock_surfaces: HashMap::new(),
             pointer_over_layer: false,
+            pointer_over_screen_space: false,
             canvas_layers: Vec::new(),
             config,
             pending_center: HashSet::new(),
@@ -322,8 +340,6 @@ impl DriftWm {
             auto_anchor_snapshot: HashMap::new(),
             pending_recenter: HashMap::new(),
             stable_snap_rects: HashMap::new(),
-            focus_history: Vec::new(),
-            cycle_state: None,
             window_focus: None,
             on_demand_layer: None,
             popup_grab: None,
@@ -336,7 +352,6 @@ impl DriftWm {
             gesture_state: None,
             pending_middle_click: None,
             momentum_timer: None,
-            fullscreen: HashMap::new(),
             session: None,
             input_devices: Vec::new(),
             state_file_cameras: HashMap::new(),
@@ -346,7 +361,9 @@ impl DriftWm {
             state_file_windows: Vec::new(),
             state_file_layer_count: 0,
             state_file_pinned: Vec::new(),
+            state_file_canvas_layers: Vec::new(),
             state_file_fullscreen: Vec::new(),
+            state_file_active_output: None,
             autostart,
             active_outputs: HashSet::new(),
             redraws_needed: HashSet::new(),
@@ -358,7 +375,7 @@ impl DriftWm {
             commits_since_render: 0,
             focused_output: None,
             gesture_output: None,
-            gesture_exited_fullscreen: None,
+            pre_exited_fullscreen: None,
             disconnected_outputs: HashSet::new(),
             output_config_dirty: false,
             pending_mode_changes: HashMap::new(),
@@ -366,6 +383,8 @@ impl DriftWm {
             udev_device: None,
             last_titlebar_click: None,
             hot_corners_armed: HashMap::new(),
+            pending_click_navigate: None,
+            click_navigate_timer: None,
             errors: init_errors,
             cursor_edge_pan: edge_pan_cursor,
             touch_state: crate::input::touch::TouchState::new(),

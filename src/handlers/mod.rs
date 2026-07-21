@@ -14,7 +14,7 @@ use smithay::{
     delegate_pointer_constraints, delegate_pointer_gestures, delegate_presentation,
     delegate_primary_selection, delegate_relative_pointer, delegate_seat,
     delegate_security_context, delegate_single_pixel_buffer, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_viewporter, delegate_xdg_activation,
     input::{
         Seat, SeatHandler, SeatState,
         dnd::{self, DnDGrab},
@@ -112,7 +112,7 @@ impl SeatHandler for DriftWm {
         set_primary_focus(dh, seat, client);
 
         // Update focus history (skip during Alt-Tab cycling — history is frozen)
-        if self.cycle_state.is_none()
+        if self.stage.cycle_state().is_none()
             && let Some(focus) = focused
         {
             self.update_focus_history(&focus.0);
@@ -256,14 +256,16 @@ impl XdgActivationHandler for DriftWm {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Same client activating itself (e.g. Telegram switching chats) — cancel loading cursor
-        if let Some(req_surface) = &token_data.surface {
+        let self_activation = token_data.surface.as_ref().is_some_and(|req_surface| {
             let req_client = self.display_handle.get_client(req_surface.id()).ok();
             let act_client = self.display_handle.get_client(surface.id()).ok();
-            if req_client.is_some() && req_client == act_client {
-                self.cursor.exec_cursor_show_at = None;
-                self.cursor.exec_cursor_deadline = None;
-            }
+            req_client.is_some() && req_client == act_client
+        });
+
+        // Same client activating itself (e.g. Telegram switching chats) — cancel loading cursor
+        if self_activation {
+            self.cursor.exec_cursor_show_at = None;
+            self.cursor.exec_cursor_deadline = None;
         }
 
         // Only honor tokens created from user input (has a serial).
@@ -272,15 +274,18 @@ impl XdgActivationHandler for DriftWm {
         if token_data.serial.is_none() {
             return;
         }
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&surface))
-            .cloned();
+        let window = self.window_for_surface(&surface);
         if let Some(window) = window {
             // Skip windows that haven't rendered yet — navigate_to_window on a
             // zero-sized window sets a fractional camera that breaks cascade.
             if window.geometry().size.w == 0 || window.geometry().size.h == 0 {
+                return;
+            }
+            // Chromium mints its activation token from the enter serial it was
+            // just handed, so under focus-follows-mouse a mere hover could
+            // self-activate and pan the camera onto a clipped window. Tokens
+            // from another client (e.g. a notification daemon) still navigate.
+            if self_activation && self.window_already_active(&window) {
                 return;
             }
             self.activate_window_output_local(&window);
@@ -343,13 +348,9 @@ impl PointerConstraintsHandler for DriftWm {
         // recreates its lock (Wine/Proton does this constantly), motion events
         // delivered during the gap reach the surface with stale surface-local
         // coordinates and the game snaps the camera back.
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(surface))
-            .cloned();
+        let window = self.window_for_surface(surface);
         if let Some(window) = window
-            && let Some(loc) = self.space.element_location(&window)
+            && let Some(loc) = self.stage.position_of(&window)
         {
             pointer.set_location(loc.to_f64() + location);
         }
@@ -409,7 +410,47 @@ impl SecurityContextHandler for DriftWm {
     }
 }
 delegate_security_context!(DriftWm);
-delegate_virtual_keyboard_manager!(DriftWm);
+
+// Replaces smithay's virtual-keyboard delegate so OSK key presses run through
+// compositor bindings first (see `protocols::virtual_keyboard`).
+impl driftwm::protocols::virtual_keyboard::VirtualKeyboardBindingHandler for DriftWm {
+    fn virtual_keyboard_bindings(
+        &mut self,
+    ) -> &mut driftwm::protocols::virtual_keyboard::VirtualKeyboardBindings {
+        &mut self.virtual_kb_bindings
+    }
+
+    fn virtual_key_binding(
+        &mut self,
+        modifiers: &keyboard::ModifiersState,
+        sym: keyboard::Keysym,
+    ) -> bool {
+        // While locked, the lock surface owns all input (an OSK may well be
+        // typing the password); bindings stay off, everything forwards.
+        if !matches!(self.session_lock, crate::state::SessionLock::Unlocked) {
+            return false;
+        }
+        // Respect the focused window's pass_keys rule, as the physical path
+        // does: a combo the window claims forwards even when bound.
+        let pass_keys = self.focused_window().and_then(|w| {
+            let app_id = w.app_id_or_class().unwrap_or_default();
+            let title = w.window_title().unwrap_or_default();
+            self.config
+                .resolve_window_rules(&app_id, &title)
+                .map(|r| r.pass_keys)
+        });
+        if pass_keys.is_some_and(|pk| pk.allows_raw(modifiers, sym)) {
+            return false;
+        }
+        let Some(action) = self.config.lookup(modifiers, sym) else {
+            return false;
+        };
+        let action = action.clone();
+        self.execute_action(&action);
+        true
+    }
+}
+driftwm::delegate_virtual_keyboard_bindings!(DriftWm);
 
 impl InputMethodHandler for DriftWm {
     fn new_popup(&mut self, surface: PopupSurface) {
@@ -433,8 +474,8 @@ impl InputMethodHandler for DriftWm {
     fn popup_repositioned(&mut self, _surface: PopupSurface) {}
 
     fn parent_geometry(&self, parent: &WlSurface) -> smithay::utils::Rectangle<i32, Logical> {
-        self.space
-            .elements()
+        self.stage
+            .windows()
             .find_map(|window| {
                 (window.wl_surface().as_deref() == Some(parent)).then(|| window.geometry())
             })
@@ -563,11 +604,7 @@ impl XdgDecorationHandler for DriftWm {
 
         if create_titlebar {
             self.pending_ssd.insert(wl_surface.id());
-            let window = self
-                .space
-                .elements()
-                .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-                .cloned();
+            let window = self.window_for_surface(&wl_surface);
             if let Some(window) = window {
                 let geo = window.geometry();
                 if geo.size.w > 0 && !self.decorations.contains_key(&wl_surface.id()) {
@@ -613,22 +650,14 @@ impl ForeignToplevelHandler for DriftWm {
     }
 
     fn activate(&mut self, wl_surface: WlSurface) {
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             self.activate_window_output_local(&window);
         }
     }
 
     fn close(&mut self, wl_surface: WlSurface) {
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             window.send_close();
         }
@@ -640,11 +669,7 @@ impl ForeignToplevelHandler for DriftWm {
             self.pending_fullscreen.insert(wl_surface, client_output);
             return;
         }
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             let target = self.resolve_fullscreen_output(&wl_surface, client_output);
             self.enter_fullscreen(&window, target);
@@ -663,11 +688,7 @@ impl ForeignToplevelHandler for DriftWm {
             self.pending_fit.insert(wl_surface);
             return;
         }
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             self.decoration_fit(&window);
         }
@@ -675,11 +696,7 @@ impl ForeignToplevelHandler for DriftWm {
 
     fn unset_maximized(&mut self, wl_surface: WlSurface) {
         self.pending_fit.remove(&wl_surface);
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             self.decoration_unfit(&window);
         }
@@ -798,8 +815,8 @@ impl ToplevelCaptureSourceHandler for DriftWm {
         let kind = match driftwm::protocols::foreign_toplevel::surface_for_ext_handle(&toplevel) {
             Some(surface) => {
                 let initial_size = self
-                    .space
-                    .elements()
+                    .stage
+                    .windows()
                     .find(|w| w.wl_surface().as_deref() == Some(&surface))
                     .map(|w| {
                         let geo = w.geometry().size;
@@ -945,13 +962,8 @@ impl OutputManagementHandler for DriftWm {
         // Phase 2: commit. Validation already succeeded for every head.
         for s in staged {
             if let Some(intent) = s.mode_intent {
-                self.pending_mode_changes.insert(
-                    s.output_name.clone(),
-                    crate::state::PendingMode {
-                        intent,
-                        retry_count: 0,
-                    },
-                );
+                self.pending_mode_changes
+                    .insert(s.output_name.clone(), intent);
             }
 
             if let Some(pos) = s.new_position {
@@ -1008,6 +1020,8 @@ impl SessionLockHandler for DriftWm {
             let mut os = crate::state::output_state(&output);
             os.momentum.stop();
             os.edge_pan_velocity = None;
+            os.edge_pan_screen_pos = None;
+            os.edge_pan_delay = None;
             os.panning = false;
             os.camera_target = None;
             os.zoom_target = None;
@@ -1015,9 +1029,12 @@ impl SessionLockHandler for DriftWm {
         }
         self.held_action = None;
         self.cursor.grab_cursor = false;
+        // Withheld touch events must never reach an app beneath the lock
+        // surface — their deadline timer would otherwise replay them mid-lock.
+        self.discard_touch_holdback();
         // Lock may swallow key releases and prevents focus history updates while
         // mid-cycle; reset these so none survive the locked window.
-        self.cycle_state = None;
+        self.stage.cancel_cycle();
         self.suppressed_keys.clear();
         self.tap.reset();
         if let Some(pending) = self.pending_middle_click.take() {
