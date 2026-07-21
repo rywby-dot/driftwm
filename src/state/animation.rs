@@ -176,24 +176,74 @@ impl DriftWm {
         }
 
         let was_focused = self.focused_window().as_ref() == Some(window);
+        let next_focus = was_focused.then(|| {
+            // Resolve the target while the closing window is still mapped: its
+            // output and stable geometry are needed by the normal close policy.
+            let follow = close_window
+                .parent_surface()
+                .and_then(|surface| {
+                    let parent = self.window_for_surface(&surface)?;
+                    Some(
+                        self.topmost_modal_child(&parent)
+                            .filter(|child| child != &close_window)
+                            .unwrap_or(parent),
+                    )
+                })
+                .or_else(|| self.first_spatially_related_in_history(&close_window))
+                .filter(|target| {
+                    self.config.auto_navigate_on_close || self.window_fully_in_viewport(target)
+                });
+
+            if let Some(target) = follow {
+                let navigate = !self.window_fully_in_viewport(&target);
+                return Some((target, navigate));
+            }
+
+            let output = self
+                .output_for_window(&close_window)
+                .or_else(|| self.active_output());
+            let mru = self
+                .stage
+                .focus_history()
+                .iter()
+                .find(|target| *target != &close_window)
+                .cloned();
+            match (output.as_ref(), mru) {
+                (Some(output), Some(target))
+                    if self.window_intersects_viewport_on(&target, output) =>
+                {
+                    Some((target, false))
+                }
+                (Some(output), _) => {
+                    let center = self.window_visual_center(&close_window).unwrap_or_else(|| {
+                        let loc = self.stage.position_of(&close_window).unwrap_or_default();
+                        let size = close_window.geometry().size;
+                        Point::from((
+                            loc.x as f64 + size.w as f64 / 2.0,
+                            loc.y as f64 + size.h as f64 / 2.0,
+                        ))
+                    });
+                    self.nearest_visible_window_on(center, output, &close_window)
+                        .map(|target| (target, false))
+                }
+                (None, _) => None,
+            }
+        });
         self.unmap_window(window);
         close_window.send_close();
 
         if was_focused {
-            let next = self.stage.focus_history().first().cloned();
-            if let Some(next) = next {
-                if self.config.auto_navigate_on_close {
-                    self.navigate_to_window(&next, false);
-                } else if self.window_fully_in_viewport(&next) {
-                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                    self.raise_and_focus(&next, serial);
-                } else {
-                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            match next_focus.flatten() {
+                Some((target, true)) => {
+                    self.navigate_to_window(&target, false);
+                }
+                Some((target, false)) => {
+                    self.raise_and_focus(&target, serial);
+                }
+                None => {
                     self.set_window_focus(None, serial);
                 }
-            } else {
-                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                self.set_window_focus(None, serial);
             }
         }
         self.refresh_pointer_focus();
