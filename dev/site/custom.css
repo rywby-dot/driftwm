@@ -5,6 +5,7 @@
 
 .light,
 html:not(.js) {
+    --sidebar-bg: #fff;
     --sidebar-active: #000;
     --links: #000;
     --inline-code-color: #000;
@@ -13,6 +14,9 @@ html:not(.js) {
     --warning-border: #888;
     --searchresults-li-bg: #eee;
     --search-mark-bg: #ccc;
+    --sidebar-header-border-color: transparent;
+    --footnote-highlight: #ccc;
+    --copy-button-filter-hover: invert(0%);
 }
 
 .coal {
@@ -59,6 +63,9 @@ html:not(.js) {
     --color-scheme: dark;
 
     --copy-button-filter: invert(60%);
+    --copy-button-filter-hover: invert(100%);
+    --sidebar-header-border-color: transparent;
+    --footnote-highlight: #444;
 }
 
 /* mdBook 0.5.4: toc.js builds the themed sidebar inline but never hides the
