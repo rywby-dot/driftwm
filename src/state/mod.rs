@@ -249,9 +249,6 @@ pub enum ModeIntent {
     Max,
 }
 
-/// Per-output viewport state, stored on each `Output` via `UserDataMap`
-/// (wrapped in `Mutex` since `UserDataMap` requires `Sync`). !Send fields
-/// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
 #[derive(Clone, Copy, Debug)]
 pub struct ZoomAnimationAnchor {
     pub canvas: Point<f64, Logical>,
@@ -264,6 +261,9 @@ pub(crate) struct EdgePanDelay {
     pub(crate) entered_at: Instant,
 }
 
+/// Per-output viewport state, stored on each `Output` via `UserDataMap`
+/// (wrapped in `Mutex` since `UserDataMap` requires `Sync`). !Send fields
+/// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
 #[derive(Clone)]
 pub struct OutputState {
     pub camera: Point<f64, Logical>,
