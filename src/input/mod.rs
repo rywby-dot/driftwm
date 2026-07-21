@@ -354,6 +354,21 @@ impl DriftWm {
         self.stage.windows().any(|w| w.suspended().is_some())
     }
 
+    /// Whether an opaque suspended stand-in is the topmost element at `canvas_pos`.
+    /// It terminates the pointer cascade with no focus — a client beneath must
+    /// not receive enter/hover. Shared by the real-motion path and the deferred
+    /// resync path so the two occlusion checks can't drift.
+    pub(crate) fn suspended_occludes(
+        &self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> bool {
+        self.any_suspended()
+            && matches!(
+                self.decoration_under(canvas_pos),
+                Some((DecoTarget::Suspended(_), _))
+            )
+    }
+
     /// Hit-test the pointer against all surface layers in z-order. Sets
     /// `self.pointer_over_layer` and `self.pointer_over_screen_space` as side
     /// effects. The caller is responsible for issuing `pointer.motion()` /
@@ -397,12 +412,7 @@ impl DriftWm {
         // cascade: it owns no surface (no pointer focus), and nothing beneath —
         // wallpaper, canvas layer, widget, or window — is reachable. Its clicks
         // are routed through the decoration channel, not surface focus.
-        if self.any_suspended()
-            && matches!(
-                self.decoration_under(canvas_pos),
-                Some((DecoTarget::Suspended(_), _))
-            )
-        {
+        if self.suspended_occludes(canvas_pos) {
             self.pointer_over_layer = false;
             self.pointer_over_screen_space = false;
             return None;

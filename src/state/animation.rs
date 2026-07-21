@@ -58,12 +58,7 @@ impl DriftWm {
             // warp/resync ending over one resolves to no focus, matching what a
             // real motion's cascade (`pointer_focus_under`) computes — otherwise
             // the hidden client gets a stray enter/hover.
-            if self.stage.windows().any(|w| w.suspended().is_some())
-                && matches!(
-                    self.decoration_under(canvas_pos),
-                    Some((crate::input::DecoTarget::Suspended(_), _))
-                )
-            {
+            if self.suspended_occludes(canvas_pos) {
                 return None;
             }
             self.surface_under(canvas_pos, Some(false))
