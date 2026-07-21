@@ -1001,7 +1001,7 @@ impl Default for OutputOutlineSettings {
 }
 
 /// Per-output configuration from `[[outputs]]` config sections.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutputConfig {
     pub name: String,
     pub scale: Option<f64>,
@@ -1060,7 +1060,7 @@ impl Default for HotCorners {
 }
 
 impl HotCorners {
-    /// Default activation zone radius in logical pixels. Tuned for trackpad
+    /// Default activation zone size in logical pixels. Tuned for trackpad
     /// precision: small enough not to eat normal cursor travel, large enough
     /// to catch a deliberate flick to a corner.
     pub const DEFAULT_THRESHOLD: f64 = 4.0;

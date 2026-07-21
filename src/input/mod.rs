@@ -123,18 +123,18 @@ impl DriftWm {
     /// `screen_pos` is output-local screen-space. `output` is the output the
     /// cursor is on (the caller knows — for absolute motion it's `active_output()`,
     /// for relative motion it's the one we computed from `output_at_layout_pos`).
-    fn check_hot_corners(
+    pub(crate) fn check_hot_corners(
         &mut self,
         output: &smithay::output::Output,
         screen_pos: Point<f64, smithay::utils::Logical>,
     ) {
         let output_name = output.name();
         let Some(cfg) = self.config.output_config(&output_name) else {
-            self.hot_corners_latched.remove(output);
+            self.hot_corner_latch = None;
             return;
         };
         if cfg.hot_corners.bindings.is_empty() {
-            self.hot_corners_latched.remove(output);
+            self.hot_corner_latch = None;
             return;
         }
 
@@ -152,18 +152,20 @@ impl DriftWm {
         .into_iter()
         .find(|c| c.contains(screen_pos.x, screen_pos.y, out_w, out_h, threshold));
 
-        let previous_latch = self.hot_corners_latched.get(output).copied();
-        let mut latched = previous_latch;
+        // A latch on another output is inherently stale here — the pointer has
+        // left that output's corners — so this output's previous view is the
+        // stored corner only when the slot names this output.
+        let (previous_view, slot_is_other_output) = match &self.hot_corner_latch {
+            Some((o, corner)) if o == output => (Some(*corner), false),
+            Some(_) => (None, true),
+            None => (None, false),
+        };
+        let mut latched = previous_view;
         let entered = advance_hot_corner_latch(&mut latched, active_corner);
-        if latched != previous_latch {
-            match latched {
-                Some(corner) => {
-                    self.hot_corners_latched.insert(output.clone(), corner);
-                }
-                None => {
-                    self.hot_corners_latched.remove(output);
-                }
-            }
+        // Skip the store (and its Output clone) while the pointer idles inside or
+        // outside a corner on the same output; still overwrite a stale slot.
+        if latched != previous_view || slot_is_other_output {
+            self.hot_corner_latch = latched.map(|c| (output.clone(), c));
         }
 
         let Some(entered) = entered else {
@@ -250,6 +252,10 @@ impl DriftWm {
                     self.on_pointer_motion_absolute::<I>(event)
                 }
                 InputEvent::PointerButton { event } => {
+                    self.track_held_button(
+                        PointerButtonEvent::button_code(&event),
+                        PointerButtonEvent::state(&event),
+                    );
                     let pointer = self.seat.get_pointer().unwrap();
                     pointer.button(
                         self,
@@ -620,9 +626,7 @@ impl DriftWm {
         pointer.frame(self);
         self.update_decoration_cursor(canvas_pos);
         self.update_pointer_constraint(old_focus);
-        if let Some(out) = self.active_output() {
-            self.check_hot_corners(&out, screen_pos);
-        }
+        self.check_hot_corners(&output, screen_pos);
         self.maybe_hover_focus(canvas_pos);
         self.refresh_cursor_edge_pan();
     }
