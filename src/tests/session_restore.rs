@@ -222,8 +222,7 @@ fn restore_flip_on_drops_carried_quit_for_relaunched_app() {
 
 /// Count-matched dedup: flipping restore on drops a carried quit record only for
 /// an app that actually came back. An app carried but not relaunched survives to
-/// the next boot — flipping the flag mustn't destroy it (that's what flipping it
-/// while the compositor was off would have preserved and materialized).
+/// the next boot, unaffected by the flag flip.
 #[test]
 fn restore_flip_on_preserves_unrelaunched_carried_quit() {
     let cache = TempDir::new();

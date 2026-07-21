@@ -603,11 +603,9 @@ impl DriftWm {
         };
         let id = s.id;
 
-        // Held-modifier bindings beat chrome, mirroring the live-window ordering:
-        // a modifier move/resize grabs the stand-in, other modifier bindings defer
-        // to normal dispatch. A bare binding does NOT beat chrome — the whole
-        // opaque frame acts like a title bar, so it falls through to the chrome
-        // handling below.
+        // A held-modifier move/resize binding grabs the stand-in; other modifier
+        // bindings defer to normal dispatch. A bare binding does NOT beat chrome —
+        // the opaque frame acts like a title bar.
         let (binding, modifier_binding) =
             self.modifier_button_binding(&mods, button, BindingContext::OnWindow);
         match binding {
@@ -1133,8 +1131,8 @@ impl DriftWm {
                         self.drift_pan(canvas_delta, Event::time_msec(&event));
                         let new_pos = pos + canvas_delta;
                         let serial = SERIAL_COUNTER.next_serial();
-                        // Suspended-aware cascade: a stand-in slid under the cursor
-                        // by the pan yields no focus, matching a real motion.
+                        // Suspended-aware cascade: a stand-in under the panned
+                        // cursor yields no focus, matching a real motion.
                         let screen_pos =
                             canvas_to_screen(CanvasPos(new_pos), self.camera(), self.zoom()).0;
                         let under = self.pointer_focus_under(screen_pos, new_pos);

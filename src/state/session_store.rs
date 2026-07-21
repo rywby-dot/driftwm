@@ -207,11 +207,9 @@ impl DriftWm {
             }
         }
 
-        // Carried-forward entries lead so freshly-active windows restore on top.
         // With restore on, a relaunched app is serialized live above, so drop one
-        // carried quit record per live window of the same app (count-matched):
-        // the live canvas is authoritative only for the apps it actually holds.
-        // Unmatched carries — and every explicit carry — survive to the next boot.
+        // carried quit record per live window of the same app (count-matched) —
+        // unmatched carries, and every explicit carry, survive to the next boot.
         let mut entries: Vec<SessionEntry> = Vec::new();
         for carried in &self.session_store.carried_forward {
             if include_live

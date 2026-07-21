@@ -354,10 +354,9 @@ impl DriftWm {
         self.stage.windows().any(|w| w.suspended().is_some())
     }
 
-    /// Whether an opaque suspended stand-in is the topmost element at `canvas_pos`.
-    /// It terminates the pointer cascade with no focus — a client beneath must
-    /// not receive enter/hover. Shared by the real-motion path and the deferred
-    /// resync path so the two occlusion checks can't drift.
+    /// Whether an opaque suspended stand-in is the topmost element at `canvas_pos` —
+    /// a client beneath must not receive enter/hover. Shared by the real-motion
+    /// and deferred-resync paths so the two occlusion checks can't drift.
     pub(crate) fn suspended_occludes(
         &self,
         canvas_pos: Point<f64, smithay::utils::Logical>,
@@ -1613,10 +1612,9 @@ impl DriftWm {
         if crate::decorations::close_button_contains(pos, loc, size.w, bar) {
             return Some(DecorationHit::CloseButton);
         }
-        // The whole bar band above the body is a drag-to-move target, including
-        // the padding strip right of the close button (handled just above). The
-        // stand-in draws chrome across its full width, so no drawn sliver falls
-        // through to a window beneath.
+        // The whole bar band, including the padding strip right of the close
+        // button, is a drag target — the stand-in draws chrome across its full
+        // width, so no sliver falls through to a window beneath.
         if pos.y >= (loc.y - bar) as f64
             && pos.y < loc.y as f64
             && pos.x >= loc.x as f64

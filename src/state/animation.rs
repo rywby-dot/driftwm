@@ -54,10 +54,8 @@ impl DriftWm {
                 ],
             )
         } else {
-            // An opaque suspended stand-in occludes any client beneath it: a
-            // warp/resync ending over one resolves to no focus, matching what a
-            // real motion's cascade (`pointer_focus_under`) computes — otherwise
-            // the hidden client gets a stray enter/hover.
+            // A resync landing on a stand-in must yield no focus, matching
+            // pointer_focus_under — otherwise the hidden client gets a stray enter.
             if self.suspended_occludes(canvas_pos) {
                 return None;
             }
