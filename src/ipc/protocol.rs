@@ -219,8 +219,9 @@ pub struct OutputFullscreen {
     pub title: String,
 }
 
-/// A screen-pinned window in the IPC `state` reply. `position` is the
-/// output-relative top-left in screen pixels (Y-down); `size` in pixels.
+/// A screen-pinned window in the IPC `state` reply. `position` is the window
+/// center in rule coordinates (output-center origin, Y-up) — the numbers a
+/// `pinned_to_screen` rule's `position` takes; `size` in pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputPinned {
     pub id: u64,

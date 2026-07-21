@@ -3,6 +3,15 @@
 Window rules let you apply per-window overrides based on a window's identity.
 Rules are declared as `[[window_rules]]` sections in your config file.
 
+Most rule effects — position, size, opacity, decoration, borders, widget,
+pinned, output, … — are resolved **once, when a window maps**: reloading your
+config only affects windows opened afterwards, and a window that changes its
+title after mapping is **not** re-checked against `title` rules. Two things
+re-resolve live against the current config instead: `pass_keys` is evaluated per
+keypress (so a config reload — and a title change — takes effect immediately),
+and layer-surface chrome is evaluated per frame (so a config reload takes effect
+immediately).
+
 ## How matching works
 
 **All matching rules are applied, not just the first one.** Rules are processed
@@ -105,21 +114,19 @@ floating overlay.
 
 #### Finding a pinned window's position and size
 
-`position`/`size` are screen-space. The easiest way is to pin the window live,
-drag it where you want, then read the numbers back to bake into a rule:
+`driftwm msg state` already reports a pinned window's `position`/`size` in rule
+coordinates, so the flow is: pin the window live, place it, and copy the numbers
+straight into a rule:
 
 1. Open the window (e.g. start Picture-in-Picture), click it to focus, and press
    `Mod+T` to pin it. It's now in screen space — drag it anywhere with the mouse
    and resize to taste.
-2. Once it sits where you want, press `Mod+A` (home) to bring the viewport to the
-   canvas origin at zoom 1.0. The pinned window stays put on screen.
-3. Press `Mod+T` again to unpin. At home the window drops back onto the canvas at
-   the same on-screen spot, and one canvas unit is one screen pixel, so its
-   canvas coords now equal its screen position.
-4. Run `driftwm msg state` and copy the window's `app_id`, `title`, `position`,
-   and `size`.
-5. Write the rule with those values plus `pinned_to_screen = true` (and
-   `decoration = "none"` for a chrome-free PiP surface).
+2. Run `driftwm msg state` and read the `pinned` section: each entry lists its
+   output, `app_id`, `title`, `position`, and `size`. Those `position`/`size`
+   values are already output-relative rule coordinates.
+3. Write the rule with those `position`/`size` values plus
+   `pinned_to_screen = true` (and `decoration = "none"` for a chrome-free PiP
+   surface).
 
 ```toml
 [[window_rules]]
@@ -130,17 +137,17 @@ size             = [570, 320]
 decoration       = "none"
 ```
 
-You have to unpin before reading (step 3): pinned windows live in screen space,
-not on the canvas, so — like layer-shell panels — they're deliberately absent
-from `driftwm msg state` and canvas screenshots. If you run top/bottom bars,
-`Mod+A` centers the _usable_ area rather than the raw output, so the result can
-sit a little off — nudge `position` to taste.
+Pinned windows stay absent from the canvas `windows=` inventory and from canvas
+screenshots (`driftwm msg screenshot`) — like layer-shell panels, they live in
+screen space, not on the canvas. They appear in their own per-output `pinned`
+section of `driftwm msg state` instead, which is where the copy-ready numbers
+come from.
 
-### Fullscreen output
+### Output selection
 
-On a multi-monitor setup, `output` chooses which monitor a window fullscreens
-onto, by output name (e.g. `"DP-1"` — find names under `outputs.*` in
-`driftwm msg state`):
+On a multi-monitor setup, `output` names a monitor by its output name (e.g.
+`"DP-1"` — find names under `outputs.*` in `driftwm msg state`). It governs two
+placements:
 
 ```toml
 [[window_rules]]
@@ -148,11 +155,17 @@ app_id = "steam_app_*"
 output = "DP-1"
 ```
 
-Precedence when a window goes fullscreen: the rule's `output` wins; otherwise the
-output the client itself requested; otherwise the active output (where the
-pointer is). An unknown or disconnected output name falls through to the next
-choice. `output` only affects fullscreen — it does not move a windowed or
-screen-pinned window.
+- **Fullscreen** — which monitor a window fullscreens onto. Precedence: the
+  rule's `output` wins; otherwise the output the client itself requested;
+  otherwise the active output (where the pointer is).
+- **Screen-pinned** — which monitor a `pinned_to_screen` window *initially* pins
+  to. Precedence: the rule's `output` wins; otherwise the active output. The
+  rule's `position` is then resolved against that monitor. Afterwards, dragging
+  the window across monitors — or `send-to-output` — reassigns it, so `output`
+  only seeds the starting display.
+
+An unknown or disconnected output name falls through to the next choice.
+`output` does not move a plain windowed (non-fullscreen, non-pinned) window.
 
 ### Layer-shell surfaces
 
