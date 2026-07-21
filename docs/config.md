@@ -993,7 +993,7 @@ Per-output configuration. Each [[outputs]] entry matches by connector name. Find
 
 `mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the default, and the safe choice) uses the monitor's advertised preferred mode. "max" picks the highest resolution, then highest refresh. A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
 
-Fields (each [[outputs]] entry):
+Supported fields:
 
 - `name` — connector name, or "*" for the fallback entry (see above); required.
 - `scale` — fractional scale factor (default: 1.0).
@@ -1023,25 +1023,10 @@ Window rules: match windows and apply per-window overrides. ALL matching rules a
 
 This section is the field reference. The full recipe collection, along with matching/merge semantics and pattern-syntax details, lives in docs/window-rules.md.
 
-Match criteria (at least one required; all specified must match):
+Supported fields:
 
-- `app_id` — Wayland app_id. X11 apps proxied via xwayland-satellite arrive with app_id set from WM_CLASS instance (typically lowercase).
-- `title` — window title
-
-Pattern syntax (applies to all match fields):
-
-- `Plain string` — exact match: "kitty"
-- `Glob` — * wildcard:  "steam_app_*"
-- `Regex` — wrap in /…/: "/^steam_app_\\d+$/"
-
-To find a window's identifiers, run while the window is open:
-
-```text
-`driftwm msg state`
-```
-
-Effect fields:
-
+- `app_id` — match: Wayland app_id. X11 apps proxied via xwayland-satellite arrive with app_id set from WM_CLASS instance (typically lowercase). At least one of app_id/title is required; all specified criteria must match.
+- `title` — match: window title.
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
 - `size` — [width, height] initial window dimensions (one-shot; user/app can resize afterwards, so pair with widget = true to lock it)
 - `fullscreen` — true: force this window to open in fullscreen mode
@@ -1059,16 +1044,28 @@ Effect fields:
 - `border_color_focused` — per-window focused border color; same "#rrggbb[aa]" form, with an optional alpha byte.
 - `corner_radius` — per-window corner radius override (px). Affects content clip, border shape, and shadow. Ignored for decoration = "none".
 - `shadow` — per-window shadow toggle. Overrides [decorations] shadow. Ignored for decoration = "none".
-- `output` — output name (e.g. "DP-1") this window fullscreens onto. Takes precedence over the output the client itself requests. Omit to honor the client's request, then the active output. Find names under `outputs.*` in `driftwm msg state`. (default: unset)
+- `output` — output name (e.g. "DP-1") for this window's fullscreen and initial screen-pin placement. Fullscreen: the rule wins; otherwise the output the client requested; otherwise the active output. pinned_to_screen: the rule; otherwise the
+  - active output — with `position` resolved against it; dragging or send-to-output reassigns it afterward. Find names under `outputs.*` in `driftwm msg state`. (default: unset)
 - `pass_keys` — controls which compositor keybindings are forwarded to the app:
   - pass_keys = true — forward ALL keys (game-friendly)
   - pass_keys = ["mod+q", "ctrl+q"] — forward ONLY these combos; all other compositor shortcuts stay active
   - pass_keys = false / omit — compositor handles everything (default)
   - VT switching (Ctrl+Alt+F1–F12) — always stays in the compositor
+- `layer_order` — stacking among layer surfaces sharing the same wlr-layer (higher = on top; ties stack by map order, newest on top). The protocol has no z-index within a layer, so two overlay clients (e.g. an on-screen keyboard and a touch visualizer) otherwise stack by launch order. Also orders canvas-positioned layers among themselves. Ignored for regular windows.
+
+Pattern syntax (applies to all match fields):
+
+- `Plain string` — exact match: "kitty"
+- `Glob` — * wildcard:  "steam_app_*"
+- `Regex` — wrap in /…/: "/^steam_app_\\d+$/"
+
+To find a window's identifiers, run while the window is open:
+
+```text
+`driftwm msg state`
+```
 
 Layer-shell surfaces (panels, notifications, bars like waybar): matched by their namespace against `app_id`. `decoration` is ignored — layers have no decoration mode. Chrome (border_width, corner_radius, shadow) is field-by-field opt-in on the rule and does NOT inherit from [decorations]. Without explicit values on the rule, a layer surface has no border, no shadow, and no corner clip.
-
-- `layer_order` — stacking among layer surfaces sharing the same wlr-layer (higher = on top; ties stack by map order, newest on top). The protocol has no z-index within a layer, so two overlay clients (e.g. an on-screen keyboard and a touch visualizer) otherwise stack by launch order. Also orders canvas-positioned layers among themselves. Ignored for regular windows.
 
 A few representative rules follow; docs/window-rules.md collects the rest.
 

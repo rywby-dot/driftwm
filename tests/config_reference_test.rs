@@ -7,7 +7,7 @@
 //! `Config::from_toml("")`.
 
 use driftwm::config::Config;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const REFERENCE: &str = include_str!("../config.reference.toml");
 
@@ -193,21 +193,53 @@ fn reference_section(heading: &str) -> &'static str {
     &body[..end]
 }
 
-/// True if some line of `section` documents `field` as a two-column reference
-/// entry: after its `# #` comment prefix and alignment padding, the line begins
-/// with `field` and the em-dash separator follows. Requiring the `—` keeps
-/// example TOML (`field = value`) and longer field names (`border_color` vs
-/// `border_color_focused`) from counting as an entry.
-fn section_documents_field(section: &str, field: &str) -> bool {
-    section.lines().any(|line| {
-        let Some(body) = line.strip_prefix("# #") else {
-            return false;
-        };
-        let Some(rest) = body.trim_start().strip_prefix(field) else {
-            return false;
-        };
-        rest.trim_start().starts_with('—')
-    })
+/// The field names documented under every `# # Supported fields:` block in
+/// `section`. A block runs from its marker line to the next blank comment line
+/// (`# #`), doc heading, or non-comment line. At the block's shallowest indent,
+/// a line reading `name — …` contributes `name`; deeper continuation lines and
+/// sub-bullets are skipped. Multiple markers in a section are unioned.
+fn documented_fields(section: &str) -> BTreeSet<String> {
+    let lines: Vec<&str> = section.lines().collect();
+    let mut names = BTreeSet::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let is_marker = lines[i]
+            .strip_prefix("# #")
+            .is_some_and(|rest| rest.trim() == "Supported fields:");
+        if !is_marker {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut block: Vec<&str> = Vec::new();
+        while i < lines.len() {
+            let Some(body) = lines[i].strip_prefix("# #") else {
+                break;
+            };
+            if body.trim().is_empty() || body.starts_with('#') {
+                break;
+            }
+            block.push(body);
+            i += 1;
+        }
+        let base = block
+            .iter()
+            .map(|b| b.len() - b.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        for body in block {
+            if body.len() - body.trim_start().len() != base {
+                continue;
+            }
+            if let Some((name, _)) = body.trim_start().split_once('\u{2014}') {
+                let name = name.trim();
+                if !name.is_empty() && !name.contains(char::is_whitespace) {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 /// The field names serde lists after "expected one of" in a `deny_unknown_fields`
@@ -223,29 +255,35 @@ fn expected_fields(err: &str) -> Vec<String> {
         .collect()
 }
 
-/// Feed a section an unknown field and assert every name serde reports as valid
-/// is documented there — the only check that catches a field added in code but
-/// forgotten in the docs. The reverse (documented but code-absent) is caught only
-/// via example blocks (`reference_example_blocks_parse`); prose-only names aren't verified.
-fn assert_all_fields_documented(bogus_toml: &str, heading: &str) {
+/// Assert the fields documented under `Supported fields:` and the fields serde
+/// accepts are the same set, both ways — the only check keeping the two in
+/// lockstep. A field added in code but missing an entry fails the forward
+/// direction; an entry for a field that no longer exists fails the reverse.
+fn assert_fields_match(bogus_toml: &str, heading: &str) {
     let err = Config::from_toml_collect(bogus_toml)
         .expect_err("an unknown field must be rejected by deny_unknown_fields")
         .to_string();
-    let fields = expected_fields(&err);
-    assert!(!fields.is_empty(), "no field names parsed from:\n{err}");
-    let section = reference_section(heading);
-    for field in &fields {
-        assert!(
-            section_documents_field(section, field),
-            "field `{field}` exists in code but is undocumented in the \
-             {heading:?} section of config.reference.toml"
-        );
-    }
+    let code: BTreeSet<String> = expected_fields(&err).into_iter().collect();
+    assert!(!code.is_empty(), "no field names parsed from:\n{err}");
+    let documented = documented_fields(reference_section(heading));
+
+    let missing: Vec<&str> = code.difference(&documented).map(String::as_str).collect();
+    assert!(
+        missing.is_empty(),
+        "fields exist in code but have no entry under `Supported fields:` in the \
+         {heading:?} section of config.reference.toml: {missing:?}"
+    );
+    let extra: Vec<&str> = documented.difference(&code).map(String::as_str).collect();
+    assert!(
+        extra.is_empty(),
+        "entries are documented under `Supported fields:` in the {heading:?} section \
+         of config.reference.toml but do not exist in code: {extra:?}"
+    );
 }
 
 #[test]
 fn window_rule_fields_are_all_documented() {
-    assert_all_fields_documented(
+    assert_fields_match(
         "[[window_rules]]\napp_id = \"x\"\nbogus_field_zz = 1\n",
         "# ## Window rules",
     );
@@ -253,7 +291,7 @@ fn window_rule_fields_are_all_documented() {
 
 #[test]
 fn output_fields_are_all_documented() {
-    assert_all_fields_documented(
+    assert_fields_match(
         "[[outputs]]\nname = \"eDP-1\"\nbogus_field_zz = 1\n",
         "# ## Outputs",
     );
