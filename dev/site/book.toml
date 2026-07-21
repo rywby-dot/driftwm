@@ -6,6 +6,7 @@ language = "en"
 src = "src"
 
 [output.html]
-default-theme = "navy"
-preferred-dark-theme = "navy"
+default-theme = "light"
+preferred-dark-theme = "coal"
+additional-css = ["custom.css"]
 git-repository-url = "https://github.com/malbiruk/driftwm"

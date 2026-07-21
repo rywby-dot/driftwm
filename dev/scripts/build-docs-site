@@ -126,6 +126,7 @@ def stage() -> Path:
     src_dir.mkdir(parents=True)
 
     shutil.copy2(SITE_DIR / "book.toml", STAGE / "book.toml")
+    shutil.copy2(SITE_DIR / "custom.css", STAGE / "custom.css")
     shutil.copy2(SITE_DIR / "src" / "SUMMARY.md", src_dir / "SUMMARY.md")
 
     all_text = []
