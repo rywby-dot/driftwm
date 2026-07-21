@@ -808,7 +808,7 @@ impl DriftWm {
         let outputs: Vec<_> = self.space.outputs().cloned().collect();
         for o in &outputs {
             if active.as_ref() != Some(o) {
-                crate::state::output_state(o).edge_pan_velocity = None;
+                self.clear_edge_pan(o);
             }
         }
 
@@ -818,7 +818,7 @@ impl DriftWm {
         // A fullscreen window owns the whole viewport — edge-panning the camera
         // out from under it just breaks the fullscreen surface.
         if self.is_output_fullscreen(&output) {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.clear_edge_pan(&output);
             return;
         }
 
@@ -852,7 +852,7 @@ impl DriftWm {
                 })
         });
         if over_layer_surface {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.clear_edge_pan(&output);
             return;
         }
         let usable = layer_map_for_output(&output).non_exclusive_zone();
@@ -862,7 +862,7 @@ impl DriftWm {
             self.config.edge_pan_cursor_zone,
             self.config.edge_pan_max,
         );
-        crate::state::output_state(&output).edge_pan_velocity = velocity;
+        self.update_edge_pan_request(&output, velocity, screen_pos);
     }
 
     /// True when `surface`'s window is fullscreen on an output *other* than the

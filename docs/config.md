@@ -334,6 +334,12 @@ Default: `20.0`
 
 cursor edge-pan activation zone (px) — kept small so it doesn't trigger by accident. Pans at a constant speed_max within the zone (steady, push-speed independent); speed_min is unused here.
 
+### `latency_ms`
+
+Default: `120`
+
+delay before pan starts at an edge bordering another monitor (ms). Outer edges remain immediate. 0 disables.
+
 ## `[zoom]`
 
 ### `step`

@@ -524,7 +524,7 @@ impl DriftWm {
                     // Stop any in-progress pan immediately.
                     let outputs: Vec<_> = self.space.outputs().cloned().collect();
                     for o in outputs {
-                        crate::state::output_state(&o).edge_pan_velocity = None;
+                        self.clear_edge_pan(&o);
                     }
                 }
             }
