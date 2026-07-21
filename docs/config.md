@@ -816,12 +816,12 @@ Default: `1.15`
 
 scale above which pinch-out fires (1.0 = no pinch)
 
-Gesture bindings: `"Modifier+N-finger-<type>" = "action"` Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" unbinds (prevents anywhere fallback, still forwards).
+Gesture bindings: `"Modifier+N-finger-<type>" = "action"` Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" unbinds.
 
 Gesture types (2–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
-- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction, checked before swipe fallback
+- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction
 - `3-finger-doubletap-swipe` — continuous only (window grabs; 3-finger tap then swipe)
 - `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
 - `N-finger-pinch-in/out` — threshold only
@@ -866,7 +866,7 @@ Threshold actions: any action from the [keybindings] Actions list. center-neares
 | `"4-finger-swipe"` | `center-nearest` | threshold (accumulate, detect direction, fire once) |
 | `"mod+3-finger-swipe"` | `center-nearest` | mod makes 3-finger swipe navigate too |
 
-**Example: per-direction overrides (threshold only, checked before swipe fallback)**
+**Example: per-direction overrides (threshold only)**
 
 ```toml
 "4-finger-swipe-up" = "exec brightnessctl set +5%"
@@ -889,12 +889,12 @@ Threshold actions: any action from the [keybindings] Actions list. center-neares
 
 ## `[touch]`
 
-Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context (under [touch.anywhere] it also drops the anywhere fallback). A fully unbound gesture forwards to the app.
+Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
-- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction, checked before swipe fallback
+- `N-finger-swipe-up/down/left/right` — threshold only, physical finger direction
 - `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-tap` — threshold only (quick touch, no movement)
@@ -903,9 +903,7 @@ Touch gesture types (1–5 fingers):
 - `N-finger-doubletap-hold-swipe` — continuous only (tap, hold, then drag)
 - `N-finger-hold-swipe` — continuous only (dwell then drag)
 
-Continuous and threshold actions: the same sets and rules as under [gestures]; the touch-only doubletap-hold-swipe and hold-swipe triggers take the window grabs.
-
-Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
+Continuous and threshold actions: the same sets and rules as under [gestures].
 
 ## `[touch.on-window]`
 
