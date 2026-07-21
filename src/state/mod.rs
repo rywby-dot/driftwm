@@ -257,12 +257,18 @@ pub(crate) struct EdgePanDelay {
     pub(crate) entered_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ZoomAnimationAnchor {
+    pub canvas: Point<f64, Logical>,
+    pub screen: Point<f64, Logical>,
+}
+
 #[derive(Clone)]
 pub struct OutputState {
     pub camera: Point<f64, Logical>,
     pub zoom: f64,
     pub zoom_target: Option<f64>,
-    pub zoom_animation_center: Option<Point<f64, Logical>>,
+    pub zoom_animation_anchor: Option<ZoomAnimationAnchor>,
     pub last_rendered_zoom: f64,
     pub overview_return: Option<(Point<f64, Logical>, f64)>,
     pub camera_target: Option<Point<f64, Logical>>,
@@ -302,7 +308,7 @@ pub fn init_output_state(
             camera,
             zoom: 1.0,
             zoom_target: None,
-            zoom_animation_center: None,
+            zoom_animation_anchor: None,
             last_rendered_zoom: f64::NAN,
             overview_return: None,
             camera_target: None,
@@ -2251,7 +2257,7 @@ mod tests {
             camera: Point::from(camera),
             zoom,
             zoom_target: None,
-            zoom_animation_center: None,
+            zoom_animation_anchor: None,
             last_rendered_zoom: zoom,
             overview_return: None,
             camera_target: None,

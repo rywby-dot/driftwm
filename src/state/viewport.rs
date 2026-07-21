@@ -56,13 +56,23 @@ impl DriftWm {
             output_state(&o).zoom_target = val;
         }
     }
-    pub fn zoom_animation_center(&self) -> Option<Point<f64, Logical>> {
+    pub fn zoom_animation_anchor(&self) -> Option<super::ZoomAnimationAnchor> {
         self.active_output()
-            .and_then(|o| output_state(&o).zoom_animation_center)
+            .and_then(|o| output_state(&o).zoom_animation_anchor)
     }
-    pub fn set_zoom_animation_center(&mut self, val: Option<Point<f64, Logical>>) {
+    pub fn set_zoom_animation_anchor(
+        &mut self,
+        canvas: Point<f64, Logical>,
+        screen: Point<f64, Logical>,
+    ) {
         if let Some(o) = self.active_output() {
-            output_state(&o).zoom_animation_center = val;
+            output_state(&o).zoom_animation_anchor =
+                Some(super::ZoomAnimationAnchor { canvas, screen });
+        }
+    }
+    pub fn clear_zoom_animation_anchor(&mut self) {
+        if let Some(o) = self.active_output() {
+            output_state(&o).zoom_animation_anchor = None;
         }
     }
     pub fn overview_return(&self) -> Option<(Point<f64, Logical>, f64)> {

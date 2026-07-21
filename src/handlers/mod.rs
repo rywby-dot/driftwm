@@ -1025,7 +1025,7 @@ impl SessionLockHandler for DriftWm {
             os.panning = false;
             os.camera_target = None;
             os.zoom_target = None;
-            os.zoom_animation_center = None;
+            os.zoom_animation_anchor = None;
         }
         self.held_action = None;
         self.cursor.grab_cursor = false;

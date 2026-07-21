@@ -14,7 +14,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingClickNavigate, output_state};
+use super::{DriftWm, PendingClickNavigate, ZoomAnimationAnchor, output_state};
 
 /// Max pointer travel (screen px) between press and release for a click to
 /// still count as a click rather than a drag. Beyond it, no auto-navigate — a
@@ -103,7 +103,10 @@ impl DriftWm {
         });
         let mut os = output_state(output);
         os.momentum.stop();
-        os.zoom_animation_center = Some(window_center);
+        os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
+            canvas: window_center,
+            screen: vc,
+        });
         os.camera_target = Some(target);
         os.zoom_target = Some(target_zoom);
     }
