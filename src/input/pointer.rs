@@ -1133,7 +1133,11 @@ impl DriftWm {
                         self.drift_pan(canvas_delta, Event::time_msec(&event));
                         let new_pos = pos + canvas_delta;
                         let serial = SERIAL_COUNTER.next_serial();
-                        let under = self.surface_under(new_pos, None);
+                        // Suspended-aware cascade: a stand-in slid under the cursor
+                        // by the pan yields no focus, matching a real motion.
+                        let screen_pos =
+                            canvas_to_screen(CanvasPos(new_pos), self.camera(), self.zoom()).0;
+                        let under = self.pointer_focus_under(screen_pos, new_pos);
                         pointer.motion(
                             self,
                             under,
@@ -1175,7 +1179,10 @@ impl DriftWm {
                                 os.momentum.stop();
                             });
 
-                            let under = self.surface_under(pos, None);
+                            // Suspended-aware cascade, as a real motion would use.
+                            let screen_pos =
+                                canvas_to_screen(CanvasPos(pos), self.camera(), self.zoom()).0;
+                            let under = self.pointer_focus_under(screen_pos, pos);
                             let serial = SERIAL_COUNTER.next_serial();
                             pointer.motion(
                                 self,
