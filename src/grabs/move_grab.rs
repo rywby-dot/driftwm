@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 
 use smithay::{
     desktop::Window,
@@ -50,10 +49,6 @@ pub struct MoveSurfaceGrab {
     pub output: Output,
     /// After teleport, suppress edge-pan on the entry edge until cursor moves inward.
     inhibited_edge: Option<Edge>,
-    /// Instant the cursor entered the edge-pan zone (for latency).
-    /// `None` while the cursor is outside the zone, or before the latency
-    /// elapses — in which case pan is suppressed.
-    edge_pan_zone_entered_at: Option<Instant>,
     /// Other windows in the primary's cluster, with offsets from the primary
     /// captured at drag start. Offsets are canvas-global and invariant over
     /// motion, snap, and cross-output teleport. Strong `Window` refs; dropped
@@ -97,7 +92,6 @@ impl MoveSurfaceGrab {
             snap: SnapState::default(),
             output,
             inhibited_edge: None,
-            edge_pan_zone_entered_at: None,
             cluster_members,
             cluster_member_surfaces,
             last_mapped_loc: None,
@@ -134,7 +128,6 @@ impl MoveSurfaceGrab {
             snap: SnapState::default(),
             output,
             inhibited_edge: None,
-            edge_pan_zone_entered_at: None,
             cluster_members,
             cluster_member_surfaces,
             last_mapped_loc: None,
@@ -164,7 +157,6 @@ impl MoveSurfaceGrab {
             snap: SnapState::default(),
             output,
             inhibited_edge: None,
-            edge_pan_zone_entered_at: None,
             cluster_members: Vec::new(),
             cluster_member_surfaces: HashSet::new(),
             last_mapped_loc: None,
@@ -190,7 +182,6 @@ impl MoveSurfaceGrab {
             snap: SnapState::default(),
             output,
             inhibited_edge: None,
-            edge_pan_zone_entered_at: None,
             cluster_members: Vec::new(),
             cluster_member_surfaces: HashSet::new(),
             last_mapped_loc: None,
@@ -349,7 +340,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             // Disarm edge-pan on the current output, else it keeps scrolling
             // that monitor's camera while the drag is parked — the grab is the
             // only thing that disarms it.
-            output_state(&self.output).edge_pan_velocity = None;
+            data.set_edge_pan_velocity(&self.output, None);
             handle.motion(data, None, event);
             return;
         }
@@ -385,7 +376,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
             let entry_edge = Self::entry_edge(&self.output, &new_output);
 
             // Clear edge-pan on the old output before switching.
-            output_state(&self.output).edge_pan_velocity = None;
+            data.set_edge_pan_velocity(&self.output, None);
 
             self.start_canvas = event.location;
             self.initial_window_location = Point::from((
@@ -435,7 +426,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            output_state(&self.output).edge_pan_velocity = None;
+            data.set_edge_pan_velocity(&self.output, None);
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
                 if member.alive() {
@@ -446,8 +437,8 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
         }
     }
 
-    fn unset(&mut self, _data: &mut DriftWm) {
-        output_state(&self.output).edge_pan_velocity = None;
+    fn unset(&mut self, data: &mut DriftWm) {
+        data.set_edge_pan_velocity(&self.output, None);
     }
 
     crate::grabs::forward_pointer_grab_methods!();
@@ -652,20 +643,7 @@ impl MoveSurfaceGrab {
                 velocity
             };
 
-            let now = Instant::now();
-            let latency = Duration::from_millis(data.config.edge_pan_latency_ms);
-            let effective_velocity = if effective_velocity.is_some() {
-                let entered_at = self.edge_pan_zone_entered_at.get_or_insert(now);
-                if now.duration_since(*entered_at) >= latency {
-                    effective_velocity
-                } else {
-                    None // still in the grace window
-                }
-            } else {
-                self.edge_pan_zone_entered_at = None;
-                None
-            };
-            output_state(&self.output).edge_pan_velocity = effective_velocity;
+            data.set_edge_pan_velocity(&self.output, effective_velocity);
         }
     }
 }
@@ -698,8 +676,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         // leak out of grab routing.
         if event.slot == self.touch_start.as_ref().expect("touch move grab").slot {
             // Stop edge-panning now that the controlling finger lifted.
-            self.edge_pan_zone_entered_at = None;
-            output_state(&self.output).edge_pan_velocity = None;
+            data.set_edge_pan_velocity(&self.output, None);
             data.touch_state.edge_pan = None;
             data.refresh_stable_snap_rect(&self.window);
             for (member, _) in &self.cluster_members {
@@ -770,8 +747,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         handle: &mut TouchInnerHandle<'_, DriftWm>,
         seq: Serial,
     ) {
-        self.edge_pan_zone_entered_at = None;
-        output_state(&self.output).edge_pan_velocity = None;
+        data.set_edge_pan_velocity(&self.output, None);
         handle.cancel(data, seq);
         handle.unset_grab(self, data);
     }
@@ -801,8 +777,7 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut DriftWm) {
-        self.edge_pan_zone_entered_at = None;
-        output_state(&self.output).edge_pan_velocity = None;
+        data.set_edge_pan_velocity(&self.output, None);
         data.touch_state.edge_pan = None;
     }
 }

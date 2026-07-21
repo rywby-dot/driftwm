@@ -101,10 +101,6 @@ impl DriftWm {
             output_state(&o).panning = val;
         }
     }
-    pub fn edge_pan_velocity(&self) -> Option<Point<f64, Logical>> {
-        self.active_output()
-            .and_then(|o| output_state(&o).edge_pan_velocity)
-    }
     pub fn last_frame_instant(&self) -> Instant {
         self.active_output()
             .map(|o| output_state(&o).last_frame_instant)

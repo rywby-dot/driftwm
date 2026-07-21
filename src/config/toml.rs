@@ -146,8 +146,8 @@ pub(super) struct EdgePanConfig {
     /// Activation zone for cursor edge-pan, px from the edge (kept small so it
     /// doesn't trigger accidentally — distinct from the window-drag `zone`).
     pub cursor_zone: Option<f64>,
-    /// Delay before edge-pan starts after the cursor enters the activation
-    /// zone (ms). Defaults to 120. Set to 0 to disable.
+    /// Delay before edge-pan starts at an edge bordering another output (ms).
+    /// Defaults to 120. Set to 0 to disable.
     pub latency_ms: Option<u64>,
 }
 

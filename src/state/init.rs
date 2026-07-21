@@ -385,7 +385,6 @@ impl DriftWm {
             click_navigate_timer: None,
             errors: init_errors,
             cursor_edge_pan: edge_pan_cursor,
-            cursor_edge_pan_zone_entered_at: None,
             touch_state: crate::input::touch::TouchState::new(),
         }
     }

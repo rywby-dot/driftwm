@@ -1020,6 +1020,7 @@ impl SessionLockHandler for DriftWm {
             let mut os = crate::state::output_state(&output);
             os.momentum.stop();
             os.edge_pan_velocity = None;
+            os.edge_pan_delay = None;
             os.panning = false;
             os.camera_target = None;
             os.zoom_target = None;

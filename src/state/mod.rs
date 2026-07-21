@@ -46,7 +46,7 @@ use smithay::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, TryLockError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesTexture;
@@ -251,6 +251,12 @@ pub enum ModeIntent {
 /// Per-output viewport state, stored on each `Output` via `UserDataMap`
 /// (wrapped in `Mutex` since `UserDataMap` requires `Sync`). !Send fields
 /// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
+#[derive(Clone, Copy)]
+pub(crate) struct EdgePanDelay {
+    pub(crate) edges: u8,
+    pub(crate) entered_at: Instant,
+}
+
 #[derive(Clone)]
 pub struct OutputState {
     pub camera: Point<f64, Logical>,
@@ -264,6 +270,10 @@ pub struct OutputState {
     pub momentum: MomentumState,
     pub panning: bool,
     pub edge_pan_velocity: Option<Point<f64, Logical>>,
+    /// Monitor-facing velocity components currently waiting for the edge-pan
+    /// latency. Kept per-output so the render tick can finish the wait even
+    /// when no new pointer motion arrives.
+    pub edge_pan_delay: Option<EdgePanDelay>,
     pub last_rendered_camera: Point<f64, Logical>,
     pub last_frame_instant: Instant,
     /// Physical arrangement in layout space: (0,0) for single output,
@@ -296,6 +306,7 @@ pub fn init_output_state(
             momentum: MomentumState::new(drift),
             panning: false,
             edge_pan_velocity: None,
+            edge_pan_delay: None,
             last_rendered_camera: Point::from((f64::NAN, f64::NAN)),
             last_frame_instant: Instant::now(),
             layout_position,
@@ -682,12 +693,6 @@ pub struct DriftWm {
     /// touches a screen edge. Toggled by
     /// [`Action::ToggleCursorPan`](driftwm::config::Action::ToggleCursorPan).
     pub cursor_edge_pan: bool,
-
-    /// Cursor edge-pan: instant the cursor entered the activation zone.
-    /// `None` while the cursor is outside the zone. Used to gate the pan
-    /// behind `config.edge_pan_latency_ms` so it doesn't kick in the moment
-    /// the cursor grazes the edge.
-    pub cursor_edge_pan_zone_entered_at: Option<Instant>,
     pub touch_state: crate::input::touch::TouchState,
 }
 
@@ -711,6 +716,120 @@ pub(crate) fn client_is_unrestricted(client: &smithay::reexports::wayland_server
 }
 
 impl DriftWm {
+    const EDGE_LEFT: u8 = 1 << 0;
+    const EDGE_RIGHT: u8 = 1 << 1;
+    const EDGE_TOP: u8 = 1 << 2;
+    const EDGE_BOTTOM: u8 = 1 << 3;
+
+    /// Update the requested edge-pan velocity. The animation tick applies any
+    /// monitor-boundary latency; callers only describe pointer intent.
+    pub(crate) fn set_edge_pan_velocity(
+        &self,
+        output: &Output,
+        velocity: Option<Point<f64, Logical>>,
+    ) {
+        let mut os = output_state(output);
+        os.edge_pan_velocity = velocity;
+        if velocity.is_none() {
+            os.edge_pan_delay = None;
+        }
+    }
+
+    /// Edges of `output` that physically touch another output in layout space.
+    /// A positive overlap is required, so monitors meeting only at a corner do
+    /// not delay either edge.
+    fn monitor_facing_edges(&self, output: &Output) -> u8 {
+        let os = output_state(output);
+        let loc = os.layout_position;
+        drop(os);
+        let size = output_logical_size(output);
+        let left = loc.x;
+        let right = loc.x + size.w;
+        let top = loc.y;
+        let bottom = loc.y + size.h;
+        let mut edges = 0;
+
+        for other in self.space.outputs().filter(|other| *other != output) {
+            let other_os = output_state(other);
+            let other_loc = other_os.layout_position;
+            drop(other_os);
+            let other_size = output_logical_size(other);
+            let other_left = other_loc.x;
+            let other_right = other_loc.x + other_size.w;
+            let other_top = other_loc.y;
+            let other_bottom = other_loc.y + other_size.h;
+            let vertical_overlap = top < other_bottom && other_top < bottom;
+            let horizontal_overlap = left < other_right && other_left < right;
+
+            if vertical_overlap && left == other_right {
+                edges |= Self::EDGE_LEFT;
+            }
+            if vertical_overlap && right == other_left {
+                edges |= Self::EDGE_RIGHT;
+            }
+            if horizontal_overlap && top == other_bottom {
+                edges |= Self::EDGE_TOP;
+            }
+            if horizontal_overlap && bottom == other_top {
+                edges |= Self::EDGE_BOTTOM;
+            }
+        }
+        edges
+    }
+
+    /// Resolve monitor-boundary latency on the frame tick. Non-monitor-facing
+    /// components remain immediate, including at mixed inner/outer corners.
+    fn effective_edge_pan_velocity(
+        &self,
+        output: &Output,
+        now: Instant,
+    ) -> Option<Point<f64, Logical>> {
+        let monitor_edges = self.monitor_facing_edges(output);
+        let latency = Duration::from_millis(self.config.edge_pan_latency_ms);
+        let mut os = output_state(output);
+        let requested = os.edge_pan_velocity?;
+        let mut immediate = requested;
+        let mut delayed_edges = 0;
+
+        if requested.x < 0.0 && monitor_edges & Self::EDGE_LEFT != 0 {
+            immediate.x = 0.0;
+            delayed_edges |= Self::EDGE_LEFT;
+        } else if requested.x > 0.0 && monitor_edges & Self::EDGE_RIGHT != 0 {
+            immediate.x = 0.0;
+            delayed_edges |= Self::EDGE_RIGHT;
+        }
+        if requested.y < 0.0 && monitor_edges & Self::EDGE_TOP != 0 {
+            immediate.y = 0.0;
+            delayed_edges |= Self::EDGE_TOP;
+        } else if requested.y > 0.0 && monitor_edges & Self::EDGE_BOTTOM != 0 {
+            immediate.y = 0.0;
+            delayed_edges |= Self::EDGE_BOTTOM;
+        }
+
+        if delayed_edges == 0 || latency.is_zero() {
+            os.edge_pan_delay = None;
+            return Some(requested);
+        }
+
+        let entered_at = match os.edge_pan_delay {
+            Some(delay) if delay.edges == delayed_edges => delay.entered_at,
+            _ => {
+                os.edge_pan_delay = Some(EdgePanDelay {
+                    edges: delayed_edges,
+                    entered_at: now,
+                });
+                now
+            }
+        };
+        if now.saturating_duration_since(entered_at) >= latency {
+            Some(requested)
+        } else if immediate.x != 0.0 || immediate.y != 0.0 {
+            Some(immediate)
+        } else {
+            None
+        }
+    }
+
     /// Drop dead inhibitors and tell idle-notifier whether any *visible*
     /// inhibitor surface is scanning out. Hidden inhibitors don't count —
     /// otherwise a backgrounded browser tab would keep the screen awake.
@@ -2099,6 +2218,7 @@ mod tests {
             momentum: MomentumState::new(0.96),
             panning: false,
             edge_pan_velocity: None,
+            edge_pan_delay: None,
             last_rendered_camera: Point::from(camera),
             last_frame_instant: Instant::now(),
             layout_position: Point::from(layout_position),

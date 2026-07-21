@@ -70,10 +70,9 @@ pub struct Config {
     pub edge_pan_cursor: bool,
     /// Cursor edge-pan activation zone, px from the edge.
     pub edge_pan_cursor_zone: f64,
-    /// Edge auto-pan: delay before pan actually starts after the cursor enters
-    /// the activation zone (ms). Gives a brief grace period so crossing between
-    /// monitors during a window drag doesn't immediately push the canvas.
-    /// Applies to both window-drag edge-pan and bare-cursor edge-pan.
+    /// Edge auto-pan: delay at an edge bordering another output (ms). Gives a
+    /// brief grace period for crossing monitors without changing the feel of
+    /// outer edges. Applies to window-drag and bare-cursor edge-pan.
     pub edge_pan_latency_ms: u64,
     /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
     /// Lower = smoother; 1 = instant; 0 would freeze the camera.

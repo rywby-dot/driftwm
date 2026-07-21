@@ -28,7 +28,6 @@ use crate::decorations::DecorationHit;
 use crate::state::{DriftWm, FocusTarget};
 use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
 use driftwm::protocols::output_power::OutputPowerHandler;
-use std::time::{Duration, Instant};
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of an edge of the *usable* area
@@ -809,7 +808,7 @@ impl DriftWm {
         let outputs: Vec<_> = self.space.outputs().cloned().collect();
         for o in &outputs {
             if active.as_ref() != Some(o) {
-                crate::state::output_state(o).edge_pan_velocity = None;
+                self.set_edge_pan_velocity(o, None);
             }
         }
 
@@ -819,7 +818,7 @@ impl DriftWm {
         // A fullscreen window owns the whole viewport — edge-panning the camera
         // out from under it just breaks the fullscreen surface.
         if self.is_output_fullscreen(&output) {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.set_edge_pan_velocity(&output, None);
             return;
         }
 
@@ -853,7 +852,7 @@ impl DriftWm {
                 })
         });
         if over_layer_surface {
-            crate::state::output_state(&output).edge_pan_velocity = None;
+            self.set_edge_pan_velocity(&output, None);
             return;
         }
         let usable = layer_map_for_output(&output).non_exclusive_zone();
@@ -863,20 +862,7 @@ impl DriftWm {
             self.config.edge_pan_cursor_zone,
             self.config.edge_pan_max,
         );
-        let now = Instant::now();
-        let latency = Duration::from_millis(self.config.edge_pan_latency_ms);
-        let velocity = if velocity.is_some() {
-            let entered_at = self.cursor_edge_pan_zone_entered_at.get_or_insert(now);
-            if now.duration_since(*entered_at) >= latency {
-                velocity
-            } else {
-                None
-            }
-        } else {
-            self.cursor_edge_pan_zone_entered_at = None;
-            None
-        };
-        crate::state::output_state(&output).edge_pan_velocity = velocity;
+        self.set_edge_pan_velocity(&output, velocity);
     }
 
     /// True when `surface`'s window is fullscreen on an output *other* than the
