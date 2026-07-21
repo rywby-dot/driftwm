@@ -101,6 +101,23 @@ fn window_origin_for_surface(
     Some(state.stage.position_of(window)?.to_f64())
 }
 
+/// Advance the per-output hot-corner latch and return a newly entered corner.
+///
+/// Entering is recorded even when dispatch is later suppressed. This makes the
+/// latch describe pointer location, rather than whether an action happened:
+/// fullscreen/dragging ending while the pointer remains in a corner must not
+/// turn ordinary motion inside that corner into a fresh entry.
+fn advance_hot_corner_latch(
+    latched: &mut Option<HotCorner>,
+    active: Option<HotCorner>,
+) -> Option<HotCorner> {
+    if *latched == active {
+        return None;
+    }
+    *latched = active;
+    active
+}
+
 impl DriftWm {
     /// Fire any hot-corner action the cursor is currently inside.
     /// `screen_pos` is output-local screen-space. `output` is the output the
@@ -111,31 +128,13 @@ impl DriftWm {
         output: &smithay::output::Output,
         screen_pos: Point<f64, smithay::utils::Logical>,
     ) {
-        let Some(cfg) = self.config.output_config(&output.name()) else {
+        let output_name = output.name();
+        let Some(cfg) = self.config.output_config(&output_name) else {
+            self.hot_corners_latched.remove(output);
             return;
         };
         if cfg.hot_corners.bindings.is_empty() {
-            return;
-        }
-
-        // disable_when_fullscreen: any fullscreen window on this output silences
-        // hot-corners for that output.
-        if cfg.hot_corners.disable_when_fullscreen && self.is_output_fullscreen(output) {
-            self.hot_corners_armed.remove(output);
-            return;
-        }
-
-        // disable_while_dragging: suppress during any compositor grab (move/resize/
-        // pan-viewport/navigate) OR while any mouse button is held. Keyboard state
-        // is intentionally NOT considered — modifiers like Shift/Ctrl/Super are
-        // commonly held during normal cursor travel, and gating on them would
-        // make hot-corners unreachable for users who hold a modifier habitually.
-        // Matches macOS/Windows behaviour.
-        if cfg.hot_corners.disable_while_dragging
-            && (self.seat.get_pointer().is_some_and(|p| p.is_grabbed())
-                || !self.held_buttons.is_empty())
-        {
-            self.hot_corners_armed.remove(output);
+            self.hot_corners_latched.remove(output);
             return;
         }
 
@@ -153,25 +152,43 @@ impl DriftWm {
         .into_iter()
         .find(|c| c.contains(screen_pos.x, screen_pos.y, out_w, out_h, threshold));
 
-        let armed = self.hot_corners_armed.get(output).copied();
-
-        match (active_corner, armed) {
-            (Some(c), prev) if prev != Some(c) => {
-                if let Some(action) = cfg.hot_corners.bindings.get(&c).cloned() {
-                    tracing::info!("hot-corner fired: {:?} on {}", c, output.name());
-                    self.execute_action(&action);
-                    self.hot_corners_armed.insert(output.clone(), c);
-                } else {
-                    // Not configured - we consider it not armed.
-                    self.hot_corners_armed.remove(output);
+        let previous_latch = self.hot_corners_latched.get(output).copied();
+        let mut latched = previous_latch;
+        let entered = advance_hot_corner_latch(&mut latched, active_corner);
+        if latched != previous_latch {
+            match latched {
+                Some(corner) => {
+                    self.hot_corners_latched.insert(output.clone(), corner);
+                }
+                None => {
+                    self.hot_corners_latched.remove(output);
                 }
             }
-            (None, _) => {
-                // Cursor left every corner — re-arm.
-                self.hot_corners_armed.remove(output);
-            }
-            _ => {}
         }
+
+        let Some(entered) = entered else {
+            return;
+        };
+
+        // Record the entry above before applying either suppression rule. Once
+        // suppression ends, the pointer must leave this corner and enter again.
+        let fullscreen_suppressed =
+            cfg.hot_corners.disable_when_fullscreen && self.is_output_fullscreen(output);
+        // A compositor grab covers move/resize/pan/navigate. Held mouse buttons
+        // also cover client-side drags. Keyboard modifiers are intentionally not
+        // considered: holding Shift/Ctrl/Super during cursor travel is normal.
+        let dragging_suppressed = cfg.hot_corners.disable_while_dragging
+            && (self.seat.get_pointer().is_some_and(|p| p.is_grabbed())
+                || !self.held_buttons.is_empty());
+        if fullscreen_suppressed || dragging_suppressed {
+            return;
+        }
+
+        let Some(action) = cfg.hot_corners.bindings.get(&entered).cloned() else {
+            return;
+        };
+        tracing::info!("hot-corner fired: {:?} on {}", entered, output_name);
+        self.execute_action(&action);
     }
     fn wake_dpms_off_outputs(&mut self) {
         if self.dpms_off_outputs.is_empty() {
@@ -1494,5 +1511,45 @@ impl DriftWm {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod hot_corner_tests {
+    use super::{HotCorner, advance_hot_corner_latch};
+
+    #[test]
+    fn suppressed_entry_stays_latched_until_pointer_leaves() {
+        let mut latched = None;
+
+        // The caller may suppress this returned entry, but the location latch
+        // has already advanced and motion within the corner is not a new entry.
+        assert_eq!(
+            advance_hot_corner_latch(&mut latched, Some(HotCorner::TopLeft)),
+            Some(HotCorner::TopLeft)
+        );
+        assert_eq!(latched, Some(HotCorner::TopLeft));
+        assert_eq!(
+            advance_hot_corner_latch(&mut latched, Some(HotCorner::TopLeft)),
+            None
+        );
+
+        assert_eq!(advance_hot_corner_latch(&mut latched, None), None);
+        assert_eq!(latched, None);
+        assert_eq!(
+            advance_hot_corner_latch(&mut latched, Some(HotCorner::TopLeft)),
+            Some(HotCorner::TopLeft)
+        );
+    }
+
+    #[test]
+    fn moving_directly_to_another_corner_is_a_new_entry() {
+        let mut latched = Some(HotCorner::TopLeft);
+
+        assert_eq!(
+            advance_hot_corner_latch(&mut latched, Some(HotCorner::TopRight)),
+            Some(HotCorner::TopRight)
+        );
+        assert_eq!(latched, Some(HotCorner::TopRight));
     }
 }

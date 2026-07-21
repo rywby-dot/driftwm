@@ -382,7 +382,7 @@ impl DriftWm {
             satellite: None,
             udev_device: None,
             last_titlebar_click: None,
-            hot_corners_armed: HashMap::new(),
+            hot_corners_latched: HashMap::new(),
             pending_click_navigate: None,
             click_navigate_timer: None,
             errors: init_errors,

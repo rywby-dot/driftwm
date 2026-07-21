@@ -685,10 +685,10 @@ pub struct DriftWm {
         smithay::reexports::wayland_server::backend::ObjectId,
     )>,
 
-    /// Last hot-corner that fired, per output. The latch prevents spamming the
-    /// bound action on every motion event while the cursor sits in the corner:
-    /// re-arm when the cursor leaves the corner.
-    pub hot_corners_armed: HashMap<Output, HotCorner>,
+    /// Corner currently occupied by the pointer, per output. Entry is latched
+    /// even when fullscreen/dragging suppresses the action; the latch clears
+    /// only after the pointer leaves all corners.
+    pub hot_corners_latched: HashMap<Output, HotCorner>,
 
     /// Click armed for auto-navigate on release (see `auto_navigate_on_click`).
     pub pending_click_navigate: Option<PendingClickNavigate>,
