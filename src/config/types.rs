@@ -293,6 +293,7 @@ pub enum GestureTrigger {
     Tap { fingers: u32 },
     Doubletap { fingers: u32 },
     HoldSwipe { fingers: u32 },
+    DoubletapHoldSwipe { fingers: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

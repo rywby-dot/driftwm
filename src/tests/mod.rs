@@ -22,6 +22,7 @@ mod cli_docs;
 mod client_teardown;
 mod config_reload;
 mod configure_sequences;
+mod cycle_windows;
 mod focus_timing;
 mod hotplug;
 mod opacity;

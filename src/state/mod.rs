@@ -668,6 +668,10 @@ pub struct DriftWm {
     /// `execute_action`, and cleared on touch-grab teardown so it can't leak
     /// into a later action.
     pub pre_exited_fullscreen: Option<Window>,
+    /// Set while an Alt-Tab cycle step is navigating, so the focus change it
+    /// causes is recognized as cycle-initiated: `focus_changed` neither commits
+    /// the session nor promotes. Any other focus change during a session commits.
+    pub cycle_navigating: bool,
     /// Virtual output placeholders kept when all physical outputs disconnect,
     /// so `active_output().unwrap()` doesn't panic.
     pub disconnected_outputs: HashSet<String>,

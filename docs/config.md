@@ -822,12 +822,21 @@ Gesture types (2–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
 - `N-finger-swipe-up/down/left/right` — threshold only, checked before swipe fallback
-- `3-finger-doubletap-swipe` — continuous OR threshold (3-finger tap then swipe)
+- `3-finger-doubletap-swipe` — continuous only (window grabs; 3-finger tap then swipe)
 - `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-hold` — threshold only (fires on release)
 
-Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: any action from the [keybindings] Actions list except `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g. center-nearest, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fill-window, `exec <cmd>`. center-nearest works on swipe triggers only (direction comes from the swipe).
+Continuous actions, locked to their triggers:
+
+- `pan-viewport` — swipe
+- `zoom` — pinch
+- `move-window` — swipe or doubletap-swipe
+- `move-snapped-windows` — swipe or doubletap-swipe
+- `resize-window` — swipe or doubletap-swipe
+- `resize-window-snapped` — swipe or doubletap-swipe
+
+Threshold actions: any action from the [keybindings] Actions list. center-nearest may also be bound bare — the direction then comes from the swipe itself (swipe triggers only).
 
 ## `[gestures.on-window]`
 
@@ -862,6 +871,8 @@ Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resiz
 ```toml
 "4-finger-swipe-up" = "exec brightnessctl set +5%"
 "4-finger-swipe-down" = "exec brightnessctl set 5%-"
+"4-finger-swipe-right" = "cycle-windows forward"
+"4-finger-swipe-left" = "cycle-windows backward"
 ```
 
 | Binding | Action | Notes |
@@ -878,8 +889,6 @@ Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resiz
 
 ## `[touch]`
 
-Touchscreen gesture BINDINGS. Distinct from [input.touch], which holds the touch *device* settings (enable, map_to_output) — put those there, not here (same split as [gestures] bindings vs [input.trackpad] device settings).
-
 Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context (under [touch.anywhere] it also drops the anywhere fallback). A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):
@@ -891,9 +900,10 @@ Touch gesture types (1–5 fingers):
 - `N-finger-tap` — threshold only (quick touch, no movement)
 - `N-finger-doubletap` — threshold only (two quick taps)
 - `N-finger-doubletap-swipe` — continuous only (tap then drag)
+- `N-finger-doubletap-hold-swipe` — continuous only (tap, hold, then drag)
 - `N-finger-hold-swipe` — continuous only (dwell then drag)
 
-Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: any action from the [keybindings] Actions list except `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g. center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, `exec <cmd>`. center-nearest works on swipe triggers only (direction comes from the swipe).
+Continuous and threshold actions: the same sets and rules as under [gestures]; the touch-only doubletap-hold-swipe and hold-swipe triggers take the window grabs.
 
 Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
 
@@ -904,8 +914,9 @@ Note: within one physical gesture, a continuous translation (pan) and a threshol
 | Binding | Action | Notes |
 | --- | --- | --- |
 | `"3-finger-doubletap"` | `fit-window` |  |
-| `"3-finger-doubletap-swipe"` | `move-window` | continuous (hold to move the cluster) |
+| `"3-finger-doubletap-swipe"` | `move-window` | continuous |
 | `"3-finger-hold-swipe"` | `resize-window` | continuous (dwell then drag) |
+| `"3-finger-doubletap-hold-swipe"` | `move-snapped-windows` | continuous (tap, hold, then drag — moves the whole snap cluster) |
 
 ## `[touch.on-canvas]`
 

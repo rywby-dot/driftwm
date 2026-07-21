@@ -153,9 +153,8 @@ impl TouchGestureGrab {
     }
 
     /// Hand a translation drag to a window move/resize grab per the resolved
-    /// continuous action. `cluster` extends a move to the focused window's
-    /// snap-cluster. Returns false (keep panning) if it isn't a window-grab action
-    /// or there's no canvas window under the finger.
+    /// continuous action. Returns false (keep panning) if it isn't a window-grab
+    /// action or there's no canvas window under the finger.
     fn start_window_grab(
         &mut self,
         action: ContinuousAction,
@@ -163,10 +162,9 @@ impl TouchGestureGrab {
         handle: &mut TouchInnerHandle<'_, DriftWm>,
         event: &MotionEvent,
         seq: Serial,
-        cluster: bool,
     ) -> bool {
         match action {
-            ContinuousAction::MoveWindow => self.try_start_move(data, handle, event, seq, cluster),
+            ContinuousAction::MoveWindow => self.try_start_move(data, handle, event, seq, false),
             ContinuousAction::MoveSnappedWindows => {
                 self.try_start_move(data, handle, event, seq, true)
             }
@@ -683,8 +681,8 @@ impl TouchGrab<DriftWm> for TouchGestureGrab {
                 Decision::Pan(delta) => self.apply_pan(data, delta, event.time),
                 Decision::Zoom { scale, anchor } => self.apply_zoom(data, scale, anchor),
                 Decision::FireThreshold(action) => data.execute_action(&action),
-                Decision::StartWindowGrab { action, cluster } => {
-                    self.start_window_grab(action, data, handle, event, seq, cluster);
+                Decision::StartWindowGrab { action } => {
+                    self.start_window_grab(action, data, handle, event, seq);
                 }
                 other => unreachable!("unexpected decision from motion: {other:?}"),
             }

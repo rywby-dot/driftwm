@@ -111,11 +111,18 @@ impl SeatHandler for DriftWm {
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
 
-        // Update focus history (skip during Alt-Tab cycling — history is frozen)
-        if self.stage.cycle_state().is_none()
-            && let Some(focus) = focused
-        {
-            self.update_focus_history(&focus.0);
+        if let Some(focus) = focused {
+            // A non-cycle focus change during a session (a click, a newly mapped
+            // window, an IPC focus, …) ends it first — committing the stale
+            // selection — then the newly focused window promotes normally on top.
+            // A cycle step's own navigate is exempt so it keeps the history frozen.
+            if self.stage.cycle_state().is_some() && !self.cycle_navigating {
+                self.end_cycle();
+            }
+            // Skip during Alt-Tab cycling — history is frozen until the session ends.
+            if self.stage.cycle_state().is_none() {
+                self.update_focus_history(&focus.0);
+            }
         }
 
         // Track the last window that actually held focus so the recompute can

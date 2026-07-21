@@ -1622,10 +1622,12 @@ mod tests {
     }
 
     #[test]
-    fn touch_swipe_rejects_move_window() {
-        // Window grabs on a plain swipe belong to doubletap-swipe/hold-swipe.
+    fn touch_swipe_accepts_move_window() {
         let trigger = GestureTrigger::Swipe { fingers: 3 };
-        assert!(parse_touch_config_entry(&trigger, "move-window").is_err());
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-window"),
+            Ok(GestureConfigEntry::Continuous(ContinuousAction::MoveWindow))
+        );
     }
 
     #[test]

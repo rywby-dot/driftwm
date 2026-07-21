@@ -20,8 +20,9 @@ const TAP_MAX_MS: u32 = 250;
 /// Window for a second 3-finger tap to count as a double-tap.
 const DOUBLE_TAP_MS: u32 = 300;
 /// Dwell (ms) before a drag commits that turns a 3-finger drag into a hold
-/// gesture: resize (no prior tap) or cluster move (after a double-tap). Long
-/// enough that a normal pan, which drags promptly, never trips it.
+/// gesture: hold-swipe (no prior tap) or doubletap-hold-swipe (after a
+/// double-tap). Long enough that a normal pan, which drags promptly, never
+/// trips it.
 const HOLD_MS: u32 = 350;
 /// Per-frame pinch-zoom deadzone (on the spread ratio). The spread metric is
 /// noisy, so a pure pan would wobble the zoom; ignore scale changes inside this
@@ -73,15 +74,18 @@ const SWIPE_BLOCK_PINCH: f64 = 0.4;
 /// gesture is unbound → forward it to the app.
 #[derive(Clone, Default)]
 pub struct Plan {
-    /// Translation axis (centroid): `Continuous(PanViewport)` pans; `Threshold`
-    /// accumulates and fires once (one-shot navigate).
+    /// Translation axis (centroid): `Continuous(PanViewport)` pans; a
+    /// `Continuous` window grab (move/resize) grabs the window at activation;
+    /// `Threshold` accumulates and fires once (one-shot navigate).
     swipe: Option<GestureConfigEntry>,
     /// Per-direction swipe overrides (up, down, left, right), checked before the
     /// base swipe threshold fires.
     swipe_dirs: [Option<ThresholdAction>; 4],
-    /// Move/resize preemptors on a translation drag: armed (recent tap) and held.
+    /// Move/resize preemptors on a translation drag: armed (recent tap), held,
+    /// and armed-and-held (tap then dwell then drag).
     doubletap_swipe: Option<ContinuousAction>,
     hold_swipe: Option<ContinuousAction>,
+    doubletap_hold_swipe: Option<ContinuousAction>,
     /// Scale axis (spread): continuous zoom, or one-shot pinch-in/out.
     pinch: Option<ContinuousAction>,
     pinch_in: Option<ThresholdAction>,
@@ -111,7 +115,23 @@ impl Plan {
     /// A move/resize preemptor lives in the simultaneous engine's breakthrough, so
     /// its presence pulls the gesture there even without a continuous pan/zoom.
     fn has_preemptor(&self) -> bool {
-        self.doubletap_swipe.is_some() || self.hold_swipe.is_some()
+        self.doubletap_swipe.is_some()
+            || self.hold_swipe.is_some()
+            || self.doubletap_hold_swipe.is_some()
+    }
+
+    /// A window grab bound directly to the base swipe slot (move/resize, never
+    /// pan): the drag grabs the window at activation instead of panning.
+    fn swipe_grab(&self) -> Option<ContinuousAction> {
+        match &self.swipe {
+            Some(GestureConfigEntry::Continuous(
+                action @ (ContinuousAction::MoveWindow
+                | ContinuousAction::MoveSnappedWindows
+                | ContinuousAction::ResizeWindow
+                | ContinuousAction::ResizeWindowSnapped),
+            )) => Some(action.clone()),
+            _ => None,
+        }
     }
 
     /// Run the simultaneous pan+zoom engine when translation pans continuously, when
@@ -131,6 +151,7 @@ impl Plan {
             && self.swipe_dirs.iter().all(Option::is_none)
             && self.doubletap_swipe.is_none()
             && self.hold_swipe.is_none()
+            && self.doubletap_hold_swipe.is_none()
             && self.pinch.is_none()
             && self.pinch_in.is_none()
             && self.pinch_out.is_none()
@@ -217,11 +238,9 @@ pub enum Decision {
     /// Fire a resolved one-shot threshold action (navigate swipe / pinch-in/out).
     FireThreshold(Action),
     /// Hand the translation drag to a window move/resize grab of this kind; the
-    /// adapter resolves the window under the finger and the cluster snapshot.
-    StartWindowGrab {
-        action: ContinuousAction,
-        cluster: bool,
-    },
+    /// adapter resolves the window under the finger. Cluster scope is encoded by
+    /// the action itself (`MoveSnappedWindows` / `ResizeWindowSnapped`).
+    StartWindowGrab { action: ContinuousAction },
     /// Last-finger-up momentum coast.
     Momentum,
     /// A clean tap fired: raise+focus the window under `focus_at` (screen-space),
@@ -445,6 +464,7 @@ impl TouchRecognizer {
             ],
             doubletap_swipe: continuous(GestureTrigger::DoubletapSwipe { fingers: n }),
             hold_swipe: continuous(GestureTrigger::HoldSwipe { fingers: n }),
+            doubletap_hold_swipe: continuous(GestureTrigger::DoubletapHoldSwipe { fingers: n }),
             pinch: continuous(GestureTrigger::Pinch { fingers: n }),
             pinch_in: threshold(GestureTrigger::PinchIn { fingers: n }),
             pinch_out: threshold(GestureTrigger::PinchOut { fingers: n }),
@@ -760,24 +780,27 @@ impl TouchRecognizer {
             self.last_spread = self.spread(centroid);
 
             // Hold variants belong to a translation gesture only: a held drag selects
-            // move (armed doubletap-swipe) / cluster-move (armed + held) / resize
-            // (held hold-swipe). A pinch is a zoom, never a grab. A failed grab (no
-            // window) falls through to pan.
+            // a window grab per the bound trigger — armed+held doubletap-hold-swipe,
+            // armed doubletap-swipe, held hold-swipe, else a grab bound to the base
+            // swipe. A pinch is a zoom, never a grab. When the selected slot is
+            // unbound the arm falls through to the next; a doubletap/hold grab with
+            // no window under the finger falls through to pan, but a base-swipe grab
+            // has no pan bound, so that drag is inert. Cluster scope is the action's
+            // own (no implicit upgrade).
             if !self.zoom_engaged {
                 let held = time.saturating_sub(self.tap_start_time) >= HOLD_MS;
-                // The held→cluster upgrade is a doubletap-swipe affordance
-                // ("hold to move the cluster"). A hold-swipe binding is already
-                // held by definition, so upgrading it would make `move-window`
-                // indistinguishable from `move-snapped-windows` there.
-                let (preempt, cluster) = if self.armed_for_move {
-                    (self.plan.doubletap_swipe.clone(), held)
-                } else if held {
-                    (self.plan.hold_swipe.clone(), false)
-                } else {
-                    (None, false)
-                };
-                if let Some(action) = preempt {
-                    out.push(Decision::StartWindowGrab { action, cluster });
+                let action =
+                    if self.armed_for_move && held && self.plan.doubletap_hold_swipe.is_some() {
+                        self.plan.doubletap_hold_swipe.clone()
+                    } else if self.armed_for_move && self.plan.doubletap_swipe.is_some() {
+                        self.plan.doubletap_swipe.clone()
+                    } else if held && self.plan.hold_swipe.is_some() {
+                        self.plan.hold_swipe.clone()
+                    } else {
+                        self.plan.swipe_grab()
+                    };
+                if let Some(action) = action {
+                    out.push(Decision::StartWindowGrab { action });
                 }
             }
             return out;

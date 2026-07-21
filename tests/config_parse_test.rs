@@ -520,7 +520,7 @@ fn gesture_pinch_threshold_is_error() {
         "pinch + threshold action should be rejected"
     );
     assert!(
-        result.unwrap_err().contains("pinch-in or pinch-out"),
+        result.unwrap_err().contains("pinch-in/pinch-out"),
         "error message should suggest pinch-in/pinch-out"
     );
 }
