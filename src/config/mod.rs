@@ -6,7 +6,7 @@ mod toml;
 mod types;
 
 pub use parse::{
-    parse_action, parse_direction, parse_gesture_binding, parse_gesture_config_entry,
+    ACTION_NAMES, parse_action, parse_direction, parse_gesture_binding, parse_gesture_config_entry,
     parse_gesture_trigger, parse_key_combo, parse_mouse_action, parse_mouse_binding,
     parse_tap_combo, parse_touch_config_entry, parse_touch_trigger,
 };

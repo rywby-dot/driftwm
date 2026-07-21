@@ -636,7 +636,8 @@ Actions:
 - `cycle-windows forward` — Alt-Tab style window cycling
 - `cycle-windows backward` — reverse cycle
 - `home-toggle` — toggle between current position and origin
-- `zoom-in / zoom-out` — step zoom
+- `zoom-in` — step zoom in
+- `zoom-out` — step zoom out
 - `zoom-reset` — zoom to 1.0
 - `go-to <x> <y>` — jump camera to canvas position (bookmarks, Y-up)
 - `zoom-to-fit` — fit all windows in viewport
@@ -651,7 +652,7 @@ Actions:
 - `quit` — exit the compositor
 - `send-to-output <dir>` — move focused window to adjacent output
 - `send-cursor-to-output <dir>` — move the cursor to adjacent output
-- `switch-layout <target>` — cycle keyboard layout: next, prev, or a 0-based index
+- `switch-layout <target>` — cycle keyboard layout: next, prev (or previous), or a 0-based index
 - `none` — unbind this key combo
 
 Directions: up, down, left, right, up-left, up-right, down-left, down-right
@@ -752,9 +753,17 @@ When true, maximize/unmaximize initiated via window decoration (CSD maximize but
 
 Mouse bindings: "Modifier+...+Trigger" = "action" Context-aware: on-window, on-canvas, anywhere. Specific context checked first, then "anywhere" as fallback. Click-to-focus and SSD decoration clicks are always hardcoded. Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll, wheel-up, wheel-down. The wheel-up/wheel-down triggers fire once per discrete wheel notch and can run any action, e.g. volume on mod+shift+scroll. Merges with defaults. Use "none" to unbind.
 
-Mouse actions: move-window, move-snapped-windows, resize-window, resize-window-snapped, pan-viewport, zoom, center-nearest Any keyboard action also works for button triggers: exec, close-window, toggle-fullscreen, etc.
+Mouse actions:
 
-move-window / resize-window act on the focused window only. move-snapped-windows / resize-window-snapped also translate every window connected to the focused one via snap adjacency
+- `move-window` — drag the focused window
+- `move-snapped-windows` — drag the window plus every window connected via snap adjacency
+- `resize-window` — drag-resize the focused window
+- `resize-window-snapped` — drag-resize, propagating to the snap cluster
+- `pan-viewport` — drag or scroll to pan the camera
+- `zoom` — drag or scroll to zoom
+- `center-nearest` — navigate toward the drag direction
+
+Any action from the [keybindings] Actions list also works on button and wheel-up/wheel-down triggers: `exec <cmd>`, close-window, toggle-fullscreen, etc.
 
 ## `[mouse.on-window]`
 
@@ -809,7 +818,7 @@ scale above which pinch-out fires (1.0 = no pinch)
 
 Gesture bindings: `"Modifier+N-finger-<type>" = "action"` Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" unbinds (prevents anywhere fallback, still forwards).
 
-Gesture types:
+Gesture types (2–5 fingers):
 
 - `N-finger-swipe` — continuous OR threshold (action determines behavior)
 - `N-finger-swipe-up/down/left/right` — threshold only, checked before swipe fallback
@@ -818,7 +827,7 @@ Gesture types:
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-hold` — threshold only (fires on release)
 
-Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, fill-window, `exec <cmd>`, etc.
+Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: any action from the [keybindings] Actions list except `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g. center-nearest, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fill-window, `exec <cmd>`. center-nearest works on swipe triggers only (direction comes from the swipe).
 
 ## `[gestures.on-window]`
 
@@ -884,7 +893,7 @@ Touch gesture types (1–5 fingers):
 - `N-finger-doubletap-swipe` — continuous only (tap then drag)
 - `N-finger-hold-swipe` — continuous only (dwell then drag)
 
-Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, `exec <cmd>`, etc.
+Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: any action from the [keybindings] Actions list except `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g. center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, `exec <cmd>`. center-nearest works on swipe triggers only (direction comes from the swipe).
 
 Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
 
@@ -1061,9 +1070,9 @@ Supported fields:
 
 Pattern syntax (applies to all match fields):
 
-- `Plain string` — exact match: "kitty"
-- `Glob` — * wildcard:  "steam_app_*"
-- `Regex` — wrap in /…/: "/^steam_app_\\d+$/"
+- Plain string `"kitty"` — exact match
+- Glob `"steam_app_*"` — `*` wildcard
+- Regex `"/^steam_app_\\d+$/"` — wrap in `/…/`
 
 To find a window's identifiers, run while the window is open:
 
