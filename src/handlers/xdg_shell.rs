@@ -3,8 +3,6 @@ use std::collections::HashSet;
 
 use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab};
 use crate::state::{DriftWm, FocusTarget, PopupGrabState, output_state};
-use crate::surface_tree::focus_belongs_to_toplevel;
-use driftwm::window_ext::WindowExt;
 use smithay::{
     delegate_xdg_shell,
     desktop::{
@@ -19,7 +17,7 @@ use smithay::{
             protocol::{wl_output, wl_seat},
         },
     },
-    utils::{Point, Rectangle, Serial},
+    utils::{Rectangle, Serial},
     wayland::{
         compositor::with_states,
         input_method::InputMethodSeat,
@@ -251,109 +249,14 @@ impl XdgShellHandler for DriftWm {
         // can't match above; sweep any fullscreen entry it left behind.
         self.reap_dead_fullscreen();
 
-        if let Some(ref window) = window {
-            // Pick a window to follow when the destroyed one was focused.
-            // Priority: explicit parent (xdg_toplevel.set_parent), then the
-            // MRU history entry that's spatially related (cluster member or
-            // overlap), then plain MRU. Spatial fallback covers transient/
-            // OAuth windows that auto-placement snapped near the launcher
-            // but don't carry a parent_surface relation.
-            let follow = window
-                .parent_surface()
-                .and_then(|ps| {
-                    let parent = self.window_for_surface(&ps)?;
-                    Some(
-                        self.topmost_modal_child(&parent)
-                            .filter(|mc| mc != window)
-                            .unwrap_or(parent),
-                    )
-                })
-                .or_else(|| self.first_spatially_related_in_history(window));
-
-            // When auto-navigation is off, dropping an off-screen follow target
-            // guarantees focus never lands somewhere the user can't see.
-            let follow = follow
-                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
-
-            let keyboard = self.seat.get_keyboard().unwrap();
-            let current_focus = keyboard.current_focus();
-            let no_keyboard_focus = current_focus.is_none();
-            let focus_on_this_toplevel = current_focus
-                .as_ref()
-                .is_some_and(|f| focus_belongs_to_toplevel(&f.0, &wl_surface));
-            let was_last_focused = self
-                .stage
-                .focus_history()
-                .first()
-                .is_some_and(|last_focused| last_focused == window);
-            if focus_on_this_toplevel || was_last_focused || no_keyboard_focus {
-                if let Some(target) = follow {
-                    // Pan only if the follow target isn't already fully on
-                    // screen — set_focus alone is enough when the user can
-                    // already see where focus is going.
-                    if self.window_fully_in_viewport(&target) {
-                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                        self.raise_and_focus(&target, serial);
-                    } else {
-                        self.navigate_to_window(&target, false);
-                    }
-                } else {
-                    // No follow target. Pick first MRU entry; if it's
-                    // completely off the destroyed window's home output, fall
-                    // back to the nearest visible window (by canvas distance
-                    // from the destroyed window's center). If nothing is
-                    // visible, clear focus rather than focus the void.
-                    //
-                    // Prefer the fullscreen output when the destroyed window
-                    // was fullscreen: after the camera restore above, the
-                    // window's location is still pinned to the old fullscreen
-                    // camera, so output_for_window may misroute to the
-                    // cursor's monitor.
-                    let home = fs_output
-                        .clone()
-                        .or_else(|| self.output_for_window(window))
-                        .or_else(|| self.active_output());
-                    let mru = self
-                        .stage
-                        .focus_history()
-                        .iter()
-                        .find(|w| w != &window)
-                        .cloned();
-                    let target = match (home.as_ref(), mru) {
-                        (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
-                            Some(m)
-                        }
-                        (Some(out), _) => {
-                            let from = self.window_visual_center(window).unwrap_or_else(|| {
-                                let loc = self.stage.position_of(window).unwrap_or_default();
-                                let size = window.geometry().size;
-                                Point::from((
-                                    loc.x as f64 + size.w as f64 / 2.0,
-                                    loc.y as f64 + size.h as f64 / 2.0,
-                                ))
-                            });
-                            self.nearest_visible_window_on(from, out, window)
-                        }
-                        (None, _) => None,
-                    };
-
-                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                    if let Some(target) = target {
-                        self.raise_and_focus(&target, serial);
-                    } else {
-                        self.set_window_focus(None, serial);
-                    }
-                }
-            }
-            self.unmap_window(window);
-            // The window may have sat under the cursor; re-target pointer focus
-            // now that it's gone so clicks don't fall into the destroyed surface.
-            self.refresh_pointer_focus();
+        if let Some(window) = window {
+            // Keep the last committed surface tree mapped for one composition
+            // pass. The renderer snapshots it, then performs the unmap, focus
+            // recovery, and per-surface cleanup.
+            self.begin_destroyed_window_close(&window);
+        } else {
+            self.cleanup_surface_state(&wl_surface);
         }
-        // Must run after the focus-follow block above: that derives the dying
-        // window's snap rect from stable_snap_rects (and, on a cache miss, live
-        // geometry reading its decorations/pinned entries), so clear last.
-        self.cleanup_surface_state(&wl_surface);
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, serial: Serial) {

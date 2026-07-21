@@ -43,12 +43,28 @@ impl CompositorHandler for DriftWm {
         &mut self,
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) {
-        // Safety net for crash path — toplevel_destroyed handles normal xdg
-        // shutdown, but a client crash destroys wl_surface without it.
-        self.cleanup_surface_state(surface);
         // lock_surfaces is keyed by output — sweep values.
         self.lock_surfaces
             .retain(|_, ls| ls.wl_surface() != surface);
+
+        // wl_surface.destroyed may precede toplevel_destroyed. Consume the
+        // cached last frame and all focus/navigation state before cleanup can
+        // discard either of them. The later xdg callback then simply misses
+        // the already-unmapped window.
+        if let Some(window) = self.window_for_surface(surface) {
+            if let Some(output) = self.find_fullscreen_output_for_surface(surface) {
+                self.stage.take_fullscreen(&output.name());
+                let ret = crate::state::output_state(&output).fullscreen_return.take();
+                if let Some(ret) = ret {
+                    self.restore_fullscreen_view(&output, ret.camera, ret.zoom);
+                }
+            }
+            self.begin_destroyed_window_close(&window);
+            self.reap_dead_fullscreen();
+            return;
+        }
+
+        self.cleanup_surface_state(surface);
         self.stage
             .remove_from_history_matching(|w| w.wl_surface().as_deref() == Some(surface));
         self.reap_dead_fullscreen();
@@ -218,6 +234,15 @@ impl CompositorHandler for DriftWm {
             }
             let window = self.window_for_surface(&root);
             if let Some(window) = window {
+                let id = root.id();
+                let dirty: Vec<_> = self
+                    .render
+                    .close_snapshot_cache
+                    .keys()
+                    .filter(|(_, surface_id)| surface_id == &id)
+                    .cloned()
+                    .collect();
+                self.render.close_snapshot_dirty.extend(dirty);
                 window.on_commit();
 
                 if self.pending_center.remove(&root) {

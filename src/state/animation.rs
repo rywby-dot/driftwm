@@ -11,6 +11,8 @@ use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 use smithay::output::Output;
 
+use crate::surface_tree::focus_belongs_to_toplevel;
+
 use super::{DriftWm, FocusTarget, output_state};
 
 impl DriftWm {
@@ -115,32 +117,31 @@ impl DriftWm {
     }
 
     pub fn request_window_close(&mut self, window: &smithay::desktop::Window) {
-        if self.backend.is_none() {
-            window.send_close();
-            return;
-        }
+        // xdg_toplevel.close is only a request: the client may keep the
+        // toplevel alive (for example while showing a save confirmation).
+        // The close animation starts from toplevel_destroyed, once teardown is
+        // real, and therefore also covers client-initiated/CSD closes.
+        window.send_close();
+    }
+
+    pub(crate) fn begin_destroyed_window_close(&mut self, window: &smithay::desktop::Window) {
         if !self.window_animations.request_close(window) {
             return;
         }
-        let can_capture = matches!(self.session_lock, super::SessionLock::Unlocked)
-            && self
-                .space
-                .outputs()
-                .filter(|output| {
-                    self.active_outputs.contains(*output)
-                        && !self.dpms_off_outputs.contains(*output)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .any(|output| self.window_intersects_viewport_on(window, &output));
-        if can_capture {
-            self.mark_all_dirty();
-        } else {
-            // Nothing can flash on screen, and no output composition pass can
-            // capture this window. Remove it immediately without a snapshot.
-            self.finish_snapshotted_close(window, None);
-        }
+        let snapshot = window.wl_surface().and_then(|surface| {
+            let id = surface.id();
+            let key = self
+                .render
+                .close_snapshot_cache
+                .keys()
+                .find(|(_, surface_id)| surface_id == &id)
+                .cloned()?;
+            self.render.close_snapshot_dirty.remove(&key);
+            self.render.close_snapshot_cache.remove(&key)
+        });
+
+        self.finish_snapshotted_close(window, snapshot);
+        self.mark_all_dirty();
     }
 
     pub(crate) fn tick_window_animations(&mut self, dt: Duration) {
@@ -175,7 +176,16 @@ impl DriftWm {
             self.closing_snapshots.push(snapshot);
         }
 
-        let was_focused = self.focused_window().as_ref() == Some(window);
+        let keyboard_focus = self.seat.get_keyboard().unwrap().current_focus();
+        let was_focused = keyboard_focus.is_none()
+            || keyboard_focus
+                .as_ref()
+                .is_some_and(|focus| focus_belongs_to_toplevel(&focus.0, &surface))
+            || self
+                .stage
+                .focus_history()
+                .first()
+                .is_some_and(|last| last == window);
         let next_focus = was_focused.then(|| {
             // Resolve the target while the closing window is still mapped: its
             // output and stable geometry are needed by the normal close policy.
@@ -230,7 +240,6 @@ impl DriftWm {
             }
         });
         self.unmap_window(window);
-        close_window.send_close();
 
         if was_focused {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -247,6 +256,7 @@ impl DriftWm {
             }
         }
         self.refresh_pointer_focus();
+        self.cleanup_surface_state(&surface);
     }
 
     pub(crate) fn window_visual(

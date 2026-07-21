@@ -972,6 +972,12 @@ impl DriftWm {
         self.render.blur_cache.retain(|(_, sid), _| sid != &id);
         self.render.shadow_cache.remove(&id);
         self.render.border_cache.remove(&id);
+        self.render
+            .close_snapshot_cache
+            .retain(|(_, surface_id), _| surface_id != &id);
+        self.render
+            .close_snapshot_dirty
+            .retain(|(_, surface_id)| surface_id != &id);
         // capture_state keys this surface's texture/damage tracker under "cap-tl:".
         self.render
             .capture_state

@@ -679,6 +679,14 @@ pub fn compose_frame(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
+        let close_cache_key = (output.name(), wl_surface.id());
+        if state.window_close_pending(window)
+            && let Some(snapshot) = state.render.close_snapshot_cache.remove(&close_cache_key)
+        {
+            state.render.close_snapshot_dirty.remove(&close_cache_key);
+            completed_closes.push((window.clone(), Some(snapshot)));
+            continue;
+        }
         let is_fullscreen = state.stage.is_fullscreen(window);
         let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
 
@@ -1168,7 +1176,14 @@ pub fn compose_frame(
             }
         }
 
-        if state.window_close_pending(window) {
+        let close_pending = state.window_close_pending(window);
+        let refresh_close_cache = !close_pending
+            && (!state
+                .render
+                .close_snapshot_cache
+                .contains_key(&close_cache_key)
+                || state.render.close_snapshot_dirty.remove(&close_cache_key));
+        if close_pending || refresh_close_cache {
             let snapshot = match closing::capture(
                 renderer,
                 &output.name(),
@@ -1184,7 +1199,14 @@ pub fn compose_frame(
                     None
                 }
             };
-            completed_closes.push((window.clone(), snapshot));
+            if close_pending {
+                completed_closes.push((window.clone(), snapshot));
+            } else if let Some(snapshot) = snapshot {
+                state
+                    .render
+                    .close_snapshot_cache
+                    .insert(close_cache_key, snapshot);
+            }
         }
     }
 
