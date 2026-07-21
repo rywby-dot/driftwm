@@ -185,7 +185,21 @@ impl DriftWm {
     /// origin; live windows are appended as `Quit` records when `include_live`.
     /// Carried-forward entries lead so freshly-active windows restore on top.
     fn build_session_envelope(&mut self, include_live: bool) -> SessionEnvelope {
-        let mut entries = self.session_store.carried_forward.clone();
+        // With restore on (live windows serialized below), the live canvas is
+        // authoritative for quit-origin windows, so a carried-forward quit
+        // record — held only to survive flag-off sessions — would duplicate a
+        // relaunched live window and materialize a second stand-in next boot.
+        // Explicit-origin carries always survive independently.
+        let mut entries: Vec<SessionEntry> = if include_live {
+            self.session_store
+                .carried_forward
+                .iter()
+                .filter(|e| e.origin == Origin::Explicit)
+                .cloned()
+                .collect()
+        } else {
+            self.session_store.carried_forward.clone()
+        };
         // The record id is informational (materialization assigns fresh
         // in-process ids); numbering live windows past the suspended ids just
         // keeps them distinct within this write.

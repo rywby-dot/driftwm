@@ -168,6 +168,58 @@ fn flag_off_materializes_explicit_and_carries_quit() {
     assert_eq!(after.entries[0].origin, Origin::Quit);
 }
 
+/// Restore flipped on after a flag-off boot must not duplicate a relaunched app:
+/// the carried-forward quit entry is dropped at shutdown (the live canvas is
+/// authoritative), so the app serializes once, not twice.
+#[test]
+fn restore_flip_on_drops_carried_quit_for_relaunched_app() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    // A prior session left a quit entry for "onlyquit".
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        saved_at: 0,
+        entries: vec![entry(2, "onlyquit", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Boot with restore off: the quit entry is carried, not materialized.
+    let mut f = Fixture::with_config(config_restore(false));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["onlyquit"]);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    assert_eq!(
+        suspended_in_order(&mut f).len(),
+        0,
+        "nothing materializes while restore is off"
+    );
+
+    // The user relaunches the app — now a live window on the canvas.
+    let id = f.add_client();
+    map_at(&mut f, id, "onlyquit", (400, 300), (300, 300));
+
+    // Config hot-reload flips restore on; shutdown serializes the live windows.
+    f.state().config.restore_session = true;
+    f.state().serialize_session_on_shutdown();
+
+    // The app is written exactly once (the live window), not duplicated by the
+    // carried-forward quit entry.
+    let after = session::read(&path);
+    let count = after
+        .entries
+        .iter()
+        .filter(|e| e.app_id == "onlyquit")
+        .count();
+    assert_eq!(
+        count, 1,
+        "the relaunched app serializes once, with no carried duplicate"
+    );
+}
+
 /// A durable per-output camera seeds a freshly connected output on fresh boot
 /// (no runtime entry). Runtime-wins is exercised by the `merge_saved_cameras`
 /// unit test.
