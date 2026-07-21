@@ -61,10 +61,13 @@ html:not(.js) {
     --copy-button-filter: invert(60%);
 }
 
-/* Monochrome links need a non-color affordance. */
-.content a {
+/* Monochrome links need a non-color affordance: bold + underline. `:not(.header)`
+ * keeps heading self-anchors looking like headings, not links. */
+.content a:not(.header) {
     text-decoration: underline;
+    font-weight: bold;
 }
 .chapter li a.active {
     text-decoration: underline;
+    font-weight: bold;
 }
