@@ -191,6 +191,41 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
     }
 }
 
+/// Every action name `parse_action` accepts, with a canonical sample binding
+/// value that must parse. The config-reference exhaustiveness test keeps this
+/// list and the documented `Actions:` catalog in lockstep.
+pub const ACTION_NAMES: &[(&str, &str)] = &[
+    ("center-nearest", "center-nearest up"),
+    ("center-window", "center-window"),
+    ("close-window", "close-window"),
+    ("cycle-windows", "cycle-windows forward"),
+    ("exec", "exec foo"),
+    ("exec-launcher", "exec-launcher"),
+    ("exec-terminal", "exec-terminal"),
+    ("fill-window", "fill-window"),
+    ("fit-window", "fit-window"),
+    ("fit-window-snapped", "fit-window-snapped"),
+    ("focus-center", "focus-center"),
+    ("go-to", "go-to 0 0"),
+    ("home-toggle", "home-toggle"),
+    ("nudge-window", "nudge-window up"),
+    ("pan-viewport", "pan-viewport up"),
+    ("quit", "quit"),
+    ("reload-config", "reload-config"),
+    ("send-cursor-to-output", "send-cursor-to-output up"),
+    ("send-to-output", "send-to-output up"),
+    ("spawn", "spawn foo"),
+    ("switch-layout", "switch-layout next"),
+    ("toggle-cursor-pan", "toggle-cursor-pan"),
+    ("toggle-fullscreen", "toggle-fullscreen"),
+    ("toggle-pin-to-screen", "toggle-pin-to-screen"),
+    ("zoom-in", "zoom-in"),
+    ("zoom-out", "zoom-out"),
+    ("zoom-reset", "zoom-reset"),
+    ("zoom-to-fit", "zoom-to-fit"),
+    ("zoom-to-fit-snapped", "zoom-to-fit-snapped"),
+];
+
 /// Parse a mouse action string like "move-window" or "zoom".
 /// Continuous/grab actions are matched first; anything else falls through
 /// to `parse_action` so that any keyboard action works for click triggers.
@@ -547,5 +582,59 @@ pub fn parse_touch_config_entry(
             ),
         },
         _ => parse_gesture_config_entry(trigger, action_str),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// exhaustive on purpose — a new Action variant fails to compile here until
+    /// it's named, and its name must join ACTION_NAMES.
+    fn action_name(action: &Action) -> &'static str {
+        match action {
+            Action::Exec(_) => "exec",
+            Action::ExecTerminal => "exec-terminal",
+            Action::ExecLauncher => "exec-launcher",
+            Action::Spawn(_) => "spawn",
+            Action::CloseWindow => "close-window",
+            Action::NudgeWindow(_) => "nudge-window",
+            Action::PanViewport(_) => "pan-viewport",
+            Action::CenterWindow => "center-window",
+            Action::CenterNearest(_) => "center-nearest",
+            Action::CycleWindows { .. } => "cycle-windows",
+            Action::HomeToggle => "home-toggle",
+            Action::GoToPosition(..) => "go-to",
+            Action::ZoomIn => "zoom-in",
+            Action::ZoomOut => "zoom-out",
+            Action::ZoomReset => "zoom-reset",
+            Action::ZoomToFit => "zoom-to-fit",
+            Action::ZoomToFitSnapped => "zoom-to-fit-snapped",
+            Action::ToggleFullscreen => "toggle-fullscreen",
+            Action::FitWindow => "fit-window",
+            Action::FitWindowSnapped => "fit-window-snapped",
+            Action::FillWindow => "fill-window",
+            Action::SendToOutput(_) => "send-to-output",
+            Action::SendCursorToOutput(_) => "send-cursor-to-output",
+            Action::FocusCenter => "focus-center",
+            Action::TogglePinToScreen => "toggle-pin-to-screen",
+            Action::SwitchLayout(_) => "switch-layout",
+            Action::ReloadConfig => "reload-config",
+            Action::ToggleCursorPan => "toggle-cursor-pan",
+            Action::Quit => "quit",
+        }
+    }
+
+    #[test]
+    fn action_names_round_trip_to_their_variant() {
+        for (name, sample) in ACTION_NAMES {
+            let parsed = parse_action(sample)
+                .unwrap_or_else(|e| panic!("sample {sample:?} for {name} failed to parse: {e}"));
+            assert_eq!(
+                action_name(&parsed),
+                *name,
+                "sample {sample:?} parsed to a variant whose name is not {name:?}"
+            );
+        }
     }
 }
