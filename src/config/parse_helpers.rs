@@ -402,6 +402,7 @@ pub(super) fn parse_window_rule(
         title,
         position: r.position.map(|[x, y]| (x, y)),
         size,
+        fullscreen: r.fullscreen,
         widget: r.widget,
         pinned_to_screen: r.pinned_to_screen,
         decoration,
@@ -413,10 +414,20 @@ pub(super) fn parse_window_rule(
         border_color_focused,
         corner_radius,
         shadow: r.shadow,
+        output: r.output,
+        layer_order: r.layer_order,
     })
 }
 
 pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings) -> EffectsConfig {
+    if raw.animate_blur.is_some() {
+        collect_warn(
+            errors,
+            "config: [effects] animate_blur is deprecated — animated blur is throttled by \
+             animate_blur_fps now (default 20, 0 = off)"
+                .to_string(),
+        );
+    }
     EffectsConfig {
         blur_radius: raw.blur_radius.unwrap_or(2),
         blur_strength: non_negative(
@@ -424,7 +435,8 @@ pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings
             "effects.blur_strength",
             errors,
         ),
-        animate_blur: raw.animate_blur.unwrap_or(false),
+        // 0 = off (frost freezes, stops re-sampling the animated wallpaper).
+        animate_blur_fps: raw.animate_blur_fps.unwrap_or(20).min(144),
     }
 }
 
@@ -454,6 +466,9 @@ pub(super) fn parse_transform(s: &str) -> Result<Transform, String> {
 pub(super) fn parse_output_mode(s: &str) -> Result<OutputMode, String> {
     if s == "preferred" {
         return Ok(OutputMode::Preferred);
+    }
+    if s == "max" {
+        return Ok(OutputMode::Max);
     }
     // "WxH" or "WxH@Hz"
     let (res_part, hz_part) = match s.split_once('@') {
@@ -505,17 +520,30 @@ pub(super) fn parse_output_position(val: &::toml::Value) -> Result<OutputPositio
     }
 }
 
-pub(super) fn parse_output_rule(r: OutputRuleFile) -> Result<OutputConfig, String> {
+pub(super) fn parse_output_rule(
+    r: OutputRuleFile,
+    errors: &mut Warnings,
+) -> Result<OutputConfig, String> {
     let scale = match r.scale {
         Some(s) if s <= 0.0 => return Err(format!("scale must be positive, got {s}")),
         other => other,
     };
     let transform = r.transform.map(|s| parse_transform(&s)).transpose()?;
-    let position = r
+    let mut position = r
         .position
         .map(|v| parse_output_position(&v))
         .transpose()?
         .unwrap_or_default();
+    // A fixed position would put every wildcard-matched monitor at the same
+    // spot, so it's meaningless — drop it but keep the rest of the entry.
+    if r.name == "*" && matches!(position, OutputPosition::Fixed(..)) {
+        collect_warn(
+            errors,
+            "config: [[outputs]] wildcard \"*\" can't have a fixed position, using \"auto\""
+                .to_string(),
+        );
+        position = OutputPosition::Auto;
+    }
     let mode = r
         .mode
         .map(|s| parse_output_mode(&s))
@@ -608,6 +636,11 @@ mod tests {
             parse_output_mode("preferred").unwrap(),
             OutputMode::Preferred
         );
+    }
+
+    #[test]
+    fn parse_mode_max() {
+        assert_eq!(parse_output_mode("max").unwrap(), OutputMode::Max);
     }
 
     #[test]

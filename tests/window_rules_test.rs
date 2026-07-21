@@ -8,6 +8,7 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         title: title.map(|s| Pattern::Glob(s.to_string())),
         position: None,
         size: None,
+        fullscreen: None,
         widget: false,
         pinned_to_screen: false,
         decoration: None,
@@ -19,6 +20,8 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         border_color_focused: None,
         corner_radius: None,
         shadow: None,
+        output: None,
+        layer_order: None,
     }
 }
 
@@ -353,6 +356,51 @@ fn resolve_window_rules_no_matching_rule_returns_none() {
 }
 
 #[test]
+fn resolve_window_rules_layer_order_parses_and_merges_last_wins() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "*"
+        layer_order = 5
+
+        [[window_rules]]
+        app_id = "wvkbd"
+        layer_order = 10
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("wvkbd", "")
+            .unwrap()
+            .layer_order,
+        Some(10)
+    );
+    assert_eq!(
+        config
+            .resolve_window_rules("touchview", "")
+            .unwrap()
+            .layer_order,
+        Some(5)
+    );
+}
+
+#[test]
+fn resolve_window_rules_layer_order_defaults_to_none() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "wvkbd"
+        blur = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("wvkbd", "")
+            .unwrap()
+            .layer_order,
+        None
+    );
+}
+
+#[test]
 fn resolve_window_rules_two_matching_rules_merge_in_order() {
     // Rule 1 (wildcard): sets blur=true, opacity=0.5
     // Rule 2 (specific):  sets opacity=0.8 (last-wins), widget stays false
@@ -489,4 +537,44 @@ fn pinned_to_screen_sticky_across_two_toml_rules() {
     let config = Config::from_toml(toml).unwrap();
     let applied = config.resolve_window_rules("myapp", "title").unwrap();
     assert!(applied.pinned_to_screen);
+}
+
+#[test]
+fn output_parses_from_toml() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "myapp"
+        output = "DP-1"
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("myapp", "title").unwrap();
+    assert_eq!(applied.output.as_deref(), Some("DP-1"));
+}
+
+#[test]
+fn output_omitted_in_toml_defaults_none() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "myapp"
+        blur = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("myapp", "title").unwrap();
+    assert_eq!(applied.output, None);
+}
+
+#[test]
+fn output_last_wins_across_two_toml_rules() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "*"
+        output = "DP-1"
+
+        [[window_rules]]
+        app_id = "myapp"
+        output = "HDMI-A-1"
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("myapp", "title").unwrap();
+    assert_eq!(applied.output.as_deref(), Some("HDMI-A-1"));
 }

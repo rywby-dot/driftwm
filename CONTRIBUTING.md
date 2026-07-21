@@ -6,6 +6,8 @@ Thanks for your interest! driftwm is experimental and primarily an AI-assisted l
 
 **Open an issue first for non-trivial changes.** Anything beyond a quick fix — features, refactors, multi-file changes — should start as an issue so we can align on the approach before you invest time. Small fixes can go straight to PR.
 
+**Read the internal docs in [`dev/docs/`](dev/docs/) before touching code** — architectural rules ([`caveats.md`](dev/docs/caveats.md)) and testing conventions ([`testing.md`](dev/docs/testing.md)) especially.
+
 ## Pull requests
 
 **Keep PRs small and focused on one concern.** One PR = one logical change. If your description says "this does X and Y", that's two PRs.

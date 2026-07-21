@@ -2,9 +2,19 @@
 
 Things to keep in mind as the codebase grows.
 
+## Never touch `Space` directly — go through the stage
+
+The stage (`src/stage/`) is the source of truth for the window list, z-order, positions, focus history, fullscreen membership, pin-to-screen membership, and fit state. Read window state from it (`stage.windows()`, `stage.position_of`, `DriftWm::element_under` / `window_bbox_with_popups`); mutate through `DriftWm::map_window` / `raise_window` / `unmap_window` and the stage-backed methods. `Space` holds no window elements at all — it survives only as the output registry (`map_output` / `outputs` / `output_geometry`). A clippy `disallowed-methods` lint (see `clippy.toml`) rejects every `Space` element API (reads *and* writes) and `Space::refresh`, and debug builds run `verify_stage_invariants` every frame in `post_render` — a panic there means a mutation bypassed the wrappers.
+
+Per-window output membership (`wl_surface.enter`/`leave`) is driven by `DriftWm::refresh_window_outputs`, not by `Space`: fullscreen windows belong only to their home output, pinned windows only to their pin target, and virtual placeholder outputs (dead `wl_output` global) are never entered. New enter/leave paths must route through it — membership sent from anywhere else reintroduces the multi-output fullscreen leak (a game unfullscreens when another output's camera pans over its parked window).
+
 ## Never block the event loop
 
 calloop is single-threaded. A 50ms DNS lookup, a slow file read, a stuck subprocess — anything that blocks the main thread freezes the entire compositor. All I/O must be async or offloaded.
+
+## Never lock `output_state` in a scrutinee
+
+`output_state(output)` returns a `MutexGuard`. In an `if let`/`while let`/`match` scrutinee the guard lives to the end of the body, so re-locking inside deadlocks the event loop — the v0.14.0 freeze when a client destroyed its toplevel while fullscreen. Take the guard in a separate `let` statement. Two guards enforce this: `clippy::significant_drop_in_scrutinee` (warn in `Cargo.toml [lints]`, hard error under CI's `-D warnings`) rejects the pattern statically, and debug builds panic on a re-entrant lock — which also catches the variant clippy can't see, a named guard held across a call that re-locks.
 
 ## Client misbehavior must not crash the compositor
 
@@ -33,7 +43,7 @@ driftwm sets all four `xdg_toplevel` Tiled states on every CSD window, even thou
 This is a deliberate semantic misuse of the protocol. The debt it incurs:
 
 - Some clients (Zed, anything using `gpui`) also drop their own resize edge handles on seeing Tiled, reasoning that a tiled window has compositor-managed size. We compensate with a compositor-side invisible resize margin around every CSD window (`input/mod.rs::surface_under` / `decoration_under`), mirroring what Mutter and KWin do for CSD apps.
-- SCTK-based toolkits (Alacritty) interpret `Tiled + size=None` as "stay at current tile size," not "pick preferred." So fit/fullscreen exit paths must always send an explicit size (`window_ext.rs::exit_fit_configure`, `exit_fullscreen_configure`), which in turn requires tracking a `RestoreSize` separately from `window.geometry().size` because some clients (Chromium) shrink their reported geometry on each round-trip.
+- SCTK-based toolkits (Alacritty) interpret `Tiled + size=None` as "stay at current tile size," not "pick preferred." So fit/fullscreen exit paths must always send an explicit size (`window_ext.rs::exit_fit_configure`, `exit_fullscreen_configure`), which in turn requires tracking a restore size (on the stage) separately from `window.geometry().size` because some clients (Chromium) shrink their reported geometry on each round-trip.
 - Every new "this client behaves weirdly under Tiled" issue traces back here.
 
 cosmic-comp makes the exact same bet (`clip_floating_windows` default-on in `AppearanceConfig`, `src/shell/element/window.rs:204`) and has carried the same complexity for years. This is a settled hack in Wayland-land, not a novel misstep — but it's still a hack. If a future protocol extension exposes "suppress client chrome" as a first-class signal, migrate to it and delete all of the above.
@@ -56,13 +66,12 @@ driftwm doesn't embed XWayland directly. X11 apps reach the compositor via [`xwa
 - **Clipboard works through standard Wayland data-device protocol.** xwayland-satellite owns selections as a normal Wayland client; the compositor doesn't bridge clipboards manually.
 - **No respawn-on-crash.** If satellite dies mid-session (rare), X11 stays dead until driftwm restart. Future enhancement.
 
-## What to unit test
+## What to test where
 
-Smithay glue code (handlers, delegates) is not worth testing — it's framework boilerplate. Write tests for **your** logic:
+Smithay glue code (handlers, delegates) is not worth unit testing — it's framework boilerplate. Pure logic (canvas math, config parsing, gesture/binding resolution) gets unit tests; stage policy gets the proptest harness; the protocol↔policy wiring gets the in-process headless fixture (`src/tests/`), where a real `DriftWm` serves real wayland clients with no display. The full map and the testing rules live in [testing.md](testing.md).
 
-- **Canvas/viewport math** (milestone 3): coordinate transforms, screen↔canvas conversion, viewport clipping. Pure functions, very testable.
-- **Gesture state machine** (milestone 5): feed event sequences, assert state transitions and emitted commands.
-- **Keybinding lookup** (when data-driven): binding table resolution, modifier matching, conflict detection.
-- **Config parsing** (milestone 12): TOML deserialization, defaults, validation.
+## Bounding boxes must include popups
 
-Manual testing is fine for everything else until you have a headless backend for integration tests.
+Smithay's inherent `Window::bbox()` covers the toplevel and its subsurfaces but **not** popups. `Space` always used the popup-inclusive box (`SpaceElement::bbox` is `bbox_with_popups`), and everything that replaced `Space` must too: hit-testing, render culling, frame-callback throttling, and dirty-marking all go through `window.bbox_with_popups()` (or `DriftWm::window_bbox_with_popups`). A popup-less box clips overhanging popups at output boundaries, throttles their frames to the off-screen heartbeat, and drops focus to the window behind when the popup is hovered. `Window::bbox` is banned via the `disallowed-methods` lint in `clippy.toml`.
+
+Canvas-layer widgets (`LayerSurface`) split the same way: culling, throttling, and dirty-marking use `bbox_with_popups()`, while initial placement (`handle_canvas_layer_commit`) and persistence deliberately use the popup-less `bbox()` — an open menu must not shift where a widget centers or what size gets saved.

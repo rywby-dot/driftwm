@@ -15,8 +15,8 @@ mod tile_chunks_tiff;
 mod tile_worker;
 
 pub use background::{BackgroundElement, init_background, update_background_element};
-pub use blur::BlurCache;
 pub(crate) use blur::compile_blur_shaders;
+pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
 pub use cursor::build_cursor_elements;
 pub use elements::{
@@ -169,6 +169,11 @@ fn push_plain_elements(
 /// capture's keys (scale=dpi, zoom=1.0) differ from the live frame's, so the
 /// next live frame rebuilds those entries once — preferred over a second cache
 /// since captures are rare.
+///
+/// When `isolate` is `Some(window)`, only that window (plus its popups + chrome)
+/// is composed, so overlapping neighbors never leak in. It renders at its stage
+/// position regardless of kind (see the render-loc note below), which is what
+/// lets a `window` capture cover pinned and fullscreen windows too.
 pub(crate) fn compose_capture_elements(
     state: &mut crate::state::DriftWm,
     renderer: &mut GlesRenderer,
@@ -176,6 +181,7 @@ pub(crate) fn compose_capture_elements(
     dpi_scale: f64,
     viewport_logical: Size<i32, Logical>,
     capture_bg: &capture_background::CaptureBackground,
+    isolate: Option<&smithay::desktop::Window>,
 ) -> Vec<OutputRenderElements> {
     use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 
@@ -194,10 +200,13 @@ pub(crate) fn compose_capture_elements(
     let mut widgets: Vec<OutputRenderElements> = Vec::new();
 
     // Collect first: the surface-tree calls borrow `state`, which would conflict
-    // with an in-flight `state.space.elements()` iterator. Windows are Arc-backed.
-    let windows: Vec<smithay::desktop::Window> = state.space.elements().rev().cloned().collect();
+    // with an in-flight `state.stage.windows()` iterator. Windows are Arc-backed.
+    let windows: Vec<smithay::desktop::Window> = state.stage.windows().rev().cloned().collect();
     for window in &windows {
-        let Some(loc) = state.space.element_location(window) else {
+        if isolate.is_some_and(|target| target != window) {
+            continue;
+        }
+        let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
         let geom_loc = window.geometry().loc;
@@ -205,7 +214,7 @@ pub(crate) fn compose_capture_elements(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
-        let is_fullscreen = state.fullscreen.values().any(|fs| &fs.window == window);
+        let is_fullscreen = state.stage.is_fullscreen(window);
         let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
 
         let applied = driftwm::config::applied_rule(&wl_surface);
@@ -246,7 +255,7 @@ pub(crate) fn compose_capture_elements(
                 &state.config.decorations,
             );
 
-        let mut bbox = window.bbox();
+        let mut bbox = window.bbox_with_popups();
         bbox.loc += loc - geom_loc;
         if has_ssd {
             let r = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32;
@@ -269,9 +278,19 @@ pub(crate) fn compose_capture_elements(
         // `output: None` => off-screen canvas capture. Pinned windows return
         // None here by construction, so a canvas screenshot never includes a
         // screen-pinned window.
-        let Some((render_loc, _)) = state.window_render_transform(window, None, camera, zoom)
-        else {
-            continue;
+        //
+        // Isolation bypasses that: `window_render_transform` excludes
+        // pinned/fullscreen from off-screen renders by design, but here the
+        // target renders at its real stage position regardless of kind — the
+        // same position the capture region was derived from, so the two agree.
+        let render_loc = if isolate.is_some() {
+            crate::state::canvas_render_loc(loc, geom_loc, camera)
+        } else {
+            let Some((render_loc, _)) = state.window_render_transform(window, None, camera, zoom)
+            else {
+                continue;
+            };
+            render_loc
         };
         let loc_phys: Point<i32, Physical> = render_loc.to_physical_precise_round(scale);
 
@@ -320,13 +339,18 @@ pub(crate) fn compose_capture_elements(
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
+            // Snap the title-bar band to whole physical pixels and share it across the
+            // bar, border, and shadow. Deriving each from the raw logical bar_height
+            // rounds their common top edge inconsistently at fractional scale
+            // (round(t*s) - round(h*s) != round((t-h)*s)) — a ±1px seam.
+            let bar_h_phys = (bar_height as f64 * scale.y).round();
+            let bar_h_logical = bar_h_phys / scale.y;
 
             // Reuse the buffer the live frame rasterized (no re-`update`): keeps
             // borrows simple, text is microseconds-stale at worst.
             if let Some(deco) = state.decorations.get(&wl_surface.id()) {
-                let bar_loc: Point<f64, Logical> =
-                    Point::from((render_loc.x, render_loc.y - bar_height as f64));
-                let bar_physical: Point<f64, Physical> = bar_loc.to_physical_precise_round(scale);
+                let bar_physical: Point<f64, Physical> =
+                    Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
                     Some(opacity as f32)
                 } else {
@@ -383,8 +407,8 @@ pub(crate) fn compose_capture_elements(
                 && let Some(shader) = state.render.border_shader.clone()
             {
                 let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x, render_loc.y - bar_height as f64).into(),
-                    (geom_size.w as f64, (geom_size.h + bar_height) as f64).into(),
+                    (render_loc.x, render_loc.y - bar_h_logical).into(),
+                    (geom_size.w as f64, geom_size.h as f64 + bar_h_logical).into(),
                 );
                 push_border_element(
                     target,
@@ -405,10 +429,10 @@ pub(crate) fn compose_capture_elements(
             if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
                 let bw = effective_bw as f64;
                 let body_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x - bw, render_loc.y - bar_height as f64 - bw).into(),
+                    (render_loc.x - bw, render_loc.y - bar_h_logical - bw).into(),
                     (
                         geom_size.w as f64 + 2.0 * bw,
-                        (geom_size.h + bar_height) as f64 + 2.0 * bw,
+                        geom_size.h as f64 + bar_h_logical + 2.0 * bw,
                     )
                         .into(),
                 );
@@ -498,9 +522,12 @@ pub(crate) fn compose_capture_elements(
 
     // Canvas-positioned layer widgets sit between normal windows and widget
     // toplevels, as in compose_frame. Screen-anchored layer surfaces (panels) are
-    // excluded — they aren't canvas content.
-    let canvas_layers =
-        build_canvas_layer_elements(state, renderer, output_scale, camera, zoom, visible_rect);
+    // excluded — they aren't canvas content. Isolated captures skip them too.
+    let canvas_layers = if isolate.is_some() {
+        Vec::new()
+    } else {
+        build_canvas_layer_elements(state, renderer, output_scale, camera, zoom, visible_rect)
+    };
     let bg = capture_bg.tile_elements(
         camera,
         viewport_logical,
@@ -538,7 +565,7 @@ pub fn compose_frame(
     // The fullscreen window fully occludes its output: only it, the overlay
     // layer, and the cursor render; everything beneath is culled below. Pinned
     // windows count as top-tier toplevels and get covered like the top layer.
-    let fullscreen_window = state.fullscreen.get(output).map(|fs| fs.window.clone());
+    let fullscreen_window = state.fullscreen_window_on(output);
     let mut did_init_bg = false;
     if output_fullscreen {
         // Fullscreen fully occludes the canvas: free its chunk caches and skip
@@ -604,8 +631,8 @@ pub fn compose_frame(
     let _windows_span = tracy_client::span!("compose::windows");
     #[cfg(feature = "profile-with-tracy")]
     let (mut visible_windows, mut shadow_elems) = (0u32, 0u32);
-    for window in state.space.elements().rev() {
-        let Some(loc) = state.space.element_location(window) else {
+    for window in state.stage.windows().rev() {
+        let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
         if output_fullscreen && fullscreen_window.as_ref() != Some(window) {
@@ -616,7 +643,7 @@ pub fn compose_frame(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
-        let is_fullscreen = state.fullscreen.values().any(|fs| &fs.window == window);
+        let is_fullscreen = state.stage.is_fullscreen(window);
         let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
 
         let applied = driftwm::config::applied_rule(&wl_surface);
@@ -656,7 +683,7 @@ pub fn compose_frame(
                 &state.config.decorations,
             );
 
-        let mut bbox = window.bbox();
+        let mut bbox = window.bbox_with_popups();
         bbox.loc += loc - geom_loc;
         if has_ssd {
             let r = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32;
@@ -761,6 +788,12 @@ pub fn compose_frame(
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
+            // Snap the title-bar band to whole physical pixels and share it across the
+            // bar, border, and shadow. Deriving each from the raw logical bar_height
+            // rounds their common top edge inconsistently at fractional scale
+            // (round(t*s) - round(h*s) != round((t-h)*s)) — a ±1px seam.
+            let bar_h_phys = (bar_height as f64 * scale.y).round();
+            let bar_h_logical = bar_h_phys / scale.y;
 
             // Title falls back to app_id, then blank.
             let deco_title = window
@@ -779,9 +812,8 @@ pub fn compose_frame(
             }
 
             if let Some(deco) = state.decorations.get(&wl_surface.id()) {
-                let bar_loc: Point<f64, Logical> =
-                    Point::from((render_loc.x, render_loc.y - bar_height as f64));
-                let bar_physical: Point<f64, Physical> = bar_loc.to_physical_precise_round(scale);
+                let bar_physical: Point<f64, Physical> =
+                    Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
                     Some(opacity as f32)
                 } else {
@@ -840,8 +872,8 @@ pub fn compose_frame(
                 && let Some(shader) = state.render.border_shader.clone()
             {
                 let inner_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x, render_loc.y - bar_height as f64).into(),
-                    (geom_size.w as f64, (geom_size.h + bar_height) as f64).into(),
+                    (render_loc.x, render_loc.y - bar_h_logical).into(),
+                    (geom_size.w as f64, geom_size.h as f64 + bar_h_logical).into(),
                 );
                 push_border_element(
                     target,
@@ -866,10 +898,10 @@ pub fn compose_frame(
             if effective_shadow && let Some(shader) = state.render.shadow_shader.clone() {
                 let bw = effective_bw as f64;
                 let body_logical: Rectangle<f64, Logical> = Rectangle::new(
-                    (render_loc.x - bw, render_loc.y - bar_height as f64 - bw).into(),
+                    (render_loc.x - bw, render_loc.y - bar_h_logical - bw).into(),
                     (
                         geom_size.w as f64 + 2.0 * bw,
-                        (geom_size.h + bar_height) as f64 + 2.0 * bw,
+                        geom_size.h as f64 + bar_h_logical + 2.0 * bw,
                     )
                         .into(),
                 );
@@ -1197,6 +1229,12 @@ pub fn compose_frame(
             + background_layer_elements.len(),
     );
     let cursor_count = cursor_elements.len();
+    // Everything from bottom_elements down is scene background for the
+    // shared animated blur (below all windows and widgets).
+    let background_suffix = bottom_elements.len()
+        + outline_elements.len()
+        + bg_elements.len()
+        + background_layer_elements.len();
     all_elements.extend(cursor_elements);
     all_elements.extend(overlay_elements);
     all_elements.extend(top_elements);
@@ -1208,6 +1246,7 @@ pub fn compose_frame(
     all_elements.extend(outline_elements);
     all_elements.extend(bg_elements);
     all_elements.extend(background_layer_elements);
+    let background_start = all_elements.len() - background_suffix;
 
     if !all_blur_requests.is_empty() {
         #[cfg(feature = "profile-with-tracy")]
@@ -1224,6 +1263,7 @@ pub fn compose_frame(
             pinned_prefix,
             normal_prefix,
             widget_prefix,
+            background_start,
         );
     }
 
@@ -1232,10 +1272,13 @@ pub fn compose_frame(
             .iter()
             .map(|r| r.surface_id.clone())
             .collect();
+        // Prune only this output's stale entries: another output's caches are
+        // keyed under its own name and must survive this output's frame.
+        let name = output.name();
         state
             .render
             .blur_cache
-            .retain(|id, _| active_ids.contains(id));
+            .retain(|(out, id), _| out != &name || active_ids.contains(id));
     }
 
     // Error bar sits above every window and layer-shell surface but below the
@@ -1274,6 +1317,11 @@ fn build_output_outline_elements(
 
     for other in state.space.outputs() {
         if *other == *output {
+            continue;
+        }
+        // A fullscreen output shows a screen-space window, not a canvas
+        // viewport, so it has no outline to project onto other monitors.
+        if state.is_output_fullscreen(other) {
             continue;
         }
 

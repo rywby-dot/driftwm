@@ -39,16 +39,17 @@ impl DriftWm {
         let fingers = event.fingers();
         let time = Event::time_msec(&event);
 
-        // During fullscreen: 3+ finger gestures exit fullscreen first
-        if self.is_fullscreen() && fingers >= 3 {
-            self.exit_fullscreen_for_gesture();
-        }
-
         let keyboard = self.seat.get_keyboard().unwrap();
         let mods = keyboard.modifier_state();
         let pointer = self.seat.get_pointer().unwrap();
-        let pos = pointer.current_location();
-        let context = self.pointer_context(pos);
+        let mut pos = pointer.current_location();
+        // The fullscreen window fills the screen; a continuous gesture exits it
+        // eagerly below (the grab needs post-exit geometry).
+        let context = if self.is_fullscreen() {
+            BindingContext::OnWindow
+        } else {
+            self.pointer_context(pos)
+        };
 
         // Priority 1: Pending middle-click (3-finger tap) → check DoubletapSwipe
         if let Some(pending) = self.pending_middle_click.take() {
@@ -62,9 +63,17 @@ impl DriftWm {
                 self.cancel_animations();
                 self.gesture_output = self.active_output();
                 match entry {
-                    GestureConfigEntry::Continuous(ContinuousAction::MoveWindow) => {
+                    GestureConfigEntry::Continuous(
+                        action @ (ContinuousAction::MoveWindow
+                        | ContinuousAction::MoveSnappedWindows),
+                    ) => {
+                        if self.is_fullscreen() {
+                            self.exit_fullscreen();
+                            pos = pointer.current_location();
+                        }
                         if let Some((window, _)) = self.window_under(pos) {
-                            return self.start_gesture_move(window, pos);
+                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                            return self.start_gesture_move(window, pos, cluster);
                         }
                         // Not over a moveable window — flush and fall through
                         self.flush_middle_click(pending.press_time, pending.release_time);
@@ -73,6 +82,10 @@ impl DriftWm {
                         action @ (ContinuousAction::ResizeWindow
                         | ContinuousAction::ResizeWindowSnapped),
                     ) => {
+                        if self.is_fullscreen() {
+                            self.exit_fullscreen();
+                            pos = pointer.current_location();
+                        }
                         if let Some((window, _)) = self.window_under(pos).filter(|(w, _)| {
                             !w.wl_surface()
                                 .as_ref()
@@ -105,15 +118,20 @@ impl DriftWm {
 
         match entry {
             Some(GestureConfigEntry::Continuous(action)) => {
+                if self.is_fullscreen() {
+                    self.exit_fullscreen();
+                    pos = pointer.current_location();
+                }
                 self.cancel_animations();
                 self.gesture_output = self.active_output();
                 match action {
                     ContinuousAction::PanViewport => {
                         self.gesture_state = Some(GestureState::SwipePan);
                     }
-                    ContinuousAction::MoveWindow => {
+                    ContinuousAction::MoveWindow | ContinuousAction::MoveSnappedWindows => {
                         if let Some((window, _)) = self.window_under(pos) {
-                            return self.start_gesture_move(window, pos);
+                            let cluster = matches!(action, ContinuousAction::MoveSnappedWindows);
+                            return self.start_gesture_move(window, pos, cluster);
                         }
                         // Not over a window — fall back to pan
                         self.gesture_state = Some(GestureState::SwipePan);
@@ -403,7 +421,7 @@ impl DriftWm {
     /// on the pointer so gesture updates just warp the cursor and the grab
     /// handles window positioning (identical to Alt+click drag). Pinned windows
     /// get the screen-space pinned grab; widgets fall through to Swipe3Pan.
-    fn start_gesture_move(&mut self, window: Window, pos: Point<f64, Logical>) {
+    fn start_gesture_move(&mut self, window: Window, pos: Point<f64, Logical>, cluster: bool) {
         if window
             .wl_surface()
             .as_ref()
@@ -430,15 +448,22 @@ impl DriftWm {
             return;
         }
 
-        // 3-finger double-tap+drag is the trackpad-first way to move a
-        // single window. Cluster drag is a mouse action (Alt+Shift+Left);
-        // there's no modifier on a gesture to distinguish single-vs-cluster,
-        // so gestures always move the focused window alone.
-        let initial_window_location = self.space.element_location(&window).unwrap_or_default();
+        let initial_window_location = self.stage.position_of(&window).unwrap_or_default();
+        let (members, surfaces) = if cluster {
+            self.cluster_snapshot_for_drag(&window, initial_window_location)
+        } else {
+            (Vec::new(), HashSet::new())
+        };
         let pointer = self.seat.get_pointer().unwrap();
         let Some(output) = self.active_output() else {
             return;
         };
+        // Moving re-anchors the window, invalidating any fill restore point —
+        // for the primary and every member dragged along.
+        self.stage.clear_fill(&window);
+        for (member, _) in &members {
+            self.stage.clear_fill(member);
+        }
         let grab = MoveSurfaceGrab::new(
             GrabStartData {
                 focus: None,
@@ -448,8 +473,8 @@ impl DriftWm {
             window,
             initial_window_location,
             output,
-            Vec::new(),
-            HashSet::new(),
+            members,
+            surfaces,
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
 
@@ -493,14 +518,15 @@ impl DriftWm {
             return;
         }
 
-        let Some(initial_location) = self.space.element_location(&window) else {
+        let Some(initial_location) = self.stage.position_of(&window) else {
             return;
         };
         let initial_size = window.geometry().size;
         let edges = edges_from_position(pos, initial_location, initial_size);
 
-        // Clear fit state — user took manual control
-        crate::state::fit::clear_fit_state(&wl_surface);
+        // Clear fit/fill state — user took manual control
+        self.stage.clear_fit(&window);
+        self.stage.clear_fill(&window);
 
         // Store resize state on surface data map for commit() repositioning
         with_states(&wl_surface, |states| {
@@ -553,6 +579,8 @@ impl DriftWm {
             constraints,
             cluster_resize,
             pinned_initial_screen_pos: None,
+            touch_start: None,
+            touch_slots: 0,
         };
         let pointer = self.seat.get_pointer().unwrap();
         pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -585,17 +613,16 @@ impl DriftWm {
         if let Some((focus, _)) = self.pinned_window_under(screen_pos, pos)
             && let Some(window) = self.window_for_surface(&focus.0)
         {
-            let loc = self.space.element_location(&window).unwrap_or_default();
+            let loc = self.stage.position_of(&window).unwrap_or_default();
             return Some((window, loc));
         }
         // SSD chrome (title bar / border) lies outside the surface bbox, so
         // `element_under` misses it; fall back to a decoration hit-test.
-        self.space
-            .element_under(pos)
+        self.element_under(pos)
             .map(|(w, l)| (w.clone(), l))
             .or_else(|| {
                 self.decoration_under(pos)
-                    .and_then(|(w, _)| self.space.element_location(&w).map(|l| (w, l)))
+                    .and_then(|(w, _)| self.stage.position_of(&w).map(|l| (w, l)))
             })
     }
 

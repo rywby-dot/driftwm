@@ -1,45 +1,97 @@
+use std::time::Duration;
+
 use crate::surface_tree::focus_belongs_to_window;
-use driftwm::layout::snap::SnapRect;
+use driftwm::canvas::{CanvasPos, canvas_to_screen};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
     output::Output,
-    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
-    utils::{Logical, Point},
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    },
+    utils::{IsAlive, Logical, Point},
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, output_state};
+use super::{DriftWm, PendingClickNavigate, output_state};
 
-fn rects_overlap(a: &SnapRect, b: &SnapRect) -> bool {
-    a.x_low < b.x_high && b.x_low < a.x_high && a.y_low < b.y_high && b.y_low < a.y_high
-}
+/// Max pointer travel (screen px) between press and release for a click to
+/// still count as a click rather than a drag. Beyond it, no auto-navigate — a
+/// text selection or slow drag inside a client never slides the canvas.
+const CLICK_NAVIGATE_SLOP: f64 = 5.0;
+
+/// Skip the activation pan only when the window is already fully inside its
+/// home output's viewport. Any clipping → pan that output to bring it fully
+/// into view; activation is a request to look at the window.
+const ACTIVATION_VISIBLE_THRESHOLD: f64 = 1.0;
+
+/// `visible_fraction` returns exactly 0.0 with no overlap, so an epsilon
+/// separates "clipped to a hair" from "off screen entirely" without a
+/// size-dependent cutoff. See `window_already_active`.
+const ACTIVATION_ONSCREEN_THRESHOLD: f64 = f64::EPSILON;
 
 impl DriftWm {
-    /// Navigate the viewport to center on a window: raise, focus, animate camera.
-    /// When `reset_zoom` is true, zoom animates to 1.0 (intentional navigation).
-    /// Otherwise preserves current zoom, or restores saved zoom if leaving overview.
+    /// Navigate the active output's viewport to center on a window: raise,
+    /// focus, animate camera. When `reset_zoom` is true, zoom animates to 1.0
+    /// (intentional navigation). Otherwise preserves current zoom, or restores
+    /// saved zoom if leaving overview.
     pub fn navigate_to_window(&mut self, window: &Window, reset_zoom: bool) {
+        if let Some(output) = self.active_output() {
+            self.navigate_to_window_on(window, &output, reset_zoom);
+        }
+    }
+
+    /// As `navigate_to_window`, but pans `output`'s camera instead of the
+    /// active one. Lets xdg-activation reveal a window on the monitor it
+    /// already lives on rather than dragging the active monitor's camera
+    /// across to it.
+    pub fn navigate_to_window_on(&mut self, window: &Window, output: &Output, reset_zoom: bool) {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+
+        // A fullscreen window lives in screen space, shown only on its own
+        // output. From any other output it's invisible and parked at that
+        // output's camera origin, so it isn't a navigation target there at all —
+        // don't focus or pan to it (mirrors the hit-test isolation). On its own
+        // output, focus it but leave the locked camera put.
+        if let Some(fs_output) = window
+            .wl_surface()
+            .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+        {
+            if &fs_output == output {
+                self.raise_and_focus(window, serial);
+            }
+            return;
+        }
+
+        // A pinned window also lives in screen space: its canvas position is
+        // re-derived from the pin's screen_pos on every camera update, so panning
+        // can never bring more of it into view — it would only slide the rest of
+        // the canvas underneath it.
+        if self.stage.is_pinned(window) {
+            self.raise_and_focus(window, serial);
+            return;
+        }
+
         self.raise_and_focus(window, serial);
 
         let target_zoom = if reset_zoom {
-            self.set_overview_return(None);
+            output_state(output).overview_return = None;
             1.0
         } else {
-            let overview_ret = self.overview_return();
-            self.set_overview_return(None);
+            let overview_ret = output_state(output).overview_return;
+            output_state(output).overview_return = None;
             if let Some((_, saved_zoom)) = overview_ret {
                 saved_zoom
             } else {
-                self.zoom()
+                output_state(output).zoom
             }
         };
 
-        let window_loc = self.space.element_location(window).unwrap_or_default();
+        let window_loc = self.stage.position_of(window).unwrap_or_default();
         let window_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
-        let vc = self.usable_center_screen();
+        let vc = self.usable_center_screen_on(output);
         let target =
             driftwm::canvas::camera_to_center_window(window_loc, window_size, vc, target_zoom, bar);
 
@@ -49,12 +101,206 @@ impl DriftWm {
                 window_loc.y as f64 + window_size.h as f64 / 2.0,
             ))
         });
-        self.with_output_state(|os| {
-            os.momentum.stop();
-            os.zoom_animation_center = Some(window_center);
-            os.camera_target = Some(target);
-            os.zoom_target = Some(target_zoom);
+        let mut os = output_state(output);
+        os.momentum.stop();
+        os.zoom_animation_center = Some(window_center);
+        os.camera_target = Some(target);
+        os.zoom_target = Some(target_zoom);
+    }
+
+    /// Arm a completed-click auto-navigate for `window` at press time. No-op
+    /// unless `auto_navigate_on_click` is enabled; the decision runs on release
+    /// (see `resolve_click_navigate`). `press_pos` is in canvas coords. `defer`
+    /// waits out the double-click window before panning (see
+    /// `PendingClickNavigate::defer`).
+    pub fn arm_click_navigate(
+        &mut self,
+        window: &Window,
+        press_pos: Point<f64, Logical>,
+        button: u32,
+        defer: bool,
+    ) {
+        if !self.config.auto_navigate_on_click {
+            return;
+        }
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let press_screen_pos = canvas_to_screen(CanvasPos(press_pos), self.camera(), self.zoom()).0;
+        self.pending_click_navigate = Some(PendingClickNavigate {
+            window: window.clone(),
+            press_screen_pos,
+            button,
+            output,
+            defer,
         });
+    }
+
+    /// Resolve a click armed by `arm_click_navigate` at button release. When the
+    /// armed button lifts within the click slop on the same output, pan to the
+    /// window. A `defer` pending waits out the double-click window first (see
+    /// `PendingClickNavigate::defer` and `fire_click_navigate`); otherwise the
+    /// pan runs immediately. `release_pos` is in canvas coords.
+    pub fn resolve_click_navigate(&mut self, button: u32, release_pos: Point<f64, Logical>) {
+        let Some(pending) = self.pending_click_navigate.take() else {
+            return;
+        };
+        // A different button lifted before the armed one — keep waiting for it.
+        if pending.button != button {
+            self.pending_click_navigate = Some(pending);
+            return;
+        }
+        // A different output's screen coords aren't comparable to the press
+        // (see `PendingClickNavigate::output`).
+        if self.active_output().as_ref() != Some(&pending.output) {
+            return;
+        }
+        if !pending.window.alive() {
+            return;
+        }
+        let release_screen_pos =
+            canvas_to_screen(CanvasPos(release_pos), self.camera(), self.zoom()).0;
+        let dx = release_screen_pos.x - pending.press_screen_pos.x;
+        let dy = release_screen_pos.y - pending.press_screen_pos.y;
+        if dx * dx + dy * dy > CLICK_NAVIGATE_SLOP * CLICK_NAVIGATE_SLOP {
+            return;
+        }
+        // Content clicks pan on release; only the SSD title bar defers, because
+        // that's the sole target where the compositor owns a competing
+        // double-click (fit). Deferring content clicks would slow every one to
+        // protect a gesture the compositor doesn't own.
+        if !pending.defer {
+            self.fire_click_navigate(&pending.window);
+            return;
+        }
+        // Defer the pan past the double-click window rather than panning now: a
+        // pan on release #1 would slide the window out from under the title
+        // bar's double-click-fit at click #2. Press #2 lands inside the delay
+        // and cancels this. Visibility is deliberately re-checked at fire time —
+        // it can change during the delay.
+        if let Some(token) = self.click_navigate_timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let window = pending.window;
+        let timer = Timer::from_duration(Duration::from_millis(
+            crate::input::gestures::DOUBLE_TAP_WINDOW_MS,
+        ));
+        self.click_navigate_timer = self
+            .loop_handle
+            .insert_source(timer, move |_, _, data: &mut DriftWm| {
+                data.click_navigate_timer = None;
+                data.fire_click_navigate(&window);
+                TimeoutAction::Drop
+            })
+            .ok();
+    }
+
+    /// Fire a deferred click-navigate scheduled by `resolve_click_navigate`. The
+    /// double-click window has elapsed, so re-check the world before panning: the
+    /// window must still be alive, still hold keyboard focus (a focus move during
+    /// the delay — Alt-Tab, say — means the user went elsewhere; don't yank them
+    /// back), and still be clipped.
+    pub fn fire_click_navigate(&mut self, window: &Window) {
+        if !window.alive() {
+            return;
+        }
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .is_some_and(|focus| focus_belongs_to_window(&focus.0, window));
+        if !focused {
+            return;
+        }
+        if !self.window_fully_in_viewport(window) {
+            self.navigate_to_window(window, false);
+        }
+    }
+
+    /// Cancel any armed or deferred click-navigate. Clearing the deferred timer
+    /// here is what makes double-click work — the second press lands inside the
+    /// deferral and stops the pan before it starts.
+    pub fn cancel_click_navigate(&mut self) {
+        self.pending_click_navigate = None;
+        if let Some(token) = self.click_navigate_timer.take() {
+            self.loop_handle.remove(token);
+        }
+    }
+
+    /// Reveal and focus `window` on the output it already lives on, without
+    /// dragging a different monitor's camera to it: fully visible on its home
+    /// output → just focus; any clipping → pan that output into view. A window
+    /// off every screen falls back to the active output.
+    pub fn activate_window_output_local(&mut self, window: &Window) {
+        let Some(home) = self.output_for_window(window) else {
+            return;
+        };
+        // Exit fullscreen before activating a different window on that output
+        // — otherwise the target gets focus while hidden behind the
+        // fullscreen window, and the visibility check below runs against the
+        // parked camera instead of the restored one.
+        if self
+            .fullscreen_window_on(&home)
+            .is_some_and(|fs| &fs != window)
+        {
+            self.exit_fullscreen_on(&home);
+        }
+        if self.window_visible_at_least_on(window, &home, ACTIVATION_VISIBLE_THRESHOLD) {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.raise_and_focus(window, serial);
+        } else {
+            self.navigate_to_window_on(window, &home, self.config.zoom_reset_on_activation);
+        }
+    }
+
+    /// True when `window` already holds keyboard focus and is at least partly on
+    /// screen, i.e. an activation request for it asks for a state that already
+    /// holds. A focused window panned fully off screen is *not* already active:
+    /// activation still has somewhere to take the camera.
+    pub fn window_already_active(&self, window: &Window) -> bool {
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|kb| kb.current_focus())
+            .is_some_and(|focus| focus_belongs_to_window(&focus.0, window));
+        if !focused {
+            return false;
+        }
+        // Pinned windows render in screen space (see `navigate_to_window_on`),
+        // so visibility doesn't depend on the camera — skip the check below.
+        if self.stage.is_pinned(window) {
+            return true;
+        }
+        self.output_for_window(window).is_some_and(|home| {
+            self.window_visible_at_least_on(window, &home, ACTIVATION_ONSCREEN_THRESHOLD)
+        })
+    }
+
+    /// The window a fresh Alt-Tab cycle should treat as current — what
+    /// `update_focus_history` would have recorded: keyboard focus (popup
+    /// grabs included), with a focused modal standing in for its parent,
+    /// since neither ever enters the focus history. `None` if focus isn't on
+    /// a window. Capped against circular parents, like `topmost_modal_child`.
+    pub fn cycle_anchor(&self) -> Option<Window> {
+        let focus = self.seat.get_keyboard()?.current_focus()?;
+        let mut window = self
+            .stage
+            .windows()
+            .find(|w| focus_belongs_to_window(&focus.0, w))
+            .cloned()?;
+        for _ in 0..10 {
+            if !window.is_modal() {
+                break;
+            }
+            let Some(parent) = window
+                .parent_surface()
+                .and_then(|s| self.window_for_surface(&s))
+            else {
+                break;
+            };
+            window = parent;
+        }
+        Some(window)
     }
 
     /// Dynamic minimum zoom based on the current window layout.
@@ -62,16 +308,11 @@ impl DriftWm {
     pub fn min_zoom(&self) -> f64 {
         let viewport = self.get_usable_area().size;
         driftwm::canvas::dynamic_min_zoom(
-            self.space
-                .elements()
-                .filter(|w| {
-                    !w.wl_surface()
-                        .and_then(|s| driftwm::config::applied_rule(&s))
-                        .is_some_and(|r| r.widget)
-                        && !self.is_pinned(w)
-                })
+            self.stage
+                .windows()
+                .filter(|w| self.is_canvas_window(w))
                 .map(|w| {
-                    let loc = self.space.element_location(w).unwrap_or_default();
+                    let loc = self.stage.position_of(w).unwrap_or_default();
                     let size = w.geometry().size;
                     (loc, size)
                 }),
@@ -85,8 +326,8 @@ impl DriftWm {
     /// Skips windows with `skip_taskbar` rule.
     pub fn update_focus_history(&mut self, surface: &WlSurface) {
         let window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| focus_belongs_to_window(surface, w))
             .cloned();
         if let Some(window) = window {
@@ -105,8 +346,7 @@ impl DriftWm {
             if window.is_modal() {
                 return;
             }
-            self.focus_history.retain(|w| w != &window);
-            self.focus_history.insert(0, window);
+            self.stage.push_focus(&window);
         }
     }
 
@@ -168,23 +408,18 @@ impl DriftWm {
     }
 
     /// Nearest window (by canvas distance from `from_center`) that is at least
-    /// partially visible on `output`. Excludes `exclude` and widgets.
+    /// partially visible on `output`. Excludes `exclude`; widgets, pinned, and
+    /// fullscreen windows have no canvas snap rect, so `window_intersects_viewport_on`
+    /// skips them.
     pub fn nearest_visible_window_on(
         &self,
         from_center: Point<f64, Logical>,
         output: &Output,
         exclude: &Window,
     ) -> Option<Window> {
-        self.space
-            .elements()
-            .filter(|w| {
-                *w != exclude
-                    && !w
-                        .wl_surface()
-                        .and_then(|s| driftwm::config::applied_rule(&s))
-                        .is_some_and(|r| r.widget)
-                    && self.window_intersects_viewport_on(w, output)
-            })
+        self.stage
+            .windows()
+            .filter(|w| *w != exclude && self.window_intersects_viewport_on(w, output))
             .min_by(|a, b| {
                 let dist = |w: &Window| {
                     self.window_visual_center(w)
@@ -228,26 +463,21 @@ impl DriftWm {
         }
         let cluster = driftwm::layout::cluster::cluster_of(destroyed, &rects, self.config.snap_gap);
 
-        self.focus_history
+        self.stage
+            .focus_history()
             .iter()
             .filter(|w| *w != destroyed)
             .find(|w| {
                 cluster.contains(*w)
                     || self
                         .snap_rect_for(w)
-                        .is_some_and(|r| rects_overlap(&destroyed_rect, &r))
+                        .is_some_and(|r| destroyed_rect.overlaps(&r))
             })
             .cloned()
     }
 
     /// End Alt-Tab cycling: commit the selected window to focus history.
     pub fn end_cycle(&mut self) {
-        let idx = self.cycle_state.take();
-        if let Some(idx) = idx
-            && let Some(window) = self.focus_history.get(idx).cloned()
-        {
-            self.focus_history.retain(|w| w != &window);
-            self.focus_history.insert(0, window);
-        }
+        self.stage.end_cycle();
     }
 }

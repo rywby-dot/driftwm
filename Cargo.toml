@@ -1,6 +1,6 @@
 [package]
 name = "driftwm"
-version = "0.12.1"
+version = "0.14.2"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -41,6 +41,27 @@ bytemuck = { version = "1.25", features = ["derive"] }
 cosmic-text = { version = "0.17.0", features = ["shape-run-cache"] }
 sd-notify = "0.4"
 tracy-client = { version = "0.18.4", default-features = false, optional = true }
+
+[dev-dependencies]
+proptest = "1"
+insta = "1.47.2"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+calloop-wayland-source = "0.4.1"
+
+# Faster snapshot diffing in the in-process test harness (insta/similar are
+# recursion-heavy; unoptimized they dominate debug test time).
+[profile.dev.package.insta]
+opt-level = 3
+
+[profile.dev.package.similar]
+opt-level = 3
+
+[lints.clippy]
+# A guard locked in a scrutinee outlives the body — re-locking inside deadlocks
+# the event loop (see dev/docs/caveats.md).
+significant_drop_in_scrutinee = "warn"
 
 [features]
 # Enables the Tracy profiler instrumentation. Spans, plots, and frame marks

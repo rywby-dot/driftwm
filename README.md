@@ -7,7 +7,7 @@
 </p>
 <p align="center"><sub>Primary repository: <a href="https://github.com/malbiruk/driftwm">GitHub</a> · Mirror: <a href="https://codeberg.org/malbiruk/driftwm">Codeberg</a></sub></p>
 
-https://github.com/user-attachments/assets/df24e442-6ad0-4520-9491-cb666da06d05
+https://github.com/user-attachments/assets/155511a6-0a6e-4681-9061-21be1e93e02a
 
 Traditional window managers arrange windows to fit your screen. Stacking compositors do so by piling windows on top of each other; tiling compositors do so by squeezing them to fit and utilizing workspaces.
 
@@ -24,7 +24,7 @@ Built on [smithay](https://github.com/Smithay/smithay). Inspired by [vxwm](https
 
 ### Pan & zoom
 
-https://github.com/user-attachments/assets/a5f14739-7762-4515-abb1-0de6990de4a3
+https://github.com/user-attachments/assets/97c2ff83-acfa-40ec-ae02-b16ad9a47318
 
 Infinite 2D canvas with viewport panning, zoom, and scroll momentum. A quick
 flick carries the viewport smoothly until friction stops it.
@@ -47,7 +47,7 @@ flick carries the viewport smoothly until friction stops it.
 
 ### Window navigation
 
-https://github.com/user-attachments/assets/5b7d89cd-b065-4309-ae74-30bfe68a8abb
+https://github.com/user-attachments/assets/ab80b545-817d-4d9f-beea-d332b3bb3dfa
 
 Jump to the nearest window in any direction via cone search. MRU cycling
 (`Alt-Tab`) with hold-to-commit. Zoom-to-fit shows all windows at once.
@@ -74,7 +74,7 @@ trackpads.
 
 ### Snapping
 
-https://github.com/user-attachments/assets/8a468e69-8887-4d27-8457-cdd2753948ca
+https://github.com/user-attachments/assets/6bfc3458-664f-4746-a176-18f40337d94d
 
 Move window with 3-finger doubletap-swipe or `Alt` + drag. Resize with `Alt` + 3-finger swipe. Snapping kicks in as edges approach each other. Drag past the viewport edge and the canvas auto-pans.
 
@@ -109,9 +109,34 @@ action (launching an app, navigating) naturally exits it.
 
 </details>
 
+### Touchscreen
+
+https://github.com/user-attachments/assets/35316541-ad39-4c36-95ab-4093bd48c172
+
+Everything works by touch too: pan and zoom the canvas, jump between windows, and
+move or resize windows — even whole window groups — exactly as you would on a
+trackpad.
+
+<details><summary><b>Touch gestures</b></summary>
+
+| Input                    | Action                      | Context   |
+| ------------------------ | --------------------------- | --------- |
+| 1-finger swipe           | Pan viewport                | on-canvas |
+| 3-finger swipe           | Pan viewport                | anywhere  |
+| 2-finger pinch           | Zoom                        | on-canvas |
+| 3-finger pinch           | Zoom                        | anywhere  |
+| 4-finger swipe           | Jump to nearest window      | anywhere  |
+| 4-finger pinch in / out  | Zoom-to-fit / home toggle   | anywhere  |
+| 3-finger tap             | Center window               | anywhere  |
+| 3-finger double-tap      | Fit window                  | on-window |
+| 3-finger doubletap-swipe | Move window (hold: cluster) | on-window |
+| 3-finger hold-swipe      | Resize window               | on-window |
+
+</details>
+
 ### Infinite background
 
-https://github.com/user-attachments/assets/6e9eb7f7-0c73-4fdd-b7aa-230b8ff0a172
+https://github.com/user-attachments/assets/b1581182-5e21-45c8-8559-99ab54bb5093
 
 https://github.com/user-attachments/assets/fb1cd5a1-242c-45d7-b302-952a15aaa24d
 
@@ -122,7 +147,7 @@ Four modes:
 
 - **`shader`** — procedural GLSL, animated or static, optionally sampling an image via `texture`. Default is a dot grid. See [docs/shaders.md](docs/shaders.md) to write your own. Bundled shaders live in `extras/wallpapers/{static,animated,textured}/`.
 - **`tile`** — PNG/JPG (single texture, tiled infinitely), or a tiled pyramidal TIFF for [gigapixel wallpapers](docs/gigapixel-wallpapers.md). Set `mirror_tile = true` to mirror-fold a non-seamless image so it tiles without seams (kaleidoscope look).
-- **`wallpaper`** — single image stretched to fill viewport (does not scroll/zoom) — a classic desktop wallpaper.
+- **`wallpaper`** — single image scaled to cover the viewport, aspect-preserving (does not scroll/zoom) — a classic desktop wallpaper.
 - **`none`** — no built-in background, so an external `wlr-layer-shell` wallpaper daemon (`swaybg`, `swww`, `mpvpaper` for live video) becomes the wallpaper instead.
 
 > [!NOTE]
@@ -142,7 +167,7 @@ path = "~/.config/driftwm/bg.glsl"
 
 ### Window rules
 
-https://github.com/user-attachments/assets/af603001-9f08-4d42-b50a-0342d06e954b
+https://github.com/user-attachments/assets/e30e3821-1e84-4f6e-be60-adcb0ee58d3c
 
 Match windows by `app_id` and/or `title` (glob patterns) and control position,
 size, decorations, blur, opacity, key pass-through, and placement — fields
@@ -189,7 +214,7 @@ windows teleport to the target viewport's canvas position.
 
 ### Panels, docks & taskbars
 
-https://github.com/user-attachments/assets/83c2ad30-fbfa-4cf2-aa47-905826889dcb
+https://github.com/user-attachments/assets/31c235e6-baae-4843-bb43-aca749e41f04
 
 Layer shell surfaces (waybar, fuzzel, mako) work as expected. Foreign toplevel
 management means your dock/taskbar shows all windows — click one and the
@@ -235,17 +260,61 @@ cargo build
 cargo run
 ```
 
-To add driftwm as a session in your NixOS config:
+To enable `driftwm` on NixOS, you can import and use the provided NixOS module in your configuration.
+
+Using Flakes:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    driftwm.url = "github:malbiruk/driftwm";
+  };
+
+  outputs = { self, nixpkgs, driftwm, ... }: {
+    nixosConfigurations.myHost = nixpkgs.lib.nixosSystem {
+      modules = [
+        driftwm.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+Then, enable it in your configuration:
+
+```nix
+# configuration.nix
+{
+  programs.driftwm.enable = true;
+}
+```
+
+Alternatively, without flakes (by importing the flake's output directly):
 
 ```nix
 let
   driftwm-flake = builtins.getFlake "github:malbiruk/driftwm";
-  driftwm = driftwm-flake.packages.x86_64-linux.default;
 in
 {
-  services.displayManager.sessionPackages = [ driftwm ];
-  environment.systemPackages = [ driftwm ];
+  imports = [ driftwm-flake.nixosModules.default ];
+  programs.driftwm.enable = true;
 }
+```
+
+#### NixOS Module Options
+
+The NixOS module provides the following options under `programs.driftwm`:
+
+- `enable`: Whether to enable `driftwm` (defaults to `false`).
+- `package`: The package containing the `driftwm` compositor binary.
+
+By default, the module enables XWayland support via `xwayland-satellite` by defaulting `programs.xwayland.enable` to `true`. If you want to disable or explicitly enable it, configure:
+
+```nix
+programs.xwayland.enable = true; # or false to disable XWayland and xwayland-satellite
 ```
 
 ### Build from source
@@ -293,7 +362,7 @@ driftwm runs standalone — none of these are required — but each enables or
 improves a feature:
 
 - `xwayland-satellite` (≥ 0.7) — X11 app support (see below).
-- `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting. wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
+- `xdg-desktop-portal` + `xdg-desktop-portal-wlr` (≥ 0.8.0) or `xdg-desktop-portal-cosmic` — screencasting, and screenshot apps that go through the portal (e.g. Flameshot). wlr needs a dmenu-style picker in `$PATH` (`wmenu`/`wofi`/`rofi`/`bemenu`/`mew`/`fuzzel`) to choose what to share.
 - `grim` + `slurp` — screenshots (+ cropping to region). driftwm also has a built-in canvas/DPI capture: see [IPC › Screenshots](docs/ipc.md#screenshots).
 - `adwaita-fonts` — renders SSD title bars in `Adwaita Sans` to match GTK apps; without it a generic sans-serif is substituted. Font, size, weight, and alignment are configurable under `[decorations]`.
 - A cursor theme — most desktops set one up already; on a bare install driftwm falls back to a basic built-in arrow.
@@ -355,7 +424,7 @@ autostart = ["waybar", "swaync", "swayosd-server"]
 Every option is documented in **[docs/config.md](docs/config.md)** (generated
 from [`config.reference.toml`](config.reference.toml)): input settings,
 scroll/momentum tuning, snap behavior, decorations, effects, per-output config,
-gesture bindings, mouse bindings, and window rules.
+gesture bindings, mouse bindings, touch bindings, and window rules.
 
 ## Example setup
 
@@ -384,6 +453,7 @@ tying it all together. Use it as a starting point or steal pieces.
 
 - [driftwm-settings](https://github.com/wwmaxik/driftwm-settings) — GTK4 GUI config editor
 - [driftwm-noctalia](https://github.com/youssefvdel/driftwm-noctalia) — noctalia shell fork adapted for driftwm
+- [Just Enough Shell](https://github.com/ORFLEM/just_enough_shell) — minimal QuickShell desktop shell, driftwm-focused
 - [Gallery](https://github.com/malbiruk/driftwm/discussions/143) — community shaders & rices, share your own
 
 ## Contributing

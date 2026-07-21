@@ -18,15 +18,23 @@ pub(super) struct ConfigFile {
     pub effects: EffectsFileConfig,
     pub backend: BackendFileConfig,
     pub autostart: Option<Vec<String>>,
+    pub bindings: BindingsFileConfig,
     pub keybindings: Option<HashMap<String, String>>,
     pub mouse: MouseFileConfig,
     pub gestures: GestureFileConfig,
+    pub touch: TouchFileConfig,
     pub env: HashMap<String, String>,
     pub xwayland: XwaylandConfig,
     /// Placement mode for newly mapped windows: `"center"` (default) or `"cursor"`.
     pub window_placement: Option<String>,
     pub window_rules: Option<Vec<WindowRuleFile>>,
     pub outputs: Option<Vec<OutputRuleFile>>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct BindingsFileConfig {
+    pub disable_defaults: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -44,6 +52,7 @@ pub(super) struct EffectsFileConfig {
     pub blur_radius: Option<u32>,
     pub blur_strength: Option<f64>,
     pub animate_blur: Option<bool>,
+    pub animate_blur_fps: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -52,6 +61,14 @@ pub(super) struct InputConfig {
     pub keyboard: KeyboardConfig,
     pub trackpad: TrackpadConfig,
     pub mouse: MouseDeviceFileConfig,
+    pub touch: TouchDeviceFileConfig,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TouchDeviceFileConfig {
+    pub enable: Option<bool>,
+    pub map_to_output: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -72,6 +89,7 @@ pub(super) struct MouseDeviceFileConfig {
     pub accel_speed: Option<f64>,
     pub accel_profile: Option<String>,
     pub natural_scroll: Option<bool>,
+    pub left_handed: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -102,10 +120,12 @@ pub(super) struct CursorConfig {
 pub(super) struct NavigationConfig {
     pub animation_speed: Option<f64>,
     pub auto_navigate_on_close: Option<bool>,
+    pub auto_navigate_on_click: Option<bool>,
     pub nudge_step: Option<i32>,
     pub pan_step: Option<f64>,
     pub trackpad_speed: Option<f64>,
     pub mouse_speed: Option<f64>,
+    pub touch_speed: Option<f64>,
     pub drift: Option<f64>,
     /// Renamed to `drift`; kept only so a stale value yields a migration error
     /// instead of failing the whole parse via `deny_unknown_fields`.
@@ -138,6 +158,9 @@ pub(super) struct ZoomConfig {
     pub fit_padding: Option<f64>,
     pub reset_on_new_window: Option<bool>,
     pub reset_on_activation: Option<bool>,
+    pub touch_speed: Option<f64>,
+    pub trackpad_speed: Option<f64>,
+    pub mouse_speed: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -184,6 +207,7 @@ pub(super) struct BackgroundFileConfig {
     pub cache_shader: Option<bool>,
     pub transparent_shader: Option<bool>,
     pub cache_budget_mb: Option<u32>,
+    pub animate_fps: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -225,6 +249,7 @@ pub(super) struct WindowRuleFile {
     pub title: Option<String>,
     pub position: Option<[i32; 2]>,
     pub size: Option<[i32; 2]>,
+    pub fullscreen: Option<bool>,
     #[serde(default)]
     pub widget: bool,
     /// Pin the window to one output's screen space: it ignores pan/zoom and
@@ -244,6 +269,12 @@ pub(super) struct WindowRuleFile {
     pub border_color_focused: Option<String>,
     pub corner_radius: Option<i32>,
     pub shadow: Option<bool>,
+    /// Output name (e.g. `"DP-1"`) this window should fullscreen onto, overriding
+    /// the client-requested output.
+    pub output: Option<String>,
+    /// Stacking order among layer-shell surfaces on the same wlr-layer
+    /// (higher = on top; ties keep map order).
+    pub layer_order: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -271,6 +302,19 @@ pub(super) struct GestureFileConfig {
     pub swipe_threshold: Option<f64>,
     pub pinch_in_threshold: Option<f64>,
     pub pinch_out_threshold: Option<f64>,
+    #[serde(rename = "on-window")]
+    pub on_window: Option<HashMap<String, String>>,
+    #[serde(rename = "on-canvas")]
+    pub on_canvas: Option<HashMap<String, String>>,
+    pub anywhere: Option<HashMap<String, String>>,
+}
+
+/// Touch gesture *bindings* (`[touch]`) — distinct from `[input.touch]` device
+/// settings (`TouchDeviceFileConfig`). Touch has no modifiers, so no threshold
+/// tuning here (it reuses `[gestures]` thresholds); just the three context maps.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TouchFileConfig {
     #[serde(rename = "on-window")]
     pub on_window: Option<HashMap<String, String>>,
     #[serde(rename = "on-canvas")]

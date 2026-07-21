@@ -49,13 +49,6 @@ pub enum GestureState {
 pub(crate) const DOUBLE_TAP_WINDOW_MS: u64 = 300;
 
 impl DriftWm {
-    pub(super) fn exit_fullscreen_for_gesture(&mut self) {
-        self.gesture_exited_fullscreen = self.active_fullscreen().map(|fs| fs.window.clone());
-        let pointer = self.seat.get_pointer().unwrap();
-        let pos = pointer.current_location();
-        self.exit_fullscreen_remap_pointer(pos);
-    }
-
     /// Read camera/zoom from the pinned gesture output, falling back to active output.
     pub(super) fn gesture_camera_zoom(&self) -> (f64, Point<f64, Logical>) {
         match self.gesture_output {
@@ -67,7 +60,7 @@ impl DriftWm {
         }
     }
 
-    pub(super) fn cancel_animations(&mut self) {
+    pub(crate) fn cancel_animations(&mut self) {
         self.with_output_state(|os| {
             os.camera_target = None;
             os.zoom_target = None;

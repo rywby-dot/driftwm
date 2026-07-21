@@ -45,6 +45,12 @@ Running driftwm as a systemd session (via driftwm-session / a display manager) a
 systemctl --user mask xdg-desktop-autostart.target
 ```
 
+**Example:**
+
+```toml
+autostart = ["waybar", "swaync"]
+```
+
 ## `[env]`
 
 Environment variables set before any clients launch. Child processes (autostart, exec bindings) inherit these. These override the compositor's built-in toolkit defaults (MOZ_ENABLE_WAYLAND, QT_QPA_PLATFORM, SDL_VIDEODRIVER, GDK_BACKEND, ELECTRON_OZONE_PLATFORM_HINT).
@@ -182,6 +188,32 @@ Default: `false`
 
 reverse scroll direction
 
+### `left_handed`
+
+Default: `false`
+
+swap left/right mouse buttons (skipped on devices without left-handed support)
+
+## `[input.touch]`
+
+### `enable`
+
+Default: `true`
+
+enable touchscreen support
+
+### `map_to_output`
+
+Default: `"none"`
+
+pin touch to an output by connector name; "none" (default) auto-detects the touchscreen by physical size + connector. Only set this to tell apart two identically-sized touchscreens.
+
+**Example:**
+
+```toml
+map_to_output = "DP-2"
+```
+
 ## `[cursor]`
 
 ### `theme`
@@ -216,6 +248,12 @@ Default: `1.0`
 
 mouse (drag) pan multiplier (1.0 = direct)
 
+### `touch_speed`
+
+Default: `1.0`
+
+touchscreen gesture pan speed multiplier
+
 ### `drift`
 
 Default: `0.5`
@@ -233,6 +271,12 @@ camera lerp factor (higher = faster)
 Default: `true`
 
 on close, pan to the newly focused window if off-screen false = camera stays put; focus only moves to a visible window
+
+### `auto_navigate_on_click`
+
+Default: `false`
+
+completed click on a partially off-screen window also pans it in fully visible → focus only
 
 ### `nudge_step`
 
@@ -297,6 +341,24 @@ cursor edge-pan activation zone (px) — kept small so it doesn't trigger by acc
 Default: `1.1`
 
 multiplier per keypress (1.1 = 10% per press)
+
+### `trackpad_speed`
+
+Default: `1.0`
+
+trackpad pinch-zoom speed multiplier
+
+### `mouse_speed`
+
+Default: `1.0`
+
+mouse-wheel zoom speed multiplier
+
+### `touch_speed`
+
+Default: `1.0`
+
+touchscreen gesture zoom speed multiplier
 
 ### `fit_padding`
 
@@ -458,11 +520,11 @@ Default: `1.1`
 
 per-pass texel spread (default: 1.1)
 
-### `animate_blur`
+### `animate_blur_fps`
 
-Default: `false`
+Default: `20`
 
-re-blur every frame when the wallpaper is animated (expensive; default: false — blur is captured once and only refreshed when geometry/camera/static bg change)
+refresh rate of blur under an animated wallpaper (0-144, default 20; 0 = off, freezing the frost so it stops re-sampling the wallpaper). The background is blurred once into a shared full-output texture and each window slices its rect from it, so cost stays flat as windows are added; a window stacked over other windows falls back to an exact per-window blur at the same cadence. Animated wallpapers evolve slowly, so well below the output rate still looks continuous through frosted glass. Camera moves force a refresh.
 
 ## `[background]`
 
@@ -529,6 +591,26 @@ Default: `128`
 
 Memory ceiling (MB) shared by cache_shader and gigapixel-TIFF wallpapers, with LRU eviction. Raise it for sharper revisits on large / HiDPI displays; lower it on memory-constrained machines (too low just keeps the background blurrier).
 
+### `animate_fps`
+
+Default: `0`
+
+Frame-rate cap for animated (`u_time`) shader backgrounds. 0 = every output frame (default). Slow-moving shaders look identical well below the refresh rate; between ticks the compositor reuses the composited result instead of re-evaluating the shader, so this directly scales the background's GPU cost.
+
+## `[bindings]`
+
+### `disable_defaults`
+
+Default: `[]`
+
+Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures".
+
+**Example: bring your own keyboard scheme, keep mouse + gesture defaults**
+
+```toml
+disable_defaults = ["keys"]
+```
+
 ## `[keybindings]`
 
 Keyboard bindings: "Modifier+...+Keysym" = "action [arg]" Merges with defaults. Use "none" to unbind a default binding. "mod" expands to mod_key. Literal modifiers: alt, super, ctrl, shift. Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc. A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
@@ -556,6 +638,7 @@ Actions:
 - `toggle-fullscreen` — toggle focused window fullscreen
 - `fit-window` — toggle maximize: centers + resets zoom + fills viewport; restore only resizes back
 - `fit-window-snapped` — fit-window for the focused window's whole snap cluster
+- `fill-window` — grow in place to fill free space; edges outside the usable area or overlapping another window pull back to a gap; press again to restore
 - `toggle-pin-to-screen` — pin/unpin the focused window to the screen (ignores pan/zoom, floats above)
 - `reload-config` — hot-reload config file
 - `toggle-cursor-pan` — toggle cursor edge-pan (see [navigation.edge_pan])
@@ -635,6 +718,12 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 "alt+shift" = "switch-layout next"
 ```
 
+**Example: fill-window (unbound by default)**
+
+```toml
+"mod+g" = "fill-window"
+```
+
 ## `[mouse]`
 
 ### `resize_on_border`
@@ -655,7 +744,7 @@ Default: `false`
 
 When true, maximize/unmaximize initiated via window decoration (CSD maximize button, SSD title-bar double-click, or xdg/foreign-toplevel set_maximized) propagates to every window connected via snap adjacency. Keybinding/gesture fit is unaffected — bind `fit-window-snapped` explicitly if you want cluster-aware fit there too.
 
-Mouse bindings: "Modifier+...+Trigger" = "action" Context-aware: on-window, on-canvas, anywhere. Specific context checked first, then "anywhere" as fallback. Click-to-focus and SSD decoration clicks are always hardcoded. Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll Merges with defaults. Use "none" to unbind.
+Mouse bindings: "Modifier+...+Trigger" = "action" Context-aware: on-window, on-canvas, anywhere. Specific context checked first, then "anywhere" as fallback. Click-to-focus and SSD decoration clicks are always hardcoded. Triggers: left, right, middle (buttons), trackpad-scroll, wheel-scroll, wheel-up, wheel-down. The wheel-up/wheel-down triggers fire once per discrete wheel notch and can run any action, e.g. volume on mod+shift+scroll. Merges with defaults. Use "none" to unbind.
 
 Mouse actions: move-window, move-snapped-windows, resize-window, resize-window-snapped, pan-viewport, zoom, center-nearest Any keyboard action also works for button triggers: exec, close-window, toggle-fullscreen, etc.
 
@@ -723,7 +812,7 @@ Gesture types:
 - `N-finger-pinch-in/out` — threshold only
 - `N-finger-hold` — threshold only (fires on release)
 
-Continuous actions: pan-viewport, zoom, move-window, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, exec <cmd>, etc.
+Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window, fit-window-snapped, fill-window, exec <cmd>, etc.
 
 ## `[gestures.on-window]`
 
@@ -771,6 +860,58 @@ Continuous actions: pan-viewport, zoom, move-window, resize-window, resize-windo
 | `"mod+3-finger-pinch-out"` | `home-toggle` |  |
 | `"4-finger-hold"` | `center-window` | fires on release |
 | `"mod+3-finger-hold"` | `center-window` |  |
+
+## `[touch]`
+
+Touchscreen gesture BINDINGS. Distinct from [input.touch], which holds the touch *device* settings (enable, map_to_output) — put those there, not here (same split as [gestures] bindings vs [input.trackpad] device settings).
+
+Bindings: "N-finger-<type>" = "action"  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context (under [touch.anywhere] it also drops the anywhere fallback). A fully unbound gesture forwards to the app.
+
+Touch gesture types (1–5 fingers):
+
+- `N-finger-swipe` — continuous OR threshold (action determines behavior)
+- `N-finger-swipe-up/down/left/right` — threshold only, checked before swipe fallback
+- `N-finger-pinch` — continuous only (use pinch-in/out for discrete)
+- `N-finger-pinch-in/out` — threshold only
+- `N-finger-tap` — threshold only (quick touch, no movement)
+- `N-finger-doubletap` — threshold only (two quick taps)
+- `N-finger-doubletap-swipe` — continuous only (tap then drag)
+- `N-finger-hold-swipe` — continuous only (dwell then drag)
+
+Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs — move-window / move-snapped-windows / resize-window / resize-window-snapped (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster. Threshold actions: center-nearest, center-window, home-toggle, zoom-to-fit, fit-window, fill-window, exec <cmd>, etc.
+
+Note: within one physical gesture, a continuous translation (pan) and a threshold pinch on the same finger count don't combine — either bind both axes continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
+
+## `[touch.on-window]`
+
+1–2 fingers starting on a window forward to the app, and the 3+ finger pan/zoom/navigate gestures are bound "anywhere" so they apply over windows too. The window-targeted gestures live here: they act on the window the fingers land on (a gesture starting on empty canvas just pans).
+
+| Binding | Action | Notes |
+| --- | --- | --- |
+| `"3-finger-doubletap"` | `fit-window` |  |
+| `"3-finger-doubletap-swipe"` | `move-window` | continuous (hold to move the cluster) |
+| `"3-finger-hold-swipe"` | `resize-window` | continuous (dwell then drag) |
+
+## `[touch.on-canvas]`
+
+| Binding | Action | Notes |
+| --- | --- | --- |
+| `"1-finger-swipe"` | `pan-viewport` |  |
+| `"2-finger-swipe"` | `pan-viewport` |  |
+| `"2-finger-pinch"` | `zoom` |  |
+
+## `[touch.anywhere]`
+
+5-finger navigation mirrors 4-finger by default, so a stray 5th contact doesn't abort a navigation gesture.
+
+| Binding | Action | Notes |
+| --- | --- | --- |
+| `"3-finger-swipe"` | `pan-viewport` | continuous |
+| `"3-finger-pinch"` | `zoom` | continuous |
+| `"4-finger-swipe"` | `center-nearest` | threshold (direction from drag) |
+| `"4-finger-pinch-in"` | `zoom-to-fit` | threshold |
+| `"4-finger-pinch-out"` | `home-toggle` | threshold |
+| `"3-finger-tap"` | `center-window` |  |
 
 ## `[xwayland]`
 
@@ -848,15 +989,19 @@ Default: `0.5`
 
 Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. Winit backend ignores [[outputs]] entries.
 
+`name = "*"` is a wildcard entry: it applies to any connected output that has no exact-name entry (exact entries always win). A fixed `position` makes no sense on the wildcard — it's ignored (falls back to "auto").
+
+`mode` accepts "preferred", "max", "WxH", or "WxH@Hz". "preferred" (the default, and the safe choice) uses the monitor's advertised preferred mode. "max" picks the highest resolution, then highest refresh. A bare "WxH" only selects a mode the monitor already advertises — if none matches, it keeps the preferred mode (logged as a warning, not an error). "WxH@Hz" forces that exact mode, synthesizing a CVT modeline when the monitor doesn't advertise it (intended for CRTs or forcing non-standard modes; may be rejected by some panels).
+
 **Example:**
 
 ```toml
 [[outputs]]
-name = "eDP-1"           # connector name (required)
+name = "eDP-1"           # connector name, or "*" for a fallback entry (required)
 scale = 1.5              # fractional scale (default: 1.0)
 transform = "normal"     # normal, 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
 position = "auto"        # "auto" (left-to-right) or [x, y] in layout coords
-mode = "preferred"       # "preferred", "1920x1080", or "2560x1440@144"
+mode = "preferred"       # "preferred", "max", "1920x1080", or "2560x1440@144"
 
 [[outputs]]
 name = "HDMI-A-1"
@@ -889,6 +1034,7 @@ Effect fields:
 
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
 - `size` — [width, height] initial window dimensions (one-shot; user/app can resize after)
+- `fullscreen` — true: force this window to open in fullscreen mode
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
 - `decoration` — overrides [decorations] default_mode for matched windows. Omit to inherit default_mode. Values:
@@ -903,13 +1049,24 @@ Effect fields:
 - `border_color_focused` — per-window focused border color hex.
 - `corner_radius` — per-window corner radius override (px). Affects content clip, border shape, and shadow. Ignored for decoration = "none".
 - `shadow` — per-window shadow toggle. Overrides [decorations] shadow. Ignored for decoration = "none".
+- `output` — output name (e.g. "DP-1") this window fullscreens onto. Takes precedence over the output the client itself requests. Omit to honor the client's request, then the active output. Find names under `outputs.*` in `driftwm msg state`. (default: unset)
 - `pass_keys` — controls which compositor keybindings are forwarded to the app:
   - pass_keys = true — forward ALL keys (game-friendly)
   - pass_keys = ["mod+q", "ctrl+q"] — forward ONLY these combos; all other compositor shortcuts stay active
   - pass_keys = false / omit — compositor handles everything (default)
   - VT switching (Ctrl+Alt+F1–F12) — always stays in the compositor
 
-Layer-shell surfaces (panels, notifications, bars like waybar): `decoration` is ignored — layers have no decoration mode. Chrome (border_width, corner_radius, shadow) is field-by-field opt-in on the rule and does NOT inherit from [decorations]. Without explicit values on the rule, a layer surface has no border, no shadow, and no corner clip.
+Layer-shell surfaces (panels, notifications, bars like waybar): matched by their namespace against `app_id`. `decoration` is ignored — layers have no decoration mode. Chrome (border_width, corner_radius, shadow) is field-by-field opt-in on the rule and does NOT inherit from [decorations]. Without explicit values on the rule, a layer surface has no border, no shadow, and no corner clip.
+
+- `layer_order` — stacking among layer surfaces sharing the same wlr-layer (higher = on top; ties stack by map order, newest on top). The protocol has no z-index within a layer, so two overlay clients (e.g. an on-screen keyboard and a touch visualizer) otherwise stack by launch order. Also orders canvas-positioned layers among themselves. Ignored for regular windows.
+
+**Example: keep the on-screen keyboard above other overlay surfaces**
+
+```toml
+[[window_rules]]
+app_id      = "wvkbd"
+layer_order = 10
+```
 
 **Example: Desktop widget (pinned clock/calendar)**
 
@@ -961,6 +1118,14 @@ pass_keys = ["ctrl+q"]
 [[window_rules]]
 app_id    = "/^steam_app_\\d+$/"
 pass_keys = true
+```
+
+**Example: Always open this game fullscreen on a specific monitor**
+
+```toml
+[[window_rules]]
+app_id = "steam_app_*"
+output = "DP-1"
 ```
 
 **Example: Compose rules, blur from first rule, opacity from second (both apply)**

@@ -10,20 +10,25 @@ JSON, so any language can speak it directly.
 Run `driftwm msg <command>` from inside a driftwm session. Each command reads
 when given no arguments and writes when given arguments.
 
-| Command          | Example                       | Description                                                                                          |
-| ---------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `camera`         | `driftwm msg camera`          | Print the camera position (viewport center)                                                          |
-| `camera <x> <y>` | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                           |
-| `zoom`           | `driftwm msg zoom`            | Print the zoom level                                                                                 |
-| `zoom <level>`   | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                   |
-| `focus`          | `driftwm msg focus`           | Print the focused window's `app_id`                                                                  |
-| `focus <app_id>` | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive); navigates to it only if it's off-screen     |
-| `move`           | `driftwm msg move`            | Print the focused window's position                                                                  |
-| `move <x> <y>`   | `driftwm msg move 100 200`    | Move the focused window                                                                              |
-| `layout`         | `driftwm msg layout`          | Print the active keyboard layout (full XKB name); `--short` prints the configured code (e.g. `ru`)   |
-| `action <spec>`  | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                      |
-| `screenshot ...` | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots)) |
-| `state`          | `driftwm msg state`           | Dump camera, zoom, and the window inventory                                                          |
+| Command           | Example                       | Description                                                                                                                                                             |
+| ----------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `camera`          | `driftwm msg camera`          | Print the camera position (viewport center)                                                                                                                             |
+| `camera <x> <y>`  | `driftwm msg camera 500 300`  | Center the viewport on `(x, y)` (animated)                                                                                                                              |
+| `zoom`            | `driftwm msg zoom`            | Print the zoom level                                                                                                                                                    |
+| `zoom <level>`    | `driftwm msg zoom 0.5`        | Set zoom (animated); clamped to the supported range (out to fit-all, in to native)                                                                                      |
+| `focus`           | `driftwm msg focus`           | Print the focused window's `id` and `app_id` (e.g. `#5 alacritty`)                                                                                                      |
+| `focus <app_id>`  | `driftwm msg focus alacritty` | Focus a window by `app_id` substring (case-insensitive), or `--id <n>` (from `state`); navigates to it only if it's off-screen                                          |
+| `move`            | `driftwm msg move`            | Print the focused window's position (or `--id <n>`'s)                                                                                                                   |
+| `move <x> <y>`    | `driftwm msg move 100 200`    | Move the focused window, or `--id <n>`                                                                                                                                  |
+| `opacity`         | `driftwm msg opacity`         | Print the focused window's opacity (or `--id <n>`'s); `1` when no rule set it                                                                                           |
+| `opacity <value>` | `driftwm msg opacity 0.85`    | Set opacity `0.0`–`1.0` on the focused window, or `--id <n>` (see [Opacity](#opacity))                                                                                  |
+| `close`           | `driftwm msg close`           | Close the focused window, a window by `app_id` substring, or `--id <n>`                                                                                                 |
+| `layout`          | `driftwm msg layout`          | Print the active keyboard layout (full XKB name); `--short` prints the configured code (e.g. `ru`)                                                                      |
+| `action <spec>`   | `driftwm msg action zoom-in`  | Run any config action (see [Actions](#actions))                                                                                                                         |
+| `screenshot ...`  | `driftwm msg screenshot`      | Capture the canvas to a PNG — current view, window, region, or all (see [Screenshots](#screenshots))                                                                    |
+| `state`           | `driftwm msg state`           | Dump camera, zoom, and the window inventory (each window has a stable `id`)                                                                                             |
+| `subscribe`       | `driftwm msg subscribe`       | Stream state snapshots: the current one immediately, then one on every change (`--json` for line-delimited JSON, see [Subscribing to changes](#subscribing-to-changes)) |
+| `debug-counters`  | `driftwm msg debug-counters`  | Print internal collection sizes for leak diagnosis (unstable keys — see [Debug counters](#debug-counters))                                                              |
 
 Add `--json` to print the raw JSON reply instead of the human-readable form:
 
@@ -53,8 +58,12 @@ The dedicated commands above are the state you can **read or set**; every
 **one-shot** operation (closing a window, quitting, zooming a step) lives under
 `action` rather than as its own command.
 
-Window actions operate on the **focused** window, so to act on a specific one,
-select it first: `driftwm msg focus alacritty && driftwm msg action close-window`.
+Window actions operate on the **focused** window, so to act on a specific one
+via `action`, select it first:
+`driftwm msg focus alacritty && driftwm msg action close-window`. The dedicated
+`focus`, `move`, `close`, and `screenshot window` commands can instead target
+any window directly by its `id` from `state` (`--id <n>`), so the focus-first
+dance is no longer required for those.
 
 Switching the keyboard layout is `action switch-layout next|prev|<index>`; read
 the current layout with `layout` (full XKB name, e.g. `Russian`) or `layout
@@ -81,7 +90,21 @@ Window and camera positions use the same convention as
 [window rules](window-rules.md) and the [state file](#state-file): positions are
 a **center** point, with **Y pointing up**. So `move 0 0` centers the focused
 window on the canvas origin, `camera 0 0` centers the _viewport_ on the origin,
-and positive `y` is above it.
+and positive `y` is above it. Pinned and fullscreen windows live in screen
+space, not on the canvas, so `move` refuses to reposition them.
+
+### Opacity
+
+`opacity` reads or sets a window's opacity (`0.0` transparent to `1.0` opaque),
+targeting the focused window or `--id <n>`; a change takes effect on the next
+frame. Unlike `move`, it applies to any rendered window — pinned and fullscreen
+included. A window that no rule set reads `1`; values outside `0.0`–`1.0` are
+rejected, not clamped.
+
+The value is **runtime-only**: it's seeded from a window's `opacity`
+[window rule](window-rules.md) when the window maps, then held in the compositor
+for the session. It's never written back to a rule and never persisted, so it
+resets when the window (or the compositor) restarts.
 
 ### Screenshots
 
@@ -94,6 +117,7 @@ use `grim` for a literal screen grab.
 ```bash
 driftwm msg screenshot                                # active output's current view
 driftwm msg screenshot window                         # focused window, isolated
+driftwm msg screenshot window --id 3                  # a specific window by id, isolated
 driftwm msg screenshot all --scale 2                  # all windows + background, 2× detail
 driftwm msg screenshot region 0 0 2000 1500           # canvas rect (center, Y-up)
 driftwm msg screenshot region $(slurp) --from-screen  # pick a region with slurp
@@ -101,9 +125,12 @@ driftwm msg screenshot window -o - | wl-copy          # capture window to clipbo
 ```
 
 Targets: **no subcommand** = the active output's viewport (what you see, minus
-panels); **`window`** = the focused window isolated on transparency; **`all`** /
-**`region`** = a scene with the canvas background + every window's chrome (`all`
-adds a `[zoom] fit_padding` margin).
+panels); **`window`** (optionally `<app_id>` or `--id <n>`) = just that window
+(defaulting to the focused one) composed alone on transparency, so overlapping
+windows never appear — pinned and fullscreen windows capture like any other
+(a fullscreen window has no chrome); **`all`** / **`region`** = a scene with the
+canvas background + every window's chrome (`all` adds a `[zoom] fit_padding`
+margin).
 
 - `--scale N` — pixels per canvas unit (default `1`); higher captures more detail
   than the screen shows, independent of zoom.
@@ -113,9 +140,75 @@ adds a `[zoom] fit_padding` margin).
   `./driftwm-screenshot-<time>.png`); the written path is printed.
 
 > [!NOTE]
-> Caveats: no blur (a translucent window shows a sharp backdrop, not a blurred
-> one); a gigapixel TIFF wallpaper uses a coarse pyramid level (softens at extreme
+> Caveats: no blur — in a scene capture (`all`/`region`/viewport) a translucent
+> window shows a sharp backdrop instead of a blurred one, while a `window` capture
+> keeps the translucency over transparent pixels (nothing is behind it to blur);
+> a gigapixel TIFF wallpaper uses a coarse pyramid level (softens at extreme
 > `--scale`); captures tile internally but cap at 16384 px/side.
+
+### Subscribing to changes
+
+`subscribe` turns the connection into a live feed instead of polling. The client
+sends one request, the server acks it, then pushes an **event** line for the
+current state immediately and again on every change, piggybacking on the
+[state file](#state-file)'s change detection but **not** on its ~10 Hz throttle:
+while something is changing, an event is pushed per rendered frame, so a camera
+pan or window drag streams at the compositor's frame rate (smooth enough to
+animate a minimap from). Nothing is pushed while nothing changes — render from
+the latest received snapshot rather than in lockstep with events. Changes to
+camera/zoom, the window inventory, focus, window **titles**, keyboard layout, and
+per-output viewports all trigger a push.
+
+Each event is `{"State":{...}}` — the **whole** snapshot, same shape as the
+`state` reply, and **not** wrapped in `Ok`/`Err` (events are one-way). Because
+every event is complete, a consumer can just re-render, or diff against the
+previous one. A subscriber that stalls (stops reading) never blocks the
+compositor — it just misses snapshots until it drains its socket, then catches
+up in full on the next change.
+
+```bash
+# Print the focused window's app_id whenever anything changes.
+driftwm msg --json subscribe | jq -r '.State.windows[0].app_id'
+
+# Human-readable blocks, one per change, separated by a blank line.
+driftwm msg subscribe
+```
+
+A small daemon that dims whatever loses focus and restores full opacity to
+whatever gains it (a snapshot arrives per rendered frame during a pan, so the
+focused id is deduped against the last one seen):
+
+```bash
+prev=
+driftwm msg --json subscribe \
+  | jq --unbuffered -r '.State.windows[] | select(.is_focused) | .id' \
+  | while read -r id; do
+      [ "$id" = "$prev" ] && continue                      # same focus, skip repeats
+      [ -n "$prev" ] && driftwm msg opacity 0.7 --id "$prev" # dim the window we left
+      driftwm msg opacity 1 --id "$id"                     # full opacity on the new one
+      prev=$id
+  done
+```
+
+### Debug counters
+
+`debug-counters` prints the sizes of the compositor's internal
+per-window/surface/client collections, one `key: value` line per counter:
+
+```bash
+$ driftwm msg debug-counters
+canvas_layers: 0
+decorations: 2
+stage_entries: 2
+...
+```
+
+It's a **debugging/introspection endpoint**, not a stable interface: the keys
+are internal field names that can change or disappear between releases, so don't
+build tooling that depends on them. The point is leak diagnosis — a
+window/surface/client-keyed count should return to its idle baseline once the
+windows and clients that raised it are gone. (Output-keyed counters follow
+output lifetimes instead and can legitimately persist across hotplug.)
 
 ## Wire protocol
 
@@ -131,18 +224,32 @@ open until the client closes it.
 
 A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 
+A window can be targeted by a **selector**: a JSON number is its stable `id`
+(from `state`), a JSON string is a case-insensitive `app_id` substring.
+
+> [!NOTE]
+> The `Move` request and the `Window` screenshot target changed shape in this
+> release: the old `{"Move":[x,y]}` tuple and bare `"Window"` string forms are
+> gone (replaced by the object forms below). The `Focused` reply also grew from
+> a bare app_id string to `{"id":…,"app_id":…}`.
+
 ### Requests
 
-| Request          | JSON to send                                                              |
-| ---------------- | ------------------------------------------------------------------------- |
-| get / set camera | `{"Camera":null}` / `{"Camera":[500,300]}`                                |
-| get / set zoom   | `{"Zoom":null}` / `{"Zoom":0.5}`                                          |
-| get / set focus  | `{"Focus":null}` / `{"Focus":"alacritty"}`                                |
-| get / set move   | `{"Move":null}` / `{"Move":[100,200]}`                                    |
-| layout           | `{"Layout":{"short":false}}`                                              |
-| run action       | `{"Action":"switch-layout next"}`                                         |
-| screenshot       | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}` |
-| state            | `"State"`                                                                 |
+| Request           | JSON to send                                                                        |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| get / set camera  | `{"Camera":null}` / `{"Camera":[500,300]}`                                          |
+| get / set zoom    | `{"Zoom":null}` / `{"Zoom":0.5}`                                                    |
+| get / set focus   | `{"Focus":null}` / `{"Focus":"alacritty"}` / `{"Focus":5}`                          |
+| get / set move    | `{"Move":{}}` / `{"Move":{"window":5,"to":[100,200]}}` (both optional)              |
+| get / set opacity | `{"Opacity":{}}` / `{"Opacity":{"window":5,"value":0.5}}` (both optional)           |
+| close             | `{"Close":null}` / `{"Close":5}` / `{"Close":"alacritty"}`                          |
+| layout            | `{"Layout":{"short":false}}`                                                        |
+| run action        | `{"Action":"switch-layout next"}`                                                   |
+| screenshot        | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}`           |
+| screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)                       |
+| state             | `"State"`                                                                           |
+| subscribe         | `"Subscribe"`                                                                       |
+| debug counters    | `"DebugCounters"` (reply keys are unstable — see [Debug counters](#debug-counters)) |
 
 ### Responses
 
@@ -150,18 +257,40 @@ A reply is `{"Ok": <response>}` on success or `{"Err": "message"}` on failure.
 {"Ok":{"Camera":{"x":500.0,"y":300.0}}}
 {"Ok":{"Zoom":0.5}}
 {"Ok":{"Layout":"English (US)"}}    // or "us" for {"Layout":{"short":true}}
-{"Ok":{"Focused":"alacritty"}}      // or {"Ok":{"Focused":null}}
+{"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}   // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
-{"Ok":"Ok"}                          // camera-set / move-set / action etc.
-{"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"windows":[
-  {"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
+{"Ok":{"Opacity":0.85}}
+{"Ok":"Ok"}                          // action / close
+{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}   // abridged
+{"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
+  "layout_short":"us","windows":[
+  {"id":3,"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
    "is_focused":true,"is_widget":false}
 ]}}}
 {"Err":"no focused window"}
 ```
 
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
-focused window first.
+focused window first. Each entry's `id` is a stable per-session window handle —
+pass it back as a selector to `focus`, `move`, `close`, or `screenshot window`.
+The reply also carries `layout` (full XKB name) and `layout_short` (the
+configured code for the active group); `fullscreen` and `pinned` (screen-space
+windows, which carry an `id` too); `layers` (namespaces of screen-space
+layer-shell surfaces); `canvas_layers` (canvas-positioned layers with
+rule-coordinate position and size); and `outputs` (per-output `name`, viewport
+`camera` (center, Y-up), `zoom`, logical `size`, and `active` flag).
+
+### Events
+
+A `subscribe` connection doesn't get `Ok`/`Err` replies after the initial ack;
+it gets one-way **event** lines:
+
+```json
+{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)","layout_short":"us","windows":[...],"outputs":[...]}}
+```
+
+The `State` payload is identical to the `state` reply's, so anything that reads
+one reads the other.
 
 ### Talking to the socket directly
 
@@ -177,8 +306,18 @@ echo '{"Camera":[500,300]}' | socat -t1 - UNIX-CONNECT:"$SOCK"
 For read-only polling (status bars, scripts), driftwm also writes a throttled
 (~10 Hz) snapshot to `$XDG_RUNTIME_DIR/driftwm/state` — `key=value` lines plus a
 `windows=` JSON array using the same window shape as `state`. Reading that file
-avoids a socket round-trip when you only need to observe.
+avoids a socket round-trip when you only need to observe; when you'd rather be
+pushed than poll, use [`subscribe`](#subscribing-to-changes) instead.
+
+Layer-shell clients appear too: `layers=` lists the namespaces of screen-space
+layer surfaces (bars, OSKs, overlays — useful for finding the `app_id` a
+window rule should match), and `canvas_layers=` is a JSON array of
+canvas-positioned layers with their namespace, rule-coordinate `position`, and
+`size` (the position reflects the current size, so it can drift from the
+placing rule if the surface resized after mapping).
 
 ## Limitations
 
-- There is no event/subscription stream yet — poll `state` or the state file.
+- `subscribe` events are whole-state snapshots, not granular event types
+  (window-opened, focus-changed, …) — diff consecutive snapshots if you need
+  the delta.

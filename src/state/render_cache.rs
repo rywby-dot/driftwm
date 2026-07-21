@@ -27,10 +27,29 @@ pub struct RenderCache {
     pub blur_down_shader: Option<GlesTexProgram>,
     pub blur_up_shader: Option<GlesTexProgram>,
     pub blur_mask_shader: Option<GlesTexProgram>,
-    pub blur_cache: HashMap<ObjectId, crate::render::BlurCache>,
+    /// Keyed by `(output name, surface id)`: a window visible on two outputs needs
+    /// an independent blur per output (different scale, size, behind-scene). Keying
+    /// by output also lets each output's per-frame prune touch only its own entries.
+    pub blur_cache: HashMap<(String, ObjectId), crate::render::BlurCache>,
     pub blur_bg_fbo: Option<(GlesTexture, Size<i32, Physical>)>,
     pub blur_geometry_generation: u64,
-    pub blur_camera_generation: u64,
+    /// Per-output camera-move counter. A single global counter would make one
+    /// output's pan force every other output's blur to refresh (bypassing the
+    /// animate_blur_fps throttle) even though their cameras never moved.
+    pub blur_camera_generation: HashMap<String, u64>,
+    /// Shared full-output blurred background for `animate_blur`: ping-pong
+    /// pair, blurred once per refresh and sliced per window, so cost stops
+    /// scaling with the number of blurred windows. Keyed by output name —
+    /// outputs differ in size and render on their own vblanks.
+    pub shared_blur: HashMap<String, crate::render::SharedBlur>,
+    /// Per-output timestamp of the last animated-background uniform push
+    /// ([background] animate_fps). Keyed by output name: a single global
+    /// stamp would let one output's render satisfy the interval and starve
+    /// the others on multi-monitor setups.
+    pub background_last_animate: HashMap<String, std::time::Instant>,
+    /// A one-shot tick timer is armed for the next animation frame. Without
+    /// it the capped animation only advances alongside other redraws.
+    pub background_tick_armed: bool,
     pub shadow_cache: HashMap<ObjectId, ShadowCacheEntry>,
     pub border_cache: HashMap<ObjectId, BorderCacheEntry>,
     /// One element per output for the configured background (shader / tile /
@@ -66,7 +85,10 @@ impl RenderCache {
             blur_cache: HashMap::new(),
             blur_bg_fbo: None,
             blur_geometry_generation: 0,
-            blur_camera_generation: 0,
+            blur_camera_generation: HashMap::new(),
+            shared_blur: HashMap::new(),
+            background_last_animate: HashMap::new(),
+            background_tick_armed: false,
             shadow_cache: HashMap::new(),
             border_cache: HashMap::new(),
             cached_bg: HashMap::new(),
@@ -109,6 +131,10 @@ impl RenderCache {
     /// of reusing a stale element with the previous geometry.
     pub fn remove_output(&mut self, output_name: &str) {
         self.cached_bg.remove(output_name);
+        self.shared_blur.remove(output_name);
+        self.blur_cache.retain(|(out, _), _| out != output_name);
+        self.blur_camera_generation.remove(output_name);
+        self.background_last_animate.remove(output_name);
         self.cached_error_bar.remove(output_name);
         self.remove_background_chunks(output_name);
         self.remove_capture_state(output_name);

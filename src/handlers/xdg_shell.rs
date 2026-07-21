@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab};
-use crate::state::{DriftWm, FocusTarget, output_state};
+use crate::state::{DriftWm, FocusTarget, PopupGrabState, output_state};
 use crate::surface_tree::focus_belongs_to_toplevel;
 use driftwm::window_ext::WindowExt;
 use smithay::{
@@ -22,9 +22,11 @@ use smithay::{
     utils::{Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
+        input_method::InputMethodSeat,
         seat::WaylandFocus,
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        shell::{
+            wlr_layer::KeyboardInteractivity,
+            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
     },
 };
@@ -73,8 +75,8 @@ impl XdgShellHandler for DriftWm {
         // Sending one here would produce a configure with unresolved state,
         // and a second on first commit — SDL2/SCTK clients have historically
         // desynced on back-to-back initial configures.
-        self.space.map_element(window.clone(), pos, true);
-        self.space.raise_element(&window, true);
+        self.map_window(window.clone(), pos.into(), true);
+        self.raise_window(&window, true);
         self.enforce_below_windows();
         // Don't focus here: a pre-buffer wl_keyboard.enter is unusable, and
         // set_focus is a no-op when the target is unchanged, so focusing now
@@ -109,7 +111,7 @@ impl XdgShellHandler for DriftWm {
             return;
         }
 
-        let root_focus = FocusTarget(root);
+        let root_focus = FocusTarget(root.clone());
         let Ok(mut grab) = self.popups.grab_popup(root_focus, kind, &self.seat, serial) else {
             return;
         };
@@ -117,16 +119,37 @@ impl XdgShellHandler for DriftWm {
         let keyboard = self.seat.get_keyboard().unwrap();
         let pointer = self.seat.get_pointer().unwrap();
 
-        if keyboard.is_grabbed()
+        // Give a pointer grab only when the root can't hold the keyboard — a
+        // layer surface with no keyboard interactivity, or any popup while an
+        // input method owns the keyboard. A keyboard grab there would be torn
+        // down on the next focus recompute, since focus can't land on the root.
+        let has_keyboard_grab = !self.seat.input_method().keyboard_grabbed()
+            && self.layer_interactivity(&root) != Some(KeyboardInteractivity::None);
+
+        // Refuse a grab that would clobber an unrelated live grab. A nested
+        // submenu is fine — its serial (or its parent's, via previous_serial)
+        // matches the existing grab.
+        let keyboard_mismatch = has_keyboard_grab
+            && keyboard.is_grabbed()
             && !(keyboard.has_grab(serial)
-                || grab.previous_serial().is_none_or(|s| keyboard.has_grab(s)))
-        {
+                || grab.previous_serial().is_none_or(|s| keyboard.has_grab(s)));
+        let pointer_mismatch = pointer.is_grabbed()
+            && !(pointer.has_grab(serial)
+                || grab.previous_serial().is_none_or(|s| pointer.has_grab(s)));
+        if keyboard_mismatch || pointer_mismatch {
             grab.ungrab(PopupUngrabStrategy::All);
             return;
         }
 
-        keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        if has_keyboard_grab {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
         pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        self.popup_grab = Some(PopupGrabState {
+            root,
+            grab,
+            has_keyboard_grab,
+        });
     }
 
     fn reposition_request(
@@ -145,23 +168,21 @@ impl XdgShellHandler for DriftWm {
     fn fullscreen_request(
         &mut self,
         surface: ToplevelSurface,
-        _output: Option<wl_output::WlOutput>,
+        output: Option<wl_output::WlOutput>,
     ) {
         let wl_surface = surface.wl_surface().clone();
+        let client_output = output.and_then(|wo| smithay::output::Output::from_resource(&wo));
         // Defer until the first sized commit — geometry is still (0,0)
         // here, which would poison `saved_size`, and the initial-commit
         // positioning block would clobber the fullscreen map.
         if self.pending_center.contains(&wl_surface) {
-            self.pending_fullscreen.insert(wl_surface);
+            self.pending_fullscreen.insert(wl_surface, client_output);
             return;
         }
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
-            self.enter_fullscreen(&window);
+            let target = self.resolve_fullscreen_output(&wl_surface, client_output);
+            self.enter_fullscreen(&window, target);
         }
     }
 
@@ -178,11 +199,7 @@ impl XdgShellHandler for DriftWm {
             self.pending_fit.insert(wl_surface);
             return;
         }
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             self.decoration_fit(&window);
         }
@@ -191,11 +208,7 @@ impl XdgShellHandler for DriftWm {
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
         self.pending_fit.remove(&wl_surface);
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
+        let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
             self.decoration_unfit(&window);
         }
@@ -215,31 +228,30 @@ impl XdgShellHandler for DriftWm {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
-        // Collect first to avoid holding an immutable borrow on space
-        let window = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned();
-        if let Some(ref window) = window {
-            // Restore the per-output camera/zoom first if the destroyed
-            // window was fullscreen — the focus chooser below evaluates
-            // visibility against the home output's current camera, which is
-            // still parked at the fullscreen window's position until this
-            // runs.
-            let fs_output = self
-                .fullscreen
-                .iter()
-                .find(|(_, fs)| &fs.window == window)
-                .map(|(o, _)| o.clone());
-            if let Some(ref output) = fs_output
-                && let Some(fs) = self.fullscreen.remove(output)
-            {
-                output_state(output).camera = fs.saved_camera;
-                output_state(output).zoom = fs.saved_zoom;
-                self.update_output_from_camera();
+        // Collect first to avoid holding an immutable borrow on the stage
+        let window = self.window_for_surface(&wl_surface);
+        // Restore the per-output camera/zoom first if the destroyed window
+        // was fullscreen. Keyed by surface, not the window lookup above: on
+        // the crash path `Space::refresh` may already have dropped the dead
+        // window, and skipping this would leak the fullscreen entry and leave
+        // the camera parked forever. (The focus chooser below also evaluates
+        // visibility against the home output's camera, which stays parked
+        // until this runs.)
+        let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
+        if let Some(ref output) = fs_output {
+            self.stage.take_fullscreen(&output.name());
+            // Two statements, not one `if let`: the scrutinee's MutexGuard
+            // lives to the end of the body, deadlocking the re-lock inside.
+            let ret = output_state(output).fullscreen_return.take();
+            if let Some(ret) = ret {
+                self.restore_fullscreen_view(output, ret.camera, ret.zoom);
             }
+        }
+        // Belt and suspenders: a dead window whose surface no longer resolves
+        // can't match above; sweep any fullscreen entry it left behind.
+        self.reap_dead_fullscreen();
 
+        if let Some(ref window) = window {
             // Pick a window to follow when the destroyed one was focused.
             // Priority: explicit parent (xdg_toplevel.set_parent), then the
             // MRU history entry that's spatially related (cluster member or
@@ -270,7 +282,8 @@ impl XdgShellHandler for DriftWm {
                 .as_ref()
                 .is_some_and(|f| focus_belongs_to_toplevel(&f.0, &wl_surface));
             let was_last_focused = self
-                .focus_history
+                .stage
+                .focus_history()
                 .first()
                 .is_some_and(|last_focused| last_focused == window);
             if focus_on_this_toplevel || was_last_focused || no_keyboard_focus {
@@ -300,14 +313,19 @@ impl XdgShellHandler for DriftWm {
                         .clone()
                         .or_else(|| self.output_for_window(window))
                         .or_else(|| self.active_output());
-                    let mru = self.focus_history.iter().find(|w| w != &window).cloned();
+                    let mru = self
+                        .stage
+                        .focus_history()
+                        .iter()
+                        .find(|w| w != &window)
+                        .cloned();
                     let target = match (home.as_ref(), mru) {
                         (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
                             Some(m)
                         }
                         (Some(out), _) => {
                             let from = self.window_visual_center(window).unwrap_or_else(|| {
-                                let loc = self.space.element_location(window).unwrap_or_default();
+                                let loc = self.stage.position_of(window).unwrap_or_default();
                                 let size = window.geometry().size;
                                 Point::from((
                                     loc.x as f64 + size.w as f64 / 2.0,
@@ -327,17 +345,7 @@ impl XdgShellHandler for DriftWm {
                     }
                 }
             }
-            // Remove from focus history before unmapping
-            self.focus_history.retain(|w| w != window);
-            // Clamp or clear cycle index if cycling is active
-            if self.cycle_state.is_some() {
-                if self.focus_history.is_empty() {
-                    self.cycle_state = None;
-                } else if let Some(ref mut idx) = self.cycle_state {
-                    *idx = (*idx).min(self.focus_history.len() - 1);
-                }
-            }
-            self.space.unmap_elem(window);
+            self.unmap_window(window);
             // The window may have sat under the cursor; re-target pointer focus
             // now that it's gone so clicks don't fall into the destroyed surface.
             self.refresh_pointer_focus();
@@ -353,52 +361,93 @@ impl XdgShellHandler for DriftWm {
         if driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget) {
             return;
         }
-        let Some(window) = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned()
-        else {
+        let Some(window) = self.window_for_surface(&wl_surface) else {
             return;
         };
-
-        let pointer = self.seat.get_pointer().unwrap();
-        let Some(start_data) = check_grab(&pointer, &wl_surface) else {
-            return;
-        };
-
-        // Pinned windows move in screen space. A canvas grab would only shuffle
-        // the loc-synced canvas position while the window keeps rendering at its
-        // fixed `screen_pos` — i.e. the CSD titlebar drag would do nothing.
-        if self.pinned.contains_key(&wl_surface.id()) {
-            self.start_pinned_move(
-                &pointer,
-                &window,
-                start_data.location,
-                start_data.button,
-                serial,
-            );
-            return;
-        }
 
         // Client-initiated xdg move_request: the client asked to move itself,
         // not its cluster neighbors. Clients don't know about clusters, so
         // always single-window.
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let pointer = self.seat.get_pointer().unwrap();
+        if let Some(start_data) = check_grab(&pointer, &wl_surface) {
+            // Pinned windows move in screen space. A canvas grab would only
+            // shuffle the loc-synced canvas position while the window keeps
+            // rendering at its fixed `screen_pos` — i.e. the drag would do nothing.
+            if self.stage.is_pinned(&window) {
+                self.start_pinned_move(
+                    &pointer,
+                    &window,
+                    start_data.location,
+                    start_data.button,
+                    serial,
+                );
+                return;
+            }
+            let Some(initial_window_location) = self.stage.position_of(&window) else {
+                return;
+            };
+            let Some(output) = self.active_output() else {
+                return;
+            };
+            // Moving re-anchors the window, invalidating any fill restore point.
+            self.stage.clear_fill(&window);
+            let grab = MoveSurfaceGrab::new(
+                start_data,
+                window,
+                initial_window_location,
+                output,
+                Vec::new(),
+                HashSet::new(),
+            );
+            pointer.set_grab(self, grab, serial, Focus::Clear);
             return;
-        };
-        let Some(output) = self.active_output() else {
-            return;
-        };
-        let grab = MoveSurfaceGrab::new(
-            start_data,
-            window,
-            initial_window_location,
-            output,
-            Vec::new(),
-            HashSet::new(),
-        );
-        pointer.set_grab(self, grab, serial, Focus::Clear);
+        }
+
+        // Touch-initiated move: a CSD client dragging its own titlebar requests
+        // the move off a touch grab, not a pointer grab. (SSD titlebars are moved
+        // by the compositor's own hit-test in `input/touch.rs`, never via here.)
+        if let Some(touch) = self.seat.get_touch()
+            && let Some(touch_start) = check_touch_grab(&touch, &wl_surface)
+        {
+            // Stop any camera coast before building the grab — the offset
+            // converts the down-time canvas point with the live camera, so a
+            // coast between down and this request would skew it.
+            if self.stage.is_pinned(&window) {
+                self.cancel_animations();
+                let Some(grab) = self.build_touch_pinned_move_grab(&window, touch_start, 1) else {
+                    return;
+                };
+                // Revoke the client's in-flight touch sequence (see the canvas branch below).
+                touch.cancel(self);
+                touch.set_grab(self, grab, serial);
+                return;
+            }
+            let Some(initial_window_location) = self.stage.position_of(&window) else {
+                return;
+            };
+            // The initiating touch-down resolved and stored the touch's output as
+            // the focused output; reuse it (no input device on this client path).
+            let Some(output) = self.active_output() else {
+                return;
+            };
+            // The finger's `down` was forwarded to the client (Forward mode), and
+            // smithay routes touch motion/up to the slot's stored focus regardless
+            // of the grab — so cancel the client's sequence before the compositor
+            // takes over the drag, or it keeps receiving the whole sequence.
+            touch.cancel(self);
+            // Moving re-anchors the window, invalidating any fill restore point.
+            self.stage.clear_fill(&window);
+            let grab = MoveSurfaceGrab::new_touch(
+                touch_start,
+                window,
+                initial_window_location,
+                output,
+                1,
+                Vec::new(),
+                HashSet::new(),
+            );
+            touch.set_grab(self, grab, serial);
+        }
     }
 
     fn resize_request(
@@ -412,12 +461,7 @@ impl XdgShellHandler for DriftWm {
         if driftwm::config::applied_rule(&wl_surface).is_some_and(|r| r.widget) {
             return;
         }
-        let Some(window) = self
-            .space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&wl_surface))
-            .cloned()
-        else {
+        let Some(window) = self.window_for_surface(&wl_surface) else {
             return;
         };
 
@@ -426,7 +470,7 @@ impl XdgShellHandler for DriftWm {
             return;
         };
 
-        let Some(initial_window_location) = self.space.element_location(&window) else {
+        let Some(initial_window_location) = self.stage.position_of(&window) else {
             return;
         };
         let initial_window_size = window.geometry().size;
@@ -438,12 +482,16 @@ impl XdgShellHandler for DriftWm {
             return;
         };
 
-        // Clear fit state — user took manual control
-        crate::state::fit::clear_fit_state(&wl_surface);
+        // Clear fit/fill state — user took manual control
+        self.stage.clear_fit(&window);
+        self.stage.clear_fill(&window);
 
         // Pinned windows resize in screen space (see start_compositor_resize_with_edge).
-        let pinned_initial_screen_pos = self.pinned.get(&wl_surface.id()).map(|p| p.screen_pos);
-        let pinned_output = self.pinned.get(&wl_surface.id()).map(|p| p.output.clone());
+        let pinned_site = self.stage.pin_of(&window).cloned();
+        let pinned_initial_screen_pos = pinned_site.as_ref().map(|s| s.screen_pos);
+        let pinned_output = pinned_site
+            .as_ref()
+            .and_then(|s| self.output_by_name(&s.output));
 
         // Store resize state in the surface data map for commit() repositioning
         with_states(&wl_surface, |states| {
@@ -489,6 +537,8 @@ impl XdgShellHandler for DriftWm {
             constraints,
             cluster_resize,
             pinned_initial_screen_pos,
+            touch_start: None,
+            touch_slots: 0,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
@@ -507,6 +557,22 @@ fn check_grab(
     let (focus, _) = start_data.focus.as_ref()?;
 
     // The button press must have been on this surface (or a child of it)
+    if !focus.same_client_as(&surface.id()) {
+        return None;
+    }
+
+    Some(start_data)
+}
+
+/// Touch analogue of `check_grab`: validate that the active touch grab started
+/// on (a child of) the given surface, returning its start data.
+fn check_touch_grab(
+    touch: &smithay::input::touch::TouchHandle<DriftWm>,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<smithay::input::touch::GrabStartData<DriftWm>> {
+    let start_data = touch.grab_start_data()?;
+    let (focus, _) = start_data.focus.as_ref()?;
+
     if !focus.same_client_as(&surface.id()) {
         return None;
     }
@@ -535,8 +601,8 @@ impl DriftWm {
         }
 
         let is_window = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .any(|w| w.wl_surface().as_deref() == Some(root));
         if !is_window {
             return true;
@@ -562,8 +628,8 @@ impl DriftWm {
         // the output bounds relative to the popup's toplevel.
         let active_output = self.active_output();
         let target = if let Some(window) = self
-            .space
-            .elements()
+            .stage
+            .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&root))
         {
             // Parent is an xdg window — target is the *visible canvas area* in
@@ -572,7 +638,7 @@ impl DriftWm {
             // the canvas: when zoomed/panned, output_geo translated by window_loc
             // describes a phantom screen far from the popup's anchor, and the
             // positioner mis-flips the popup to "fit" it.
-            let window_loc = self.space.element_location(window).unwrap_or_default();
+            let window_loc = self.stage.position_of(window).unwrap_or_default();
             let viewport_size = active_output
                 .as_ref()
                 .and_then(|o| self.space.output_geometry(o))

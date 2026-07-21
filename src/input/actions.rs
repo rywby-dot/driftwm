@@ -1,6 +1,5 @@
 use smithay::{
     input::{keyboard::Layout, pointer::MotionEvent},
-    reexports::wayland_server::Resource,
     utils::{Logical, Point, SERIAL_COUNTER, Size},
     wayland::seat::WaylandFocus,
 };
@@ -29,25 +28,14 @@ impl DriftWm {
     }
 
     pub fn execute_action(&mut self, action: &Action) {
-        // Snapshot fullscreen window before the guard exits it.
-        // Also check gesture_exited_fullscreen (set by exit_fullscreen_for_gesture
-        // which runs before execute_action in the gesture path).
+        // Snapshot fullscreen window before the guard exits it. Also check
+        // pre_exited_fullscreen (set by input-layer code that exited fullscreen
+        // ahead of dispatching this action).
         let was_fullscreen = self
-            .active_fullscreen()
-            .map(|fs| fs.window.clone())
-            .or_else(|| self.gesture_exited_fullscreen.take());
+            .active_fullscreen_window()
+            .or_else(|| self.pre_exited_fullscreen.take());
 
-        // Any action except ToggleFullscreen/Spawn/ReloadConfig/ToggleCursorPan exits fullscreen first
-        if self.is_fullscreen()
-            && !matches!(
-                action,
-                Action::ToggleFullscreen
-                    | Action::Spawn(_)
-                    | Action::ReloadConfig
-                    | Action::SwitchLayout(_)
-                    | Action::ToggleCursorPan
-            )
-        {
+        if self.is_fullscreen() && !action.runs_during_fullscreen() {
             self.exit_fullscreen();
         }
 
@@ -67,8 +55,10 @@ impl DriftWm {
             }
             Action::NudgeWindow(dir) => {
                 if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w))
-                    && let Some(loc) = self.space.element_location(&window)
+                    && let Some(loc) = self.stage.position_of(&window)
                 {
+                    // Nudging re-anchors the window, invalidating any fill restore point.
+                    self.stage.clear_fill(&window);
                     let step = self.config.nudge_step;
                     let (ux, uy) = dir.to_unit_vec();
                     let offset = (
@@ -76,7 +66,7 @@ impl DriftWm {
                         (uy * step as f64).round() as i32,
                     );
                     let new_loc = loc + Point::from(offset);
-                    self.space.map_element(window.clone(), new_loc, false);
+                    self.map_window(window.clone(), new_loc, false);
                 }
             }
             Action::PanViewport(dir) => {
@@ -119,8 +109,8 @@ impl DriftWm {
                 } else {
                     let center = self.viewport_center_canvas();
                     let closest = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| self.is_canvas_window(w))
                         .min_by(|a, b| {
                             let dist = |w: &smithay::desktop::Window| {
@@ -142,7 +132,7 @@ impl DriftWm {
                 let pos = pointer.current_location();
                 // Pinned windows live in screen space (no canvas position to
                 // center the camera on) — skip them here.
-                if let Some((window, _)) = self.space.element_under(pos) {
+                if let Some((window, _)) = self.element_under(pos) {
                     let window = window.clone();
                     if !self.is_pinned(&window) {
                         self.navigate_to_window(&window, true);
@@ -157,13 +147,20 @@ impl DriftWm {
                 }
 
                 let focused = self.focused_window().filter(|w| !self.is_pinned(w));
-                let viewport_center = self.viewport_center_canvas();
 
-                let (origin, skip) = if let Some(ref w) = focused
-                    && self.window_visible_at_least(w, CENTER_NEAREST_ANCHOR_THRESHOLD)
-                {
+                // Anchor the directional search to the just-exited fullscreen
+                // window (wherever the restored view placed it) — otherwise the
+                // anchor falls back to a corner/offscreen spot and the swipe
+                // finds nothing.
+                let anchor = was_fullscreen.clone().or_else(|| {
+                    focused.filter(|w| {
+                        self.window_visible_at_least(w, CENTER_NEAREST_ANCHOR_THRESHOLD)
+                    })
+                });
+
+                let (origin, skip) = if let Some(ref w) = anchor {
                     let center = self.window_visual_center(w).unwrap_or_else(|| {
-                        let loc = self.space.element_location(w).unwrap_or_default();
+                        let loc = self.stage.position_of(w).unwrap_or_default();
                         let size = w.geometry().size;
                         Point::from((
                             loc.x as f64 + size.w as f64 / 2.0,
@@ -172,15 +169,15 @@ impl DriftWm {
                     });
                     (center, Some(NavTarget::Window(w.clone())))
                 } else {
-                    (viewport_center, None)
+                    (self.viewport_center_canvas(), None)
                 };
 
                 let windows = self
-                    .space
-                    .elements()
+                    .stage
+                    .windows()
                     .filter(|w| self.is_canvas_window(w))
                     .map(|w| {
-                        let loc = self.space.element_location(w).unwrap_or_default();
+                        let loc = self.stage.position_of(w).unwrap_or_default();
                         let size = w.geometry().size;
                         let closest = canvas::closest_point_on_rect(origin, loc, size);
                         let point = if closest == origin {
@@ -224,26 +221,15 @@ impl DriftWm {
                 }
             }
             Action::CycleWindows { backward } => {
-                if self.focus_history.is_empty() {
+                // The active output's fullscreen was already exited above (not
+                // allowlisted), so any fullscreen entry the stage skips is on
+                // another output — shown only on its own monitor, never a
+                // target here.
+                let anchor = self.cycle_anchor();
+                let Some(window) = self.stage.cycle_step(*backward, anchor.as_ref()) else {
                     return;
-                }
-
-                let len = self.focus_history.len();
-                if let Some(ref mut idx) = self.cycle_state {
-                    if *backward {
-                        *idx = (*idx + len - 1) % len;
-                    } else {
-                        *idx = (*idx + 1) % len;
-                    }
-                } else {
-                    // First Tab press: jump to previous window (index 1)
-                    self.cycle_state = Some(1 % len);
-                }
-
-                let idx = self.cycle_state.unwrap();
-                if let Some(window) = self.focus_history.get(idx).cloned() {
-                    self.navigate_to_window(&window, false);
-                }
+                };
+                self.navigate_to_window(&window, false);
             }
             Action::HomeToggle => {
                 let viewport_size = self.get_viewport_size();
@@ -261,12 +247,12 @@ impl DriftWm {
                         let can_fullscreen = ret
                             .fullscreen_window
                             .as_ref()
-                            .is_some_and(|w| self.space.elements().any(|e| e == w));
+                            .is_some_and(|w| self.stage.contains(w));
                         if can_fullscreen {
                             // Set camera/zoom directly — enter_fullscreen locks the viewport
                             self.set_camera(ret.camera);
                             self.set_zoom(ret.zoom);
-                            self.enter_fullscreen(ret.fullscreen_window.as_ref().unwrap());
+                            self.enter_fullscreen(ret.fullscreen_window.as_ref().unwrap(), None);
                         } else {
                             let vc = self.usable_center_screen();
                             self.set_zoom_animation_center(Some(Point::from((
@@ -328,11 +314,11 @@ impl DriftWm {
                     // toggled back
                 } else {
                     let windows = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| self.is_canvas_window(w))
                         .map(|w| {
-                            let loc = self.space.element_location(w).unwrap_or_default();
+                            let loc = self.stage.position_of(w).unwrap_or_default();
                             let size = w.geometry().size;
                             (loc, size)
                         });
@@ -362,11 +348,11 @@ impl DriftWm {
                         self.config.snap_gap,
                     );
                     let members = self
-                        .space
-                        .elements()
+                        .stage
+                        .windows()
                         .filter(|w| cluster.contains(w))
                         .map(|w| {
-                            let loc = self.space.element_location(w).unwrap_or_default();
+                            let loc = self.stage.position_of(w).unwrap_or_default();
                             let size = w.geometry().size;
                             (loc, size)
                         });
@@ -376,12 +362,30 @@ impl DriftWm {
                 }
             }
             Action::ToggleFullscreen => {
-                if self.is_fullscreen() {
+                let focused = self.focused_window().filter(|w| !w.is_widget());
+                if was_fullscreen.is_some() && !self.is_fullscreen() {
+                    // Input-layer code exited the active output's fullscreen
+                    // before this ran — the toggle is done; don't re-enter or
+                    // reach into another output's fullscreen.
+                } else if let Some(output) = focused
+                    .as_ref()
+                    .and_then(|w| w.wl_surface())
+                    .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                {
+                    // Toggle the focused window, not the active output: Mod+F
+                    // exits a fullscreen window wherever it lives — keyboard focus
+                    // can be on it while the pointer is on another monitor, where
+                    // `is_fullscreen()` (active output) reads false.
+                    self.exit_fullscreen_on(&output);
+                } else if self.is_fullscreen() {
+                    // The focused window isn't fullscreen (focus on a layer, a
+                    // windowed window, or nothing) but the active output is.
                     self.exit_fullscreen();
-                } else if was_fullscreen.is_some() {
-                    // Gesture already exited fullscreen — don't re-enter
-                } else if let Some(window) = self.focused_window().filter(|w| !w.is_widget()) {
-                    self.enter_fullscreen(&window);
+                } else if let Some(window) = focused {
+                    let target = window
+                        .wl_surface()
+                        .and_then(|s| self.resolve_fullscreen_output(&s, None));
+                    self.enter_fullscreen(&window, target);
                 }
             }
             Action::FitWindow => {
@@ -394,11 +398,45 @@ impl DriftWm {
                     self.toggle_fit_window_snapped(&window);
                 }
             }
+            Action::FillWindow => {
+                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
+                    self.toggle_fill_window(&window);
+                }
+            }
             Action::SendToOutput(dir) => {
-                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w))
-                    && let Some(from_output) = self.output_for_window(&window)
-                    && let Some(target_output) = self.output_in_direction(&from_output, dir)
-                {
+                let Some(window) = self.focused_window().filter(|w| !w.is_widget()) else {
+                    return;
+                };
+                let fullscreen = self.is_window_fullscreen(&window);
+                // A fullscreen window is parked at its output's camera origin, so
+                // the geometric output_for_window can mis-resolve it to another
+                // monitor whose independent camera shows the same canvas region —
+                // resolve it from the fullscreen entry instead. output_for_window
+                // already short-circuits to the pin site's output for a pin.
+                let from_output = if fullscreen {
+                    window
+                        .wl_surface()
+                        .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                } else {
+                    self.output_for_window(&window)
+                };
+                let Some(from_output) = from_output else {
+                    return;
+                };
+                let Some(target_output) = self.output_in_direction(&from_output, dir) else {
+                    return;
+                };
+
+                if fullscreen {
+                    // enter_fullscreen tears down the old output's fullscreen
+                    // (restoring its camera/zoom and any suspended pin) and
+                    // sets focus itself.
+                    self.enter_fullscreen(&window, Some(target_output));
+                } else if self.is_pinned(&window) {
+                    // Pinned windows live outside the MRU history and are
+                    // already focused.
+                    self.send_pinned_to_output(&window, &target_output);
+                } else {
                     // Compute target output's usable area center in canvas coords
                     let (target_cam, target_zoom) = {
                         let os = crate::state::output_state(&target_output);
@@ -412,7 +450,10 @@ impl DriftWm {
                         (center_x - geo.size.w as f64 / 2.0) as i32,
                         (center_y - geo.size.h as f64 / 2.0) as i32,
                     ));
-                    self.space.map_element(window.clone(), new_loc, true);
+                    // Relocating to another output re-anchors the window,
+                    // invalidating any fill restore point.
+                    self.stage.clear_fill(&window);
+                    self.map_window(window.clone(), new_loc, true);
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.raise_and_focus(&window, serial);
                 }
@@ -496,42 +537,40 @@ impl DriftWm {
 
     /// Toggle screen-pinning of the focused window. Pin/unpin keeps the window
     /// in the same on-screen position (no visual jump) and survives reload
-    /// (state lives in `self.pinned`, not the rules).
+    /// (state lives on the stage, not the rules).
     fn toggle_pin_to_screen(&mut self) {
-        let Some(window) = self.focused_window() else {
+        // Focus can linger on another output's fullscreen window (the guard in
+        // execute_action only exits the active output's); pinning it would mix
+        // two screen-space modes on one window.
+        let Some(window) = self
+            .focused_window()
+            .filter(|w| !self.is_window_fullscreen(w))
+        else {
             return;
         };
-        let Some(id) = window.wl_surface().map(|s| s.id()) else {
-            return;
-        };
-        if self.is_pinned(&window) {
+        if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
             // location at the current camera/zoom — no visual jump.
-            if let Some((output, screen_pos)) = self
-                .pinned
-                .get(&id)
-                .map(|p| (p.output.clone(), p.screen_pos))
-            {
+            if let Some(output) = self.output_by_name(&site.output) {
                 let (camera, zoom) = {
                     let os = crate::state::output_state(&output);
                     (os.camera, os.zoom)
                 };
                 let canvas = driftwm::canvas::screen_to_canvas(
-                    driftwm::canvas::ScreenPos(screen_pos.to_f64()),
+                    driftwm::canvas::ScreenPos(site.screen_pos.to_f64()),
                     camera,
                     zoom,
                 )
                 .0
                 .to_i32_round();
-                self.space.map_element(window.clone(), canvas, true);
+                self.map_window(window.clone(), canvas, true);
             }
-            self.pinned.remove(&id);
         } else {
             // Pin at the window's current on-screen position on its output.
             let Some(output) = self.output_for_window(&window) else {
                 return;
             };
-            let Some(loc) = self.space.element_location(&window) else {
+            let Some(loc) = self.stage.position_of(&window) else {
                 return;
             };
             let (camera, zoom) = {
@@ -546,9 +585,14 @@ impl DriftWm {
             .0;
             let screen_pos = Point::from((screen.x.round() as i32, screen.y.round() as i32));
             // Pinned windows are out of the focus cycle.
-            self.focus_history.retain(|w| w != &window);
-            self.pinned
-                .insert(id, crate::state::PinnedState { output, screen_pos });
+            self.stage.drop_from_focus_history(&window);
+            self.stage.set_pin(
+                &window,
+                driftwm::stage::PinnedSite {
+                    output: output.name(),
+                    screen_pos,
+                },
+            );
         }
         // The hit-test path changed (pinned vs canvas); recompute pointer focus.
         self.refresh_pointer_focus();
