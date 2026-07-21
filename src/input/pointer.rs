@@ -590,7 +590,7 @@ impl DriftWm {
     /// opaque, so this consumes every button over one (returning `true`) unless
     /// a non-move/resize modifier binding should beat the chrome, in which case
     /// it defers to normal dispatch.
-    fn try_suspended_button(
+    pub(crate) fn try_suspended_button(
         &mut self,
         pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
         pos: Point<f64, smithay::utils::Logical>,
@@ -603,20 +603,26 @@ impl DriftWm {
         };
         let id = s.id;
 
+        // Held-modifier bindings beat chrome, mirroring the live-window ordering:
+        // a modifier move/resize grabs the stand-in, other modifier bindings defer
+        // to normal dispatch. A bare binding does NOT beat chrome — the whole
+        // opaque frame acts like a title bar, so it falls through to the chrome
+        // handling below.
         let (binding, modifier_binding) =
             self.modifier_button_binding(&mods, button, BindingContext::OnWindow);
         match binding {
-            Some(MouseAction::MoveWindow | MouseAction::MoveSnappedWindows) => {
+            Some(MouseAction::MoveWindow | MouseAction::MoveSnappedWindows) if modifier_binding => {
                 self.focus_and_raise_suspended(id);
                 self.start_suspended_move(pointer, &s, pos, button, serial);
                 return true;
             }
-            Some(MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped) => {
+            Some(MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped)
+                if modifier_binding =>
+            {
                 self.focus_and_raise_suspended(id);
                 self.start_suspended_resize(pointer, &s, pos, button, serial, None);
                 return true;
             }
-            // Non-move/resize modifier bindings beat chrome — defer to dispatch.
             Some(_) if modifier_binding => return false,
             _ => {}
         }

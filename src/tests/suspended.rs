@@ -3,7 +3,8 @@
 //! through the test-only [`DriftWm::insert_suspended_for_test`] hook —
 //! production never builds a suspended element in this chunk.
 
-use driftwm::config::Config;
+use driftwm::config::{BTN_LEFT, Config};
+use smithay::input::keyboard::ModifiersState;
 use smithay::utils::{Point, Rectangle, SERIAL_COUNTER, Size};
 
 use crate::decorations::DecorationHit;
@@ -93,6 +94,135 @@ fn suspended_body_does_not_leak_to_window_beneath() {
     );
 
     f.state().dismiss_suspended(sid);
+}
+
+/// The padding strip right of the close button is chrome, not a hole: a point
+/// there resolves to the stand-in's title bar (drag-to-move) and does not leak
+/// to a client whose body lies beneath the drawn bar.
+#[test]
+fn suspended_bar_right_pad_strip_is_chrome() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    // A client whose body reaches up into the stand-in's title-bar band.
+    map_window(&mut f, id, "beneath", (400, 300));
+    let client = window_by_app_id(&mut f, "beneath").unwrap();
+    origin_view(&mut f);
+    f.state()
+        .map_window(StageWindow::Client(client), Point::from((500, 400)), true);
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+
+    // A point in the 8px strip right of the close button, within the bar band:
+    // x in [500+400-8, 500+400), y in [500-25, 500).
+    let strip = pt(500.0 + 400.0 - 4.0, 500.0 - 13.0);
+
+    // A client is genuinely hittable there (its body reaches into the band)…
+    assert!(
+        f.state().surface_under(strip, None).is_some(),
+        "a client body lies beneath the drawn bar strip"
+    );
+    // …but the strip resolves to the stand-in's title bar, not a hole.
+    assert!(
+        matches!(
+            f.state().decoration_under(strip),
+            Some((DecoTarget::Suspended(_), DecorationHit::TitleBar))
+        ),
+        "the right-pad strip is a title-bar hit"
+    );
+    // And the pointer cascade yields nothing over it — no leak to the client.
+    assert!(
+        f.state().pointer_focus_under(strip, strip).is_none(),
+        "the strip gives no pointer focus to the client beneath"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A bare (modifier-less) mouse move binding does not beat suspended chrome: a
+/// close-button click dismisses the stand-in. The same click with the modifier
+/// held wins — it grabs the stand-in (focus + raise) without dismissing it.
+#[test]
+fn suspended_chrome_beats_bare_but_not_modifier_move_binding() {
+    let config = Config::from_toml(
+        r#"
+        [decorations]
+        default_mode = "server"
+        [mouse.anywhere]
+        "left" = "move-window"
+        "super+left" = "move-window"
+    "#,
+    )
+    .unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    // The close button of a stand-in at (500,500), 400x300, bar 25:
+    // x in [500+400-25-8, 500+400-8), y in [500-25, 500).
+    let close = pt(500.0 + 400.0 - 20.0, 500.0 - 12.0);
+    let serial = SERIAL_COUNTER.next_serial();
+    let pointer = f.state().seat.get_pointer().unwrap();
+
+    // Bare click: chrome wins, so the close button dismisses the stand-in.
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    assert!(matches!(
+        f.state().decoration_under(close),
+        Some((DecoTarget::Suspended(_), DecorationHit::CloseButton))
+    ));
+    let consumed = f.state().try_suspended_button(
+        &pointer,
+        close,
+        BTN_LEFT,
+        serial,
+        ModifiersState::default(),
+    );
+    assert!(consumed, "a click over the opaque stand-in is consumed");
+    assert!(
+        f.state().find_suspended(sid).is_none(),
+        "a bare move binding loses to chrome: the close button dismissed the stand-in"
+    );
+
+    // Same click with the modifier held: the binding wins — it grabs the
+    // stand-in (focus + raise) without dismissing it.
+    let sid2 = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let held = ModifiersState {
+        logo: true,
+        ..Default::default()
+    };
+    let serial = SERIAL_COUNTER.next_serial();
+    let consumed = f
+        .state()
+        .try_suspended_button(&pointer, close, BTN_LEFT, serial, held);
+    assert!(consumed);
+    assert!(
+        f.state().find_suspended(sid2).is_some(),
+        "a held-modifier move binding does not dismiss the stand-in"
+    );
+    assert!(
+        matches!(f.state().window_focus, Some(FocusIntent::Suspended(s)) if s == sid2),
+        "the held-modifier move focused + raised the stand-in"
+    );
+
+    f.state().dismiss_suspended(sid2);
 }
 
 /// Occlusion for the gesture/action paths: `element_under` / `element_under_raw`
