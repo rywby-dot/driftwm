@@ -6,7 +6,7 @@
 //! `dev/docs/reference-config-format.md`) must yield TOML that parses to exactly
 //! `Config::from_toml("")`.
 
-use driftwm::config::Config;
+use driftwm::config::{ACTION_NAMES, Config};
 use std::collections::{BTreeMap, BTreeSet};
 
 const REFERENCE: &str = include_str!("../config.reference.toml");
@@ -193,19 +193,18 @@ fn reference_section(heading: &str) -> &'static str {
     &body[..end]
 }
 
-/// The field names documented under every `# # Supported fields:` block in
-/// `section`. A block runs from its marker line to the next blank comment line
-/// (`# #`), doc heading, or non-comment line. At the block's shallowest indent,
-/// a line reading `name — …` contributes `name`; deeper continuation lines and
-/// sub-bullets are skipped. Multiple markers in a section are unioned.
-fn documented_fields(section: &str) -> BTreeSet<String> {
+/// The `# #` comment lines (prefix stripped) directly under each `# # <marker>`
+/// line in `section`, one inner `Vec` per marker occurrence. A block runs from
+/// its marker to the next blank comment (`# #`), nested `#`, or non-comment
+/// line — the shared walk behind `documented_fields` and `documented_actions`.
+fn marker_blocks<'a>(section: &'a str, marker: &str) -> Vec<Vec<&'a str>> {
     let lines: Vec<&str> = section.lines().collect();
-    let mut names = BTreeSet::new();
+    let mut blocks = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let is_marker = lines[i]
             .strip_prefix("# #")
-            .is_some_and(|rest| rest.trim() == "Supported fields:");
+            .is_some_and(|rest| rest.trim() == marker);
         if !is_marker {
             i += 1;
             continue;
@@ -222,6 +221,18 @@ fn documented_fields(section: &str) -> BTreeSet<String> {
             block.push(body);
             i += 1;
         }
+        blocks.push(block);
+    }
+    blocks
+}
+
+/// The field names documented under every `# # Supported fields:` block in
+/// `section`. At the block's shallowest indent, a line reading `name — …`
+/// contributes `name`; deeper continuation lines and sub-bullets are skipped.
+/// Multiple markers in a section are unioned.
+fn documented_fields(section: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for block in marker_blocks(section, "Supported fields:") {
         let base = block
             .iter()
             .map(|b| b.len() - b.trim_start().len())
@@ -294,6 +305,80 @@ fn output_fields_are_all_documented() {
     assert_fields_match(
         "[[outputs]]\nname = \"eDP-1\"\nbogus_field_zz = 1\n",
         "# ## Outputs",
+    );
+}
+
+/// The action names documented under the unique `# # Actions:` block in the
+/// reference (same block walk as `marker_blocks`). At the block's shallowest
+/// indent, the pre-em-dash text's first whitespace-separated token is the
+/// action name; rows sharing a name collapse via the set.
+fn documented_actions() -> BTreeSet<String> {
+    let blocks = marker_blocks(REFERENCE, "Actions:");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "expected exactly one `# # Actions:` marker in config.reference.toml, found {}",
+        blocks.len()
+    );
+    let block = blocks.into_iter().next().unwrap();
+    let base = block
+        .iter()
+        .map(|b| b.len() - b.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    let mut names = BTreeSet::new();
+    for body in block {
+        if body.len() - body.trim_start().len() != base {
+            continue;
+        }
+        if let Some((pre, _)) = body.trim_start().split_once('\u{2014}')
+            && let Some(name) = pre.split_whitespace().next()
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// Keeps `ACTION_NAMES` and the documented `Actions:` catalog in lockstep: every
+/// listed action must be a real, parseable binding, and the two name sets must
+/// match exactly.
+#[test]
+fn keybinding_actions_are_all_documented() {
+    // Sample-parse: each canonical sample must parse cleanly, proving every
+    // const entry names a real action (a bad action surfaces as a warning).
+    let mut toml = String::from("[keybindings]\n");
+    for (i, (_, sample)) in ACTION_NAMES.iter().enumerate() {
+        toml.push_str(&format!("\"ctrl+F{}\" = \"{sample}\"\n", i + 1));
+    }
+    let (_, warnings) = Config::from_toml_collect(&toml)
+        .unwrap_or_else(|e| panic!("sample action bindings failed to parse: {e}\n\n{toml}"));
+    assert!(
+        warnings.is_empty(),
+        "sample action bindings produced warnings:\n{warnings:#?}\n\n{toml}"
+    );
+
+    // `none` is the unbind sentinel handled outside `parse_action`, but it is a
+    // documented, bindable value, so it belongs in the catalog.
+    let code: BTreeSet<String> = ACTION_NAMES
+        .iter()
+        .map(|(n, _)| n.to_string())
+        .chain(std::iter::once("none".to_string()))
+        .collect();
+    let documented = documented_actions();
+
+    let missing: Vec<&str> = code.difference(&documented).map(String::as_str).collect();
+    assert!(
+        missing.is_empty(),
+        "actions exist in code but have no entry under `Actions:` in \
+         config.reference.toml: {missing:?}"
+    );
+    let extra: Vec<&str> = documented.difference(&code).map(String::as_str).collect();
+    assert!(
+        extra.is_empty(),
+        "entries are documented under `Actions:` in config.reference.toml but \
+         do not exist in code: {extra:?}"
     );
 }
 
