@@ -19,7 +19,8 @@ in config order and merged together:
 
 - **Scalar fields** (`decoration`, `opacity`, `position`, `size`,
   `border_width`, `border_color`, `border_color_focused`, `corner_radius`,
-  `shadow`): last-wins — a later rule overrides an earlier one.
+  `shadow`, `suspend_on_close`): last-wins — a later rule overrides an
+  earlier one.
 - **Boolean flags** (`widget`, `blur`): sticky-on — once set by
   any matching rule, the flag stays set regardless of later rules.
 - **`pass_keys`**: `All` is sticky-on; `Only` lists are unioned across
