@@ -61,6 +61,14 @@ html:not(.js) {
     --copy-button-filter: invert(60%);
 }
 
+/* mdBook 0.5.4: toc.js builds the themed sidebar inline but never hides the
+ * no-JS fallback iframe, whose document is hardcoded class="light" and overlays
+ * it (absolute, full-size) — so the sidebar ignores the page theme. Hide the
+ * fallback when JS runs; no-JS visitors still get the iframe. */
+html.js .sidebar-iframe-outer {
+    display: none;
+}
+
 /* Monochrome links need a non-color affordance: bold + underline. `:not(.header)`
  * keeps heading self-anchors looking like headings, not links. */
 .content a:not(.header) {
