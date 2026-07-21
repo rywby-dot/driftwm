@@ -127,9 +127,7 @@ impl Fixture {
     }
 
     /// Opt this fixture out of the drop-time baseline assertion, for a scenario
-    /// that legitimately ends off-baseline. Scaffolding for scenarios not yet
-    /// written.
-    #[allow(dead_code)]
+    /// that legitimately ends off-baseline.
     pub fn skip_baseline_check(&mut self) {
         self.skip_baseline = true;
     }

@@ -73,14 +73,20 @@ impl DriftWm {
     /// 2. Normal click on window → focus + raise + forward to client
     /// 3. Left-click on empty canvas → pan canvas
     pub(super) fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        let button = event.button_code();
+        let button_state = event.state();
+        if button_state == ButtonState::Pressed {
+            self.held_buttons.insert(button);
+        } else {
+            self.held_buttons.remove(&button);
+        }
+
         // Outputs can transiently disappear (cable unplug, GPU resume race);
         // bail out so downstream active_output() / position lookups can't panic.
         if self.space.outputs().next().is_none() {
             return;
         }
         let serial = SERIAL_COUNTER.next_serial();
-        let button = event.button_code();
-        let button_state = event.state();
         let pointer = self.seat.get_pointer().unwrap();
 
         // Buffer BTN_MIDDLE release while a pending click is waiting

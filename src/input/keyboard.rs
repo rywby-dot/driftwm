@@ -39,6 +39,7 @@ impl DriftWm {
                             let vt = (raw - 0x1008FE01 + 1) as i32;
                             // VT switch may not deliver releases; reset key/cycle state.
                             state.suppressed_keys.clear();
+                            state.held_buttons.clear();
                             state.stage.cancel_cycle();
                             state.tap.reset();
                             if let Some(ref mut session) = state.session
@@ -107,6 +108,7 @@ impl DriftWm {
                     let vt = (raw - 0x1008FE01 + 1) as i32;
                     // VT switch may not deliver releases; reset key/cycle state.
                     state.suppressed_keys.clear();
+                    state.held_buttons.clear();
                     state.stage.cancel_cycle();
                     state.tap.reset();
                     if let Some(ref mut session) = state.session
