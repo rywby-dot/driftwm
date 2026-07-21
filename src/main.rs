@@ -49,7 +49,9 @@ enum Sub {
     ///
     /// Auto-targets the instance named by `WAYLAND_DISPLAY` (override with
     /// `DRIFTWM_SOCKET`). A subcommand with no arguments reads state; with
-    /// arguments it writes. Add `--json` for the raw JSON reply.
+    /// arguments it writes. Add `--json` for the raw JSON reply. A command that
+    /// fails (bad value, no match, no focused window) prints an error to stderr
+    /// and exits non-zero, so scripts can branch on it.
     Msg {
         /// Print the raw JSON reply
         #[arg(long, global = true)]

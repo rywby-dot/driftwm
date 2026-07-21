@@ -53,20 +53,27 @@ pub enum Msg {
     ///
     /// An introspection endpoint, not a stable interface: the keys are internal
     /// field names that can change between releases. Meant for leak diagnosis —
-    /// a count should return to its idle baseline once the windows and clients
-    /// that raised it are gone.
+    /// a window/surface/client-keyed count should return to its idle baseline
+    /// once the windows and clients that raised it are gone (output-keyed
+    /// counters follow output lifetimes instead and can persist across hotplug).
     ///
     /// Reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
     DebugCounters,
     /// Stream state snapshots as they change (one JSON line per event with --json).
     ///
     /// Turns the connection into a live feed: the server acks, then pushes one
-    /// event with the current state immediately and again on every change (per
-    /// rendered frame while something animates, not throttled). Runs until
-    /// interrupted.
+    /// event with the current state immediately and again on every change —
+    /// including camera/zoom, the window list, focus, window titles, keyboard
+    /// layout, a per-output viewport, the screen-space inventory (pinned and
+    /// fullscreen windows — dragging a pinned window pushes events), and
+    /// layer/canvas-layer changes. While something animates an event is pushed
+    /// per rendered frame (not throttled like the state file), so a pan or drag
+    /// streams at the compositor's frame rate. Runs until interrupted.
     ///
     /// Each event is `{"State":{..}}` — the whole snapshot, same shape as the
-    /// `state` reply, and not wrapped in `Ok`/`Err`.
+    /// `state` reply, and not wrapped in `Ok`/`Err`. A slow subscriber never
+    /// blocks the compositor: it drops snapshots and catches up in full on the
+    /// next change.
     Subscribe,
     /// Print the focused window, or focus a window by app_id substring or `--id`
     /// (the stable id shown in `state`).
@@ -101,10 +108,12 @@ pub enum Msg {
     /// Get a window's opacity, or set it with `<value>` (0.0–1.0). Targets the
     /// focused window, or `--id` (the stable id shown in `state`).
     ///
-    /// Applies to any rendered window, pinned and fullscreen included; the change
-    /// takes effect next frame. The value is runtime-only — seeded from an
-    /// `opacity` window rule at map time, never persisted. Values outside
-    /// `0.0`–`1.0` are rejected, not clamped; a window no rule touched reads `1`.
+    /// `0.0` is transparent, `1.0` opaque. Applies to any rendered window, pinned
+    /// and fullscreen included; the change takes effect next frame. The value is
+    /// runtime-only — seeded from an `opacity` window rule at map time, held for
+    /// the session, and never persisted (it resets when the window or compositor
+    /// restarts). Values outside `0.0`–`1.0` are rejected, not clamped; a window
+    /// no rule touched reads `1`.
     ///
     /// Reply: `{"Ok":{"Opacity":0.85}}`.
     Opacity {
@@ -134,6 +143,13 @@ pub enum Msg {
     /// had no effect (e.g. `close-window` with nothing focused); only an
     /// unparseable spec errors.
     ///
+    /// The dedicated `msg` commands are the state you can read or set; every
+    /// one-shot operation (close a window, quit, zoom a step) lives here under
+    /// `action`. Window actions target the focused window, so to act on a
+    /// specific one, `focus` it first — or use the `--id` selector on
+    /// `focus`/`move`/`close`/`screenshot window` to target any window without
+    /// the focus-first dance.
+    ///
     /// The socket is a full control surface: `action` can `exec`/`spawn`, `quit`,
     /// and `reload-config`. It is safe only because the socket is `0600`.
     ///
@@ -149,15 +165,21 @@ pub enum Msg {
     ///
     /// A canvas capture, not a screen grab: it re-renders a virtual viewport onto
     /// the canvas, reaching off-screen content at any resolution. Windows get
-    /// full chrome; panels/layer-shells and blur are not drawn (use `grim` for a
-    /// literal grab). `-o -` streams the PNG to stdout. Captures tile internally
-    /// but cap at 16384 px/side.
+    /// full chrome (title bar, border, shadow); panels/layer-shells and blur are
+    /// not drawn (use `grim` for a literal grab). `-o -` streams the PNG to
+    /// stdout (e.g. `screenshot window -o - | wl-copy`).
+    ///
+    /// Blur caveat: a scene capture (viewport/`all`/`region`) shows a translucent
+    /// window over a sharp backdrop, never a blurred one; a `window` capture keeps
+    /// the translucency over transparent pixels. A gigapixel TIFF wallpaper uses
+    /// a coarse pyramid level, softening at extreme `--scale`. Captures tile
+    /// internally but cap at 16384 px/side.
     ///
     /// Reply: `{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}`.
     Screenshot {
         #[command(subcommand)]
         target: Option<ShotTarget>,
-        /// Pixels per canvas unit — higher captures more detail than the screen shows.
+        /// Pixels per canvas unit — higher captures more detail than the screen shows, independent of zoom.
         #[arg(long, default_value_t = 1.0, global = true)]
         scale: f64,
         /// Output PNG path, or `-` for stdout [default: ./driftwm-screenshot-<time>.png].

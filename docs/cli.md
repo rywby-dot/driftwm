@@ -29,7 +29,7 @@ driftwm msg [OPTIONS] <COMMAND>
 
 Send a command to the running compositor over its IPC socket.
 
-Auto-targets the instance named by `WAYLAND_DISPLAY` (override with `DRIFTWM_SOCKET`). A subcommand with no arguments reads state; with arguments it writes. Add `--json` for the raw JSON reply.
+Auto-targets the instance named by `WAYLAND_DISPLAY` (override with `DRIFTWM_SOCKET`). A subcommand with no arguments reads state; with arguments it writes. Add `--json` for the raw JSON reply. A command that fails (bad value, no match, no focused window) prints an error to stderr and exits non-zero, so scripts can branch on it.
 
 - `--json` — Print the raw JSON reply
 
@@ -91,7 +91,7 @@ driftwm msg debug-counters
 
 Print internal collection sizes for leak diagnosis (unstable keys).
 
-An introspection endpoint, not a stable interface: the keys are internal field names that can change between releases. Meant for leak diagnosis — a count should return to its idle baseline once the windows and clients that raised it are gone.
+An introspection endpoint, not a stable interface: the keys are internal field names that can change between releases. Meant for leak diagnosis — a window/surface/client-keyed count should return to its idle baseline once the windows and clients that raised it are gone (output-keyed counters follow output lifetimes instead and can persist across hotplug).
 
 Reply: `{"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}`.
 
@@ -103,9 +103,9 @@ driftwm msg subscribe
 
 Stream state snapshots as they change (one JSON line per event with --json).
 
-Turns the connection into a live feed: the server acks, then pushes one event with the current state immediately and again on every change (per rendered frame while something animates, not throttled). Runs until interrupted.
+Turns the connection into a live feed: the server acks, then pushes one event with the current state immediately and again on every change — including camera/zoom, the window list, focus, window titles, keyboard layout, a per-output viewport, the screen-space inventory (pinned and fullscreen windows — dragging a pinned window pushes events), and layer/canvas-layer changes. While something animates an event is pushed per rendered frame (not throttled like the state file), so a pan or drag streams at the compositor's frame rate. Runs until interrupted.
 
-Each event is `{"State":{..}}` — the whole snapshot, same shape as the `state` reply, and not wrapped in `Ok`/`Err`.
+Each event is `{"State":{..}}` — the whole snapshot, same shape as the `state` reply, and not wrapped in `Ok`/`Err`. A slow subscriber never blocks the compositor: it drops snapshots and catches up in full on the next change.
 
 #### `driftwm msg focus`
 
@@ -143,7 +143,7 @@ driftwm msg opacity [OPTIONS] [VALUE]
 
 Get a window's opacity, or set it with `<value>` (0.0–1.0). Targets the focused window, or `--id` (the stable id shown in `state`).
 
-Applies to any rendered window, pinned and fullscreen included; the change takes effect next frame. The value is runtime-only — seeded from an `opacity` window rule at map time, never persisted. Values outside `0.0`–`1.0` are rejected, not clamped; a window no rule touched reads `1`.
+`0.0` is transparent, `1.0` opaque. Applies to any rendered window, pinned and fullscreen included; the change takes effect next frame. The value is runtime-only — seeded from an `opacity` window rule at map time, held for the session, and never persisted (it resets when the window or compositor restarts). Values outside `0.0`–`1.0` are rejected, not clamped; a window no rule touched reads `1`.
 
 Reply: `{"Ok":{"Opacity":0.85}}`.
 
@@ -173,6 +173,8 @@ Run a config action, e.g. `action close-window`, `action quit`, `action switch-l
 
 Runs any compositor action by the same string you would write in a config keybinding, parsed with the exact config parser, so every keybindable action is reachable. Replies `Ok` whenever the spec parses — even if it had no effect (e.g. `close-window` with nothing focused); only an unparseable spec errors.
 
+The dedicated `msg` commands are the state you can read or set; every one-shot operation (close a window, quit, zoom a step) lives here under `action`. Window actions target the focused window, so to act on a specific one, `focus` it first — or use the `--id` selector on `focus`/`move`/`close`/`screenshot window` to target any window without the focus-first dance.
+
 The socket is a full control surface: `action` can `exec`/`spawn`, `quit`, and `reload-config`. It is safe only because the socket is `0600`.
 
 Reply: `{"Ok":"Ok"}`.
@@ -187,11 +189,13 @@ driftwm msg screenshot [OPTIONS] [COMMAND]
 
 Capture a canvas PNG (custom DPI). With no subcommand, captures the active output's current view of the canvas.
 
-A canvas capture, not a screen grab: it re-renders a virtual viewport onto the canvas, reaching off-screen content at any resolution. Windows get full chrome; panels/layer-shells and blur are not drawn (use `grim` for a literal grab). `-o -` streams the PNG to stdout. Captures tile internally but cap at 16384 px/side.
+A canvas capture, not a screen grab: it re-renders a virtual viewport onto the canvas, reaching off-screen content at any resolution. Windows get full chrome (title bar, border, shadow); panels/layer-shells and blur are not drawn (use `grim` for a literal grab). `-o -` streams the PNG to stdout (e.g. `screenshot window -o - | wl-copy`).
+
+Blur caveat: a scene capture (viewport/`all`/`region`) shows a translucent window over a sharp backdrop, never a blurred one; a `window` capture keeps the translucency over transparent pixels. A gigapixel TIFF wallpaper uses a coarse pyramid level, softening at extreme `--scale`. Captures tile internally but cap at 16384 px/side.
 
 Reply: `{"Ok":{"Screenshot":{"path":"/abs/shot.png","width":1920,"height":1080}}}`.
 
-- `--scale <SCALE>` — Pixels per canvas unit — higher captures more detail than the screen shows (default: `1`)
+- `--scale <SCALE>` — Pixels per canvas unit — higher captures more detail than the screen shows, independent of zoom (default: `1`)
 - `-o, --output <OUTPUT>` — Output PNG path, or `-` for stdout [default: ./driftwm-screenshot-<time>.png]
 
 ##### `driftwm msg screenshot window`
