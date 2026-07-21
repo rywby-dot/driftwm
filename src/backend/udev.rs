@@ -704,6 +704,7 @@ pub fn init_udev(
                     // Releases for held keys / cycle modifiers may not be delivered
                     // when the session is paused.
                     data.suppressed_keys.clear();
+                    data.held_buttons.clear();
                     data.stage.cancel_cycle();
                     data.tap.reset();
                 }

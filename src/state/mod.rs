@@ -82,7 +82,7 @@ use crate::backend::Backend;
 use crate::input::gestures::GestureState;
 use crate::input::keyboard::TapTracker;
 use driftwm::canvas::MomentumState;
-use driftwm::config::Config;
+use driftwm::config::{Config, HotCorner};
 use driftwm::window_ext::WindowExt;
 
 /// Min visible fraction of the focused window for auto-placement to anchor a
@@ -601,6 +601,9 @@ pub struct DriftWm {
     /// launchers leak the trigger key into the previously focused window.
     pub suppressed_keys: HashSet<u32>,
 
+    /// Mouse buttons currently held down. Same purpose as `held_keys`.
+    pub held_buttons: HashSet<u32>,
+
     pub gesture_state: Option<GestureState>,
     pub pending_middle_click: Option<PendingMiddleClick>,
 
@@ -687,6 +690,11 @@ pub struct DriftWm {
         Instant,
         smithay::reexports::wayland_server::backend::ObjectId,
     )>,
+
+    /// Corner currently occupied by the pointer, per output. Entry is latched
+    /// even when fullscreen/dragging suppresses the action; the latch clears
+    /// only after the pointer leaves all corners.
+    pub hot_corners_latched: HashMap<Output, HotCorner>,
 
     /// Click armed for auto-navigate on release (see `auto_navigate_on_click`).
     pub pending_click_navigate: Option<PendingClickNavigate>,

@@ -330,6 +330,19 @@ pub(super) struct OutputRuleFile {
     pub transform: Option<String>,
     pub position: Option<::toml::Value>,
     pub mode: Option<String>,
+    pub hot_corners: Option<HotCornersFile>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct HotCornersFile {
+    pub threshold: Option<f64>,
+    pub top_left: Option<String>,
+    pub top_right: Option<String>,
+    pub bottom_left: Option<String>,
+    pub bottom_right: Option<String>,
+    pub disable_when_fullscreen: Option<bool>,
+    pub disable_while_dragging: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]

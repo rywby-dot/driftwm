@@ -1000,13 +1000,69 @@ impl Default for OutputOutlineSettings {
 }
 
 /// Per-output configuration from `[[outputs]]` config sections.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct OutputConfig {
     pub name: String,
     pub scale: Option<f64>,
     pub transform: Option<Transform>,
     pub position: OutputPosition,
     pub mode: OutputMode,
+    pub hot_corners: HotCorners,
+}
+
+/// Which corner of the screen to bind a hot-corner action to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HotCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl HotCorner {
+    /// True when `(x, y)` in output-local screen coords is within `threshold`
+    /// pixels of this corner.
+    pub fn contains(&self, x: f64, y: f64, out_w: f64, out_h: f64, threshold: f64) -> bool {
+        let on_left = x < threshold;
+        let on_right = x > out_w - threshold;
+        let on_top = y < threshold;
+        let on_bottom = y > out_h - threshold;
+        match self {
+            Self::TopLeft => on_left && on_top,
+            Self::TopRight => on_right && on_top,
+            Self::BottomLeft => on_left && on_bottom,
+            Self::BottomRight => on_right && on_bottom,
+        }
+    }
+}
+
+/// Per-output hot-corner bindings. Empty map = no corners configured.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotCorners {
+    /// Action to fire when the cursor enters this corner. `None` disables the corner.
+    pub bindings: HashMap<HotCorner, Action>,
+    /// Activation zone size in logical pixels. Defaults to 4.
+    pub threshold: f64,
+    pub disable_when_fullscreen: bool,
+    pub disable_while_dragging: bool,
+}
+
+impl Default for HotCorners {
+    fn default() -> Self {
+        Self {
+            bindings: HashMap::new(),
+            threshold: Self::DEFAULT_THRESHOLD,
+            disable_when_fullscreen: true,
+            disable_while_dragging: true,
+        }
+    }
+}
+
+impl HotCorners {
+    /// Default activation zone radius in logical pixels. Tuned for trackpad
+    /// precision: small enough not to eat normal cursor travel, large enough
+    /// to catch a deliberate flick to a corner.
+    pub const DEFAULT_THRESHOLD: f64 = 4.0;
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
