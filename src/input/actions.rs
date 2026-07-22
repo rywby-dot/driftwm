@@ -4,7 +4,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::state::{DriftWm, HomeReturn};
+use crate::state::{DriftWm, HomeReturn, StageWindow};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch, Modifiers};
 use driftwm::window_ext::WindowExt;
@@ -120,15 +120,17 @@ impl DriftWm {
                 if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
                     self.navigate_to_window(&window, true);
                 } else {
+                    // No focused window: center the nearest canvas element to the
+                    // viewport center — stand-ins included, so the user can land
+                    // on one and press Enter to relaunch.
                     let center = self.viewport_center_canvas();
                     let closest = self
                         .stage
                         .windows()
-                        .filter_map(|w| w.client())
                         .filter(|w| self.is_canvas_window(*w))
                         .min_by(|a, b| {
-                            let dist = |w: &smithay::desktop::Window| {
-                                let c = self.window_visual_center(w).unwrap_or_default();
+                            let dist = |w: &StageWindow| {
+                                let c = self.nav_center(w);
                                 let dx = c.x - center.x;
                                 let dy = c.y - center.y;
                                 dx * dx + dy * dy
@@ -136,8 +138,10 @@ impl DriftWm {
                             dist(a).total_cmp(&dist(b))
                         })
                         .cloned();
-                    if let Some(window) = closest {
-                        self.navigate_to_window(&window, true);
+                    match closest {
+                        Some(StageWindow::Client(w)) => self.navigate_to_window(&w, true),
+                        Some(StageWindow::Suspended(s)) => self.navigate_to_suspended(s.id),
+                        None => {}
                     }
                 }
             }
@@ -162,7 +166,7 @@ impl DriftWm {
             Action::CenterNearest(dir) => {
                 #[derive(Clone, PartialEq)]
                 enum NavTarget {
-                    Window(smithay::desktop::Window),
+                    Window(StageWindow),
                     Anchor(Point<f64, smithay::utils::Logical>),
                 }
 
@@ -187,27 +191,32 @@ impl DriftWm {
                             loc.y as f64 + size.h as f64 / 2.0,
                         ))
                     });
-                    (center, Some(NavTarget::Window(w.clone())))
+                    (
+                        center,
+                        Some(NavTarget::Window(StageWindow::Client(w.clone()))),
+                    )
                 } else {
                     (self.viewport_center_canvas(), None)
                 };
 
+                // Candidates are every canvas element, stand-ins included (their
+                // visual frame drives the distance metric), so a directional
+                // swipe can land on one and Enter relaunches it.
                 let windows = self
                     .stage
                     .windows()
-                    .filter_map(|w| w.client())
                     .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
-                        let loc = self.stage.position_of(w).unwrap_or_default();
-                        let size = w.geometry().size;
+                        let (loc, size) = match w {
+                            StageWindow::Client(c) => (
+                                self.stage.position_of(w).unwrap_or_default(),
+                                c.geometry().size,
+                            ),
+                            StageWindow::Suspended(_) => self.nav_frame(w),
+                        };
                         let closest = canvas::closest_point_on_rect(origin, loc, size);
                         let point = if closest == origin {
-                            self.window_visual_center(w).unwrap_or_else(|| {
-                                Point::from((
-                                    loc.x as f64 + size.w as f64 / 2.0,
-                                    loc.y as f64 + size.h as f64 / 2.0,
-                                ))
-                            })
+                            self.nav_center(w)
                         } else {
                             closest
                         };
@@ -223,8 +232,11 @@ impl DriftWm {
                 let nearest =
                     canvas::find_nearest(origin, dir, windows.chain(anchors), skip.as_ref());
                 match nearest {
-                    Some(NavTarget::Window(w)) => {
+                    Some(NavTarget::Window(StageWindow::Client(w))) => {
                         self.navigate_to_window(&w, false);
+                    }
+                    Some(NavTarget::Window(StageWindow::Suspended(s))) => {
+                        self.navigate_to_suspended(s.id);
                     }
                     Some(NavTarget::Anchor(p)) => {
                         // Unfocus so next CenterNearest searches from viewport center (= this anchor)
