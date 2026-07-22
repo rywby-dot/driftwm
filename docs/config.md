@@ -51,11 +51,9 @@ systemctl --user mask xdg-desktop-autostart.target
 autostart = ["waybar", "swaync"]
 ```
 
-## Session
+## `[session]`
 
 Persist your canvas across restarts. Suspended windows are always saved to ~/.local/state/driftwm/session.json; these flags control the rest.
-
-## `[session]`
 
 ### `suspend_on_close`
 

@@ -43,10 +43,10 @@
 # # Example:
 # # autostart = ["waybar", "swaync"]
 
-# ## Session
+[session]
 # # Persist your canvas across restarts. Suspended windows are always saved to
 # # ~/.local/state/driftwm/session.json; these flags control the rest.
-[session]
+
 # # Suspend instead of close when a window is closed by the client
 # # (titlebar X, in-app quit). close-window bindings, `msg close`, and
 # # taskbar closes still close for real. Per-window overridable via a

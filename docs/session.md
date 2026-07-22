@@ -8,9 +8,8 @@ your whole canvas after a restart.
 ## Suspended windows
 
 `suspend-window` closes the target window but leaves a **suspended window** —
-a compositor-drawn stand-in — at its exact canvas position and size: a body
-filled with the title bar's background color, with the app's name centered in
-it, and rounded corners that follow the border.
+a compositor-drawn stand-in — at its exact canvas position and size, with the
+app's name centered in it.
 
 Every stand-in wears the same chrome: a textless title bar (the centered name
 already labels it) carrying a close button. A **server-decorated** window's
@@ -23,9 +22,7 @@ press, and `msg close`.
 It's draggable, resizable, raisable, and focusable like any window. Pressing
 `Enter` while it's focused, or clicking/tapping the centered name, relaunches
 the app; while the relaunch is pending the name reads `<app> launching…`. The
-new window takes over the stand-in's exact geometry and z-order slot. Firing
-`suspend-window` again on a focused suspended window dismisses it — the put-away
-gesture, repeated, escalates to "gone".
+new window takes over the stand-in's exact geometry and z-order slot.
 
 It's a regular action — bind it in `[keybindings]`, `[mouse]`, `[gestures]`,
 or `[touch]` like any other. There's no default binding:
@@ -43,11 +40,6 @@ A few things are deliberately different about a suspended window:
 - **Excluded from Alt-Tab and focus history**, the same as a pinned widget —
   it's still focusable by hovering or clicking, but cycling and MRU never
   land on it, and neither does a taskbar's window list.
-- **A full snap/cluster citizen** — it snaps to windows while you drag it,
-  windows snap to it, and it joins a snap cluster like any window: suspending
-  the middle of a cluster leaves the cluster intact, and a group move/resize
-  carries the stand-in along. (It's still never pinned, fullscreen, or fit —
-  those stay off it even inside a group op.)
 - **Unpinnable, unfullscreenable, unfittable** — those actions no-op on it.
 
 If the window was fullscreen or screen-pinned when suspended, it's returned
