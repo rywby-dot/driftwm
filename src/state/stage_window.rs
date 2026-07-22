@@ -42,8 +42,8 @@ pub struct SuspendedChrome {
     /// Centered app-name label (transparent background, foreground text).
     pub label: Option<MemoryRenderBuffer>,
     /// `(body_w, body_h, scale, launching, fonts_ready)` the label buffer was
-    /// built for. `fonts_ready` is tracked so a label first built before the
-    /// background font scan lands re-rasters with text once it does.
+    /// built for. `fonts_ready` is tracked so a label built before the
+    /// background font scan completes re-rasters with text once it lands.
     pub label_key: Option<(i32, i32, i32, bool, bool)>,
     /// Label rect in body-local logical coords, for the `Label` hit region.
     pub label_rect: Option<Rectangle<i32, Logical>>,
@@ -121,7 +121,7 @@ impl Eq for StageWindow {}
 // Hash mirrors the pointer-identity `PartialEq`: a client hashes on its
 // `Window` (Arc pointer identity), a stand-in on its `Rc` pointer, with an arm
 // discriminant so the two never collide. Lets `StageWindow` key the snap /
-// cluster `HashSet`s the same way `Window` did.
+// cluster `HashSet`s on pointer identity.
 impl Hash for StageWindow {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {

@@ -361,10 +361,10 @@ impl DriftWm {
     /// live in screen space (a fullscreen window is parked at its output's
     /// camera origin), so they have no canvas snap rect — this excludes them
     /// from snapping, clustering, and all the viewport-relation queries built
-    /// on top of it. A suspended stand-in's rect equals what the live window's
-    /// was: body rect + `window_ssd_bar` strip (0 for a barless CSD-origin
-    /// stand-in) + the global-default border, so a client snaps to it exactly
-    /// as it did to the window it replaced.
+    /// on top of it. A suspended stand-in's rect mirrors its live window's:
+    /// body rect + `window_ssd_bar` strip (0 for a barless CSD-origin
+    /// stand-in) + the global-default border, so other windows snap to it
+    /// exactly as they would to the window it replaced.
     pub fn snap_rect_for(&self, w: &StageWindow) -> Option<driftwm::layout::snap::SnapRect> {
         if self.is_pinned(w) || self.is_window_fullscreen(w) {
             return None;
@@ -390,9 +390,9 @@ impl DriftWm {
     }
 
     /// Where an element's visible frame (border + SSD title bar + content) sits
-    /// on the canvas — the *navigation* rect. Now that stand-ins snap, this
-    /// coincides with [`Self::snap_rect_for`]; kept as a named alias so
-    /// navigation / IPC callsites read by intent.
+    /// on the canvas — the *navigation* rect. Delegates to
+    /// [`Self::snap_rect_for`] (stand-ins are snap targets too); kept as a
+    /// named alias so navigation / IPC callsites read by intent.
     pub fn visual_frame_rect(&self, w: &StageWindow) -> Option<driftwm::layout::snap::SnapRect> {
         self.snap_rect_for(w)
     }

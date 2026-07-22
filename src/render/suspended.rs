@@ -29,11 +29,10 @@ const PT_TO_PX: f32 = 4.0 / 3.0;
 const LABEL_SIDE_PAD: i32 = 24;
 
 /// Rebuild the label buffer (and record its body-local rect) for the current
-/// body size / scale / launching / font-readiness state. Returns nothing —
-/// writes into the element's `chrome` cell. `fonts_ready` is part of the key so
-/// a label first built before the background font scan lands (session restore
-/// at startup) re-rasters with text once it does — without it, a restored
-/// stand-in would keep the empty label it was first built with.
+/// body size / scale / launching / font-readiness state. Writes into the
+/// element's `chrome` cell. `fonts_ready` is part of the key so a label built
+/// before the background font scan completes re-rasters with text once it
+/// lands, rather than keeping its empty launch-time text forever.
 pub(crate) fn ensure_label(
     s: &SuspendedWindow,
     body: Size<i32, Logical>,

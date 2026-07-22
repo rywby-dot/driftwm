@@ -1093,8 +1093,7 @@ fn stand_in_bridges_a_cluster() {
 }
 
 /// A group move carries a stand-in member along at its frozen offset, and the
-/// move never leaks the stand-in into the fit / fullscreen / pin sets (those
-/// exclusions stay ratified).
+/// move never leaks the stand-in into the fit / fullscreen / pin sets.
 #[test]
 #[allow(clippy::mutable_key_type)]
 fn group_move_carries_stand_in_without_membership_leak() {

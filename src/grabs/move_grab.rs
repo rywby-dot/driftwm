@@ -506,8 +506,7 @@ impl MoveSurfaceGrab {
         // its own cluster.
         let members = self.resolved_members(data);
         let snapped = if data.config.snap_enabled {
-            // Surface gone mid-drag: skip forwarding (matches the pre-refactor
-            // guard) rather than snap a dead window.
+            // Surface gone mid-drag: skip forwarding rather than snap a dead window.
             if self.window.wl_surface().is_none() {
                 return false;
             }

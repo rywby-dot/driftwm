@@ -380,10 +380,8 @@ mod tests {
 
     /// foot ships three sibling entries (`foot`, `footclient`, `foot-server`),
     /// all `Terminal=false` (foot *is* a terminal; it is not launched inside
-    /// one) and none carrying `StartupWMClass`. foot's window app-id defaults to
-    /// `foot` (normal) / `footclient` (server mode), which match the stems
-    /// directly. All three must resolve to launchable entries: a real-world
-    /// shape check so a scan/dedup regression that drops foot is caught here.
+    /// one) and none carrying `StartupWMClass`, so resolution relies on the
+    /// app-id matching the filename stem directly.
     #[test]
     fn foot_family_resolves_from_real_world_shapes() {
         let tmp = TempDir::new();

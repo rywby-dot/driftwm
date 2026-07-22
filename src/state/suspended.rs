@@ -897,8 +897,8 @@ pub struct SuspendConversion {
     pub identity: AppIdentity,
     pub rect: Rectangle<i32, Logical>,
     pub title: String,
-    /// Whether the dying window was SSD (compositor bar) — the stand-in keeps a
-    /// bar to match, or is body-only for a CSD window.
+    /// Whether the closing window has SSD chrome — the stand-in matches:
+    /// barred for SSD, body-only for CSD.
     pub has_bar: bool,
 }
 

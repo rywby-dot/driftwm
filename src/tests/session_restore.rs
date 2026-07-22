@@ -133,11 +133,10 @@ fn quit_serialize_round_trip() {
     }
 }
 
-/// Regression: a restored stand-in renders the same centered clickable name as
-/// a conversion-born one. Its display name survives the round-trip (the label's
-/// text source), and the label cache tracks font-readiness — a label first
-/// built before the startup font scan lands re-rasters with text once it does,
-/// where before a restored stand-in kept an empty, unclickable label.
+/// A restored stand-in renders the same centered clickable name as a
+/// conversion-born one: its display name survives the round-trip, and the
+/// label cache tracks font-readiness so a label built before the startup font
+/// scan lands re-rasters with text once it does.
 #[test]
 fn restored_stand_in_has_clickable_label() {
     let tmp = TempDir::new();
@@ -182,8 +181,7 @@ fn restored_stand_in_has_clickable_label() {
     assert_ne!(cold, warm, "font readiness invalidates the label cache");
 
     // With a rendered label present (simulated — the headless fixture rasters no
-    // text), the restored stand-in's body center is a Label (relaunch) hit: the
-    // mouse relaunch target it previously lacked.
+    // text), the restored stand-in's body center is a Label (relaunch) hit.
     s.chrome.borrow_mut().label_rect = Some(Rectangle::new(
         Point::from((150, 130)),
         Size::from((100, 40)),

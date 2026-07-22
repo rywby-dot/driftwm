@@ -41,8 +41,8 @@ pub struct SessionEntry {
     pub size: [i32; 2],
     pub origin: Origin,
     /// Whether the stand-in draws a compositor title bar (SSD-origin) or is
-    /// body-only (CSD-origin). Additive: files written before it default to the
-    /// old always-bar behavior.
+    /// body-only (CSD-origin). Additive: a file without this field defaults to
+    /// `true`, so previously-saved sessions restore barred.
     #[serde(default = "default_true")]
     pub has_bar: bool,
 }
@@ -263,8 +263,7 @@ mod tests {
         );
         assert!(read_back.entries[1].has_bar);
 
-        // A file written before the field existed omits it entirely; the entry
-        // reads back with the old always-bar behavior.
+        // A file predating the field omits it entirely and defaults to barred.
         std::fs::write(
             &path,
             r#"{"version":1,"saved_at":0,"outputs":{},"entries":[

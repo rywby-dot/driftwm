@@ -206,10 +206,8 @@ impl DriftWm {
                     .windows()
                     .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
-                        // Measure every candidate on its bare content rect — a
-                        // client on its geometry, a stand-in on its body — so a
-                        // stand-in's SSD bar strip doesn't tip the proximity
-                        // metric that a client's doesn't.
+                        // Bare content size (client geometry, stand-in body) so
+                        // an SSD bar strip doesn't skew either's proximity metric.
                         let loc = self.stage.position_of(w).unwrap_or_default();
                         let size = w.geometry().size;
                         let closest = canvas::closest_point_on_rect(origin, loc, size);
