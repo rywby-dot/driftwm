@@ -190,8 +190,7 @@ pub(super) fn push_suspended_element(
         }
     }
 
-    // Rounded body fill in the SSD background color, below the label. The bar
-    // covers the top corners, so only the bottom pair rounds.
+    // Rounded body fill in the SSD background color, below the label.
     ensure_body(s, size, decoration_scale, config);
     {
         let chrome = s.chrome.borrow();

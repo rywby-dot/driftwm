@@ -985,7 +985,7 @@ impl DriftWm {
         let gap = self.config.snap_gap;
         // Every snap-rect citizen — live windows and suspended stand-ins alike —
         // counts as a neighbor; `snap_rect_for` drops widgets / pinned /
-        // fullscreen. The growing window itself is excluded.
+        // fullscreen.
         let others: Vec<(StageWindow, driftwm::layout::snap::SnapRect)> = self
             .stage
             .windows()

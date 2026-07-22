@@ -55,13 +55,8 @@ impl XdgShellHandler for DriftWm {
             })
             .unwrap_or((0, 0));
 
-        // Snapshot the focused element so `auto_placement_pos` can anchor
-        // against whatever the user was working with — a live window or a
-        // suspended stand-in (under sloppy focus, hovering a stand-in focuses
-        // it). `window_focus` intent survives even when a launcher (an exclusive
-        // layer surface) currently holds the live keyboard focus. `None` here
-        // means the user explicitly had no focused window (e.g. clicked empty
-        // canvas), so auto placement falls back to center.
+        // Snapshot the focus anchor so `auto_placement_pos` can anchor a new
+        // window beside it once mapping steals focus; see `focused_anchor_element`.
         let prev_focus = self.focused_anchor_element();
         self.auto_anchor_snapshot
             .insert(wl_surface.clone(), prev_focus);

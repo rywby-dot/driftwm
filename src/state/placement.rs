@@ -86,11 +86,10 @@ impl DriftWm {
     }
 
     /// Geometry-only placement of `placing` (content sized `new_size`, SSD
-    /// bar `bar`) adjacent to `anchor`'s snap cluster, treating every other
-    /// mapped window (live or a suspended stand-in) as an obstacle. The anchor
-    /// is a `StageWindow` so a focused stand-in can be anchored against, the
-    /// same as a live window. Returns the content top-left in canvas coords, or
-    /// `None` when `anchor` is ineligible or no slot fits.
+    /// bar `bar`) adjacent to `anchor`'s snap cluster — a live window or a
+    /// focused suspended stand-in — treating every other mapped window as an
+    /// obstacle. Returns the content top-left in canvas coords, or `None` when
+    /// `anchor` is ineligible or no slot fits.
     pub fn place_adjacent_to(
         &self,
         anchor: &StageWindow,
