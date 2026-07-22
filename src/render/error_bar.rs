@@ -1,7 +1,7 @@
 //! Bottom-edge error bar: internal chrome (not a layer-shell client), so it's a
 //! pure render element that input passes through.
 //!
-//! The rasterized buffer is cached per-output keyed by (text, width, scale):
+//! The rasterized buffer is cached per-output (see [`ErrorBarCache`]):
 //! rebuilding it every frame would re-damage the strip continuously and keep
 //! the compositor from ever going idle while an error is shown.
 
@@ -32,9 +32,11 @@ const ERROR_BAR_PAD_Y: i32 = 6;
 /// Separator between messages from different sources.
 const SEPARATOR: &str = "  •  ";
 
-/// Rasterized error bar cached per output, keyed by `(text, width, scale)`.
+/// Rasterized error bar cached per output, keyed by `(text, width, scale,
+/// fonts_ready)`. `fonts_ready` is part of the key so a bar rasterized
+/// textless during the startup font scan is rebuilt once fonts land.
 pub struct ErrorBarCache {
-    key: (String, i32, i32),
+    key: (String, i32, i32, bool),
     buffer: MemoryRenderBuffer,
 }
 
@@ -57,7 +59,7 @@ pub fn build_error_bar_elements(
     let bar_height = ERROR_BAR_FONT_PX.ceil() as i32 + 2 * ERROR_BAR_PAD_Y;
     let width = viewport.w.max(1);
 
-    let key = (text, width, s);
+    let key = (text, width, s, driftwm::text::fonts_ready());
     if state.render.cached_error_bar.get(&name).map(|c| &c.key) != Some(&key) {
         let buffer = render_error_bar(&key.0, width, bar_height, s);
         state
