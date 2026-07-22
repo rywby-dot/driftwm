@@ -42,6 +42,11 @@ pub struct SessionStore {
     /// Per-output cameras read at startup, to seed outputs the runtime state
     /// file hasn't recorded yet (fresh boot).
     pub(crate) durable_cameras: HashMap<String, (Point<f64, Logical>, f64)>,
+    /// The bookmark registry read from the file at startup, stashed unconditionally.
+    /// With `restore_bookmarks` off it is written back verbatim so a flag-off
+    /// session never destroys the saved registry (mirrors `durable_cameras`);
+    /// with the flag on it is overlaid onto the live registry at load instead.
+    pub(crate) durable_bookmarks: BTreeMap<String, [f64; 2]>,
     /// A change is waiting for the debounce timer to write it.
     dirty: bool,
     /// The armed one-shot debounce timer, if any.
@@ -89,12 +94,14 @@ impl DriftWm {
         for entry in materialize {
             self.materialize_entry(entry);
         }
-        // Bookmarks always ride the file, but overlay them on the config seeds
-        // only when restore_bookmarks is on (a restored value wins per name;
-        // config seeds fill the names the file lacks). Off keeps the fresh
-        // config seeds, so runtime edits don't survive a restart.
+        // Stash the file's registry unconditionally: with the flag off the write
+        // side carries it forward verbatim (so flipping the flag on later loses
+        // nothing), and with it on we overlay it onto the config seeds here — a
+        // restored value wins per name, config seeds fill the names the file lacks.
+        self.session_store.durable_bookmarks = envelope.bookmarks;
         if self.config.session.restore_bookmarks {
-            for (name, value) in envelope.bookmarks {
+            let overlay = self.session_store.durable_bookmarks.clone();
+            for (name, value) in overlay {
                 self.bookmarks.insert(name, value);
             }
         }
@@ -252,7 +259,14 @@ impl DriftWm {
             saved_at: now_unix(),
             entries,
             outputs: self.per_output_cameras(),
-            bookmarks: self.bookmarks.clone(),
+            // With restore on, the live registry is the durable one. With it off,
+            // runtime edits are ephemeral, so carry the stashed file registry
+            // forward untouched instead of overwriting it with the seeds.
+            bookmarks: if self.config.session.restore_bookmarks {
+                self.bookmarks.clone()
+            } else {
+                self.session_store.durable_bookmarks.clone()
+            },
         }
     }
 

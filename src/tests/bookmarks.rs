@@ -9,7 +9,7 @@ use driftwm::config::{Action, parse_action};
 use driftwm::session::{self, SessionEnvelope};
 
 use super::real::TempDir;
-use super::{Fixture, config, map_window, window_by_app_id};
+use super::{Fixture, adopt_last_configure, config, map_window, window_by_app_id};
 use crate::ipc::dispatch;
 use crate::ipc::protocol::{Request, Response};
 
@@ -181,6 +181,36 @@ fn move_to_bookmark_refuses_a_pinned_window() {
 }
 
 #[test]
+fn move_to_bookmark_on_fullscreen_centers_the_windowed_size() {
+    use smithay::utils::Size;
+
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    let surface = map_window(&mut f, id, "term", (400, 300));
+    let window = window_by_app_id(&mut f, "term").unwrap();
+
+    // Fullscreen the window and let the client adopt the output-sized buffer.
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &surface);
+    assert!(f.state().is_window_fullscreen(&window));
+
+    // move-to-bookmark exits fullscreen; the client still reports the 1920×1080
+    // buffer, so the placement must use the pre-exit windowed 400×300 size.
+    f.state().bookmarks.insert("fs".into(), [300.0, -200.0]);
+    f.state()
+        .execute_action(&Action::MoveToBookmark("fs".into()));
+
+    let loc = f.state().stage.position_of(&window).unwrap();
+    let expected = driftwm::canvas::rule_to_internal(300, -200, Size::from((400, 300)));
+    assert_eq!(
+        loc, expected,
+        "centered on the fullscreen buffer, not the windowed size"
+    );
+}
+
+#[test]
 fn move_to_bookmark_unset_name_is_a_no_op() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
@@ -235,6 +265,11 @@ fn ipc_list_get_set_delete_round_trip_and_errors() {
         ),
         Err("bookmark coordinates must be finite".to_string())
     );
+    // coordinates without a name can't identify a bookmark → error, not a list.
+    assert_eq!(
+        dispatch(bookmark_request(None, Some((1.0, 2.0)), false), f.state()),
+        Err("bookmark coordinates require a name".to_string())
+    );
     // delete.
     assert_eq!(
         dispatch(bookmark_request(Some("home"), None, true), f.state()),
@@ -273,20 +308,54 @@ fn write_envelope(path: &std::path::Path, bookmarks: BTreeMap<String, [f64; 2]>)
 }
 
 #[test]
-fn session_always_serializes_the_registry() {
+fn session_write_serializes_live_registry_when_restore_on() {
     let tmp = TempDir::new();
     let path = tmp.path().join("session.json");
 
-    let mut f = Fixture::new();
+    let mut f = Fixture::with_config(config("[session]\nrestore_bookmarks = true\n"));
     f.add_output(1, (1920, 1080));
     f.state().session_store.path = Some(path.clone());
     f.state().bookmarks.insert("custom".into(), [42.0, -7.0]);
     f.state().session_store_write_now();
 
+    // Flag on → the live registry is the durable one: the runtime edit and the
+    // seeds both reach the file.
     let envelope = session::read(&path);
     assert_eq!(envelope.bookmarks["custom"], [42.0, -7.0]);
-    // Seeds ride along too.
     assert_eq!(envelope.bookmarks["1"], [-1750.0, 1750.0]);
+}
+
+#[test]
+fn restore_off_carries_saved_registry_forward_then_flag_on_restores() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+    write_envelope(&path, BTreeMap::from([("saved".to_string(), [1.0, 2.0])]));
+
+    // Session 1 — restore off: load stashes the saved registry, a runtime edit
+    // is ephemeral, and the write carries the stash forward, not the edit.
+    {
+        let mut f = Fixture::with_config(config("[session]\nrestore_bookmarks = false\n"));
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        f.state().bookmarks.insert("ephemeral".into(), [9.0, 9.0]);
+        f.state().session_store_write_now();
+    }
+    let after_off = session::read(&path);
+    assert_eq!(after_off.bookmarks["saved"], [1.0, 2.0]);
+    assert!(
+        !after_off.bookmarks.contains_key("ephemeral"),
+        "a flag-off session's runtime edits must not reach the file"
+    );
+
+    // Session 2 — flag flipped on: the previously saved registry restores.
+    {
+        let mut f = Fixture::with_config(config("[session]\nrestore_bookmarks = true\n"));
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        assert_eq!(f.state().bookmarks["saved"], [1.0, 2.0]);
+    }
 }
 
 #[test]

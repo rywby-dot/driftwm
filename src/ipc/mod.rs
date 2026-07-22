@@ -504,8 +504,10 @@ fn cmd_bookmark(
         return Ok(Response::Ok);
     }
     match (name, to) {
-        // No name → list everything (BTreeMap iterates sorted).
-        (None, _) => Ok(Response::Bookmarks(state.bookmarks.clone())),
+        // No name and no coordinates → list everything (BTreeMap sorts by name).
+        (None, None) => Ok(Response::Bookmarks(state.bookmarks.clone())),
+        // Coordinates without a name can't identify a bookmark to set.
+        (None, Some(_)) => Err("bookmark coordinates require a name".to_string()),
         (Some(name), None) => {
             let &[x, y] = state
                 .bookmarks
