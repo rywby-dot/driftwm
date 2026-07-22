@@ -192,6 +192,30 @@ pub enum Msg {
         #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
         spec: Vec<String>,
     },
+    /// List bookmarks, get/set one by `<name>`, or delete with `--delete`.
+    ///
+    /// With no arguments, lists every bookmark (`name: [x, y]`, Y-up, sorted).
+    /// Given a `<name>`, prints that bookmark's point; with `<name> <x> <y>`,
+    /// creates or overwrites it at that canvas point (Y-up, window-center
+    /// convention, same as `move`). `--delete <name>` removes one. Bookmarks
+    /// store a position only, never zoom — jump to one with the `go-to-bookmark`
+    /// action or a `mod+<n>` keybinding.
+    ///
+    /// Reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or
+    /// `{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}` (list), or `{"Ok":"Ok"}` (delete).
+    #[command(allow_negative_numbers = true)]
+    Bookmark {
+        /// Bookmark name. Omit to list every bookmark.
+        name: Option<String>,
+        /// X coordinate (Y-up). Requires `<y>`.
+        #[arg(requires = "y")]
+        x: Option<f64>,
+        /// Y coordinate (Y-up).
+        y: Option<f64>,
+        /// Delete the named bookmark.
+        #[arg(long, requires = "name", conflicts_with_all = ["x", "y"])]
+        delete: bool,
+    },
     /// Capture a canvas PNG (custom DPI). With no subcommand, captures the active
     /// output's current view of the canvas.
     ///
@@ -380,6 +404,22 @@ fn to_request(msg: &Msg) -> Result<Request, String> {
         Msg::Suspend { app_id, id } => Request::Suspend(window_selector(app_id, *id)),
         Msg::Relaunch { app_id, id } => Request::Relaunch(window_selector(app_id, *id)),
         Msg::Action { spec } => Request::Action(spec.join(" ")),
+        Msg::Bookmark { name, x, y, delete } => {
+            // serde_json serializes non-finite floats as null, which the server
+            // would read back as a get instead of a set — refuse them here.
+            if x.is_some_and(|v| !v.is_finite()) || y.is_some_and(|v| !v.is_finite()) {
+                return Err("bookmark coordinates must be finite".to_string());
+            }
+            let to = match (x, y) {
+                (Some(x), Some(y)) => Some((*x, *y)),
+                _ => None,
+            };
+            Request::Bookmark {
+                name: name.clone(),
+                to,
+                delete: *delete,
+            }
+        }
         Msg::Screenshot {
             target,
             scale,
@@ -500,6 +540,12 @@ fn print_response(response: Response) {
         Response::Focused(None) => println!("(none)"),
         Response::Position { x, y } => println!("{x} {y}"),
         Response::Opacity(value) => println!("{value}"),
+        Response::Bookmark { x, y } => println!("{x} {y}"),
+        Response::Bookmarks(bookmarks) => {
+            for (name, [x, y]) in bookmarks {
+                println!("{name}: [{x}, {y}]");
+            }
+        }
         Response::Screenshot { path, .. } => println!("{path}"),
         Response::Ok => println!("ok"),
         Response::State(info) => print_state(&info),
@@ -766,6 +812,75 @@ mod tests {
             to_request(&Msg::Opacity {
                 value: Some(f64::INFINITY),
                 id: None
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bookmark_maps_list_get_set_delete() {
+        assert_eq!(
+            to_request(&Msg::Bookmark {
+                name: None,
+                x: None,
+                y: None,
+                delete: false
+            })
+            .unwrap(),
+            Request::Bookmark {
+                name: None,
+                to: None,
+                delete: false
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Bookmark {
+                name: Some("home".into()),
+                x: None,
+                y: None,
+                delete: false
+            })
+            .unwrap(),
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: false
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Bookmark {
+                name: Some("home".into()),
+                x: Some(100.0),
+                y: Some(-200.0),
+                delete: false
+            })
+            .unwrap(),
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: Some((100.0, -200.0)),
+                delete: false
+            }
+        );
+        assert_eq!(
+            to_request(&Msg::Bookmark {
+                name: Some("home".into()),
+                x: None,
+                y: None,
+                delete: true
+            })
+            .unwrap(),
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: true
+            }
+        );
+        assert!(
+            to_request(&Msg::Bookmark {
+                name: Some("home".into()),
+                x: Some(f64::NAN),
+                y: Some(0.0),
+                delete: false
             })
             .is_err()
         );

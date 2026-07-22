@@ -204,6 +204,7 @@ pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Suspend(sel) => cmd_suspend(sel, state),
         Request::Relaunch(sel) => cmd_relaunch(sel, state),
         Request::Action(spec) => cmd_action(&spec, state),
+        Request::Bookmark { name, to, delete } => cmd_bookmark(name, to, delete, state),
         Request::Screenshot {
             target,
             scale,
@@ -480,6 +481,47 @@ fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
     let action = driftwm::config::parse_action(spec)?;
     state.execute_action(&action);
     Ok(Response::Ok)
+}
+
+/// List / get / set / delete bookmarks. The registry is a flat name → [x, y]
+/// (Y-up) map that the config seeds and set-bookmark/reload also mutate; every
+/// change here marks the durable session dirty. Never touches zoom.
+fn cmd_bookmark(
+    name: Option<String>,
+    to: Option<(f64, f64)>,
+    delete: bool,
+    state: &mut DriftWm,
+) -> Reply {
+    if delete {
+        let name = name.ok_or_else(|| "bookmark delete requires a name".to_string())?;
+        if to.is_some() {
+            return Err("bookmark delete does not take coordinates".to_string());
+        }
+        if state.bookmarks.remove(&name).is_none() {
+            return Err(format!("no bookmark named '{name}'"));
+        }
+        state.session_store_mark_dirty();
+        return Ok(Response::Ok);
+    }
+    match (name, to) {
+        // No name → list everything (BTreeMap iterates sorted).
+        (None, _) => Ok(Response::Bookmarks(state.bookmarks.clone())),
+        (Some(name), None) => {
+            let &[x, y] = state
+                .bookmarks
+                .get(&name)
+                .ok_or_else(|| format!("no bookmark named '{name}'"))?;
+            Ok(Response::Bookmark { x, y })
+        }
+        (Some(name), Some((x, y))) => {
+            if !x.is_finite() || !y.is_finite() {
+                return Err("bookmark coordinates must be finite".to_string());
+            }
+            state.bookmarks.insert(name, [x, y]);
+            state.session_store_mark_dirty();
+            Ok(Response::Bookmark { x, y })
+        }
+    }
 }
 
 fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {

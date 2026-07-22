@@ -210,6 +210,23 @@ Reply: `{"Ok":"Ok"}`.
 
 - `<SPEC>...` — Action and arguments, exactly as written in config (e.g. `nudge-window up`)
 
+#### `driftwm msg bookmark`
+
+```
+driftwm msg bookmark [OPTIONS] [NAME] [X] [Y]
+```
+
+List bookmarks, get/set one by `<name>`, or delete with `--delete`.
+
+With no arguments, lists every bookmark (`name: [x, y]`, Y-up, sorted). Given a `<name>`, prints that bookmark's point; with `<name> <x> <y>`, creates or overwrites it at that canvas point (Y-up, window-center convention, same as `move`). `--delete <name>` removes one. Bookmarks store a position only, never zoom — jump to one with the `go-to-bookmark` action or a `mod+<n>` keybinding.
+
+Reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or `{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}` (list), or `{"Ok":"Ok"}` (delete).
+
+- `[NAME]` — Bookmark name. Omit to list every bookmark
+- `[X]` — X coordinate (Y-up). Requires `<y>`
+- `[Y]` — Y coordinate (Y-up)
+- `--delete` — Delete the named bookmark
+
 #### `driftwm msg screenshot`
 
 ```

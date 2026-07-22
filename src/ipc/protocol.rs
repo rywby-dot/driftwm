@@ -74,6 +74,17 @@ pub enum Request {
     /// next"`. Any keybindable action is reachable, so one-shot ops live here
     /// rather than as their own commands.
     Action(String),
+    /// List, get, set, or delete bookmarks (name → canvas point, Y-up). All
+    /// fields default: no `name` + `!delete` lists all; `name` alone gets; `name`
+    /// + `to` sets/creates; `delete` + `name` removes. Never touches zoom.
+    Bookmark {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        to: Option<(f64, f64)>,
+        #[serde(default)]
+        delete: bool,
+    },
     /// Capture to a PNG at `path` (absolute), at `scale` pixels per canvas unit.
     /// Windows render with full chrome; `region`/`all` include the background, a
     /// `window` capture stays transparent (see [`ScreenshotTarget`]).
@@ -134,6 +145,13 @@ pub enum Response {
         path: String,
         width: u32,
         height: u32,
+    },
+    /// Every bookmark, name → [x, y] (Y-up), sorted by name.
+    Bookmarks(BTreeMap<String, [f64; 2]>),
+    /// One bookmark's canvas point (Y-up), echoed on get and set.
+    Bookmark {
+        x: f64,
+        y: f64,
     },
     Ok,
 }
@@ -333,6 +351,26 @@ mod tests {
             Request::Relaunch(None),
             Request::Relaunch(Some(WindowSelector::AppId("foot".into()))),
             Request::Action("switch-layout next".into()),
+            Request::Bookmark {
+                name: None,
+                to: None,
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: Some((100.0, -200.0)),
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: true,
+            },
             Request::Screenshot {
                 target: ScreenshotTarget::Viewport,
                 scale: 1.0,
@@ -474,6 +512,13 @@ mod tests {
                 app_id: Some("foot".into()),
             }))),
             Ok(Response::Opacity(0.5)),
+            Ok(Response::Bookmark {
+                x: 100.0,
+                y: -200.0,
+            }),
+            Ok(Response::Bookmarks(
+                [("home".to_string(), [0.0, 0.0])].into_iter().collect(),
+            )),
             Ok(Response::Ok),
             Err("no focused window".into()),
         ];

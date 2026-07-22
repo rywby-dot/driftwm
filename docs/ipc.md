@@ -155,6 +155,7 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 | relaunch          | `{"Relaunch":null}` / `{"Relaunch":5}` / `{"Relaunch":"alacritty"}`                 |
 | layout            | `{"Layout":{"short":false}}`                                                        |
 | run action        | `{"Action":"switch-layout next"}`                                                   |
+| bookmark          | `{"Bookmark":{}}` (list) / `{"Bookmark":{"name":"home"}}` (get) / `{"Bookmark":{"name":"home","to":[0,0]}}` (set) / `{"Bookmark":{"name":"home","delete":true}}` (delete) |
 | screenshot        | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}`           |
 | screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)                       |
 | state             | `"State"`                                                                           |
@@ -170,7 +171,9 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}   // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
 {"Ok":{"Opacity":0.85}}
-{"Ok":"Ok"}                          // action / close / suspend / relaunch
+{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}   // bookmark get / set (Y-up)
+{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}     // bookmark list (sorted by name)
+{"Ok":"Ok"}                          // action / close / suspend / relaunch / bookmark delete
 {"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}   // abridged
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
   "layout_short":"us","windows":[
