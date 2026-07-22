@@ -522,18 +522,28 @@ fn restore_camera_off_skips_seed_but_materializes_windows() {
     f.state().session_store.path = Some(path.clone());
     f.state().load_session();
 
-    // No durable camera seed was stashed.
+    // The durable camera is still stashed (so the write side can carry it
+    // forward), but withheld from a connecting output while the flag is off.
     assert!(
-        f.state().session_store.durable_cameras.is_empty(),
-        "restore_camera off skips the durable camera seed"
+        f.state()
+            .session_store
+            .durable_cameras
+            .contains_key("HEADLESS-1"),
+        "the durable camera is carried for the write side even with restore off"
+    );
+    assert!(
+        !f.state().saved_camera_state().contains_key("HEADLESS-1"),
+        "restore off withholds the durable seed from a connecting output"
     );
     // The saved window still came back.
     let restored = suspended_in_order(&mut f);
     assert_eq!(restored.len(), 1, "the saved window materialized");
     assert_eq!(restored[0].0.identity.app_id, "good");
 
-    // The output connects at its default centered camera, not the saved one.
-    let seed = f.state().session_store.durable_cameras.clone();
+    // The output connects at its default centered camera, not the saved one:
+    // the real connect path seeds from `saved_camera_state`, which gates the
+    // durable seed off.
+    let seed = f.state().saved_camera_state();
     let (output, _global) =
         super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
     let (camera, zoom) = {
@@ -550,6 +560,52 @@ fn restore_camera_off_skips_seed_but_materializes_windows() {
     for (s, _) in restored {
         f.state().dismiss_suspended(s.id);
     }
+}
+
+/// With `restore_camera` off, a durable camera for an output that is NOT
+/// connected this session survives a steady-state rewrite — the write side
+/// carries it forward, so flipping the flag on later still restores it (the
+/// docs' "cameras are always saved regardless" promise).
+#[test]
+fn restore_camera_off_preserves_disconnected_output_camera() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    // A camera for an external monitor that won't be connected this boot.
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "HEADLESS-2".to_string(),
+        SessionOutput {
+            camera: [-1234.0, -5678.0],
+            zoom: 0.75,
+        },
+    );
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        saved_at: 0,
+        entries: Vec::new(),
+        outputs,
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Default config: restore_camera off.
+    let mut f = Fixture::with_config(Config::default());
+    assert!(!f.state().config.session.restore_camera);
+    // Only HEADLESS-1 connects; HEADLESS-2 stays absent this session.
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    // A steady-state rewrite — what any suspend / dismiss / move triggers.
+    f.state().session_store_write_now();
+
+    let after = session::read(&path);
+    let saved = after
+        .outputs
+        .get("HEADLESS-2")
+        .expect("the disconnected output's camera survived the rewrite");
+    assert_eq!(saved.camera, [-1234.0, -5678.0]);
+    assert_eq!(saved.zoom, 0.75);
 }
 
 /// A create writes the durable file immediately; a dismiss rewrites it. Drives

@@ -57,22 +57,23 @@ impl DriftWm {
             return;
         };
         let envelope = session::read(&path);
-        // Camera restore is opt-in: without it, outputs start at their default
-        // centered camera. The write side stays unconditional, so flipping it
-        // back on later just works on the next launch.
-        if self.config.session.restore_camera {
-            self.session_store.durable_cameras = envelope
-                .outputs
-                .iter()
-                .filter(|(_, o)| valid_camera_seed(Point::from((o.camera[0], o.camera[1])), o.zoom))
-                .map(|(name, o)| {
-                    (
-                        name.clone(),
-                        (Point::from((o.camera[0], o.camera[1])), o.zoom),
-                    )
-                })
-                .collect();
-        }
+        // Always stash the durable cameras, even with restore off: the write
+        // side carries them forward for outputs not currently connected (see
+        // `per_output_cameras`), so an unplugged monitor's viewport survives the
+        // next steady-state rewrite. The seed is only *applied* to a connecting
+        // output when `restore_camera` is on (see `saved_camera_state`), so
+        // flipping the flag on later restores from a file that never lost it.
+        self.session_store.durable_cameras = envelope
+            .outputs
+            .iter()
+            .filter(|(_, o)| valid_camera_seed(Point::from((o.camera[0], o.camera[1])), o.zoom))
+            .map(|(name, o)| {
+                (
+                    name.clone(),
+                    (Point::from((o.camera[0], o.camera[1])), o.zoom),
+                )
+            })
+            .collect();
         // Drop entries with out-of-range geometry entirely — neither
         // materialized nor carried forward, so a hand-edit or a flipped byte
         // that would panic `Size::from` (debug) or overflow `rule_to_internal`
@@ -119,10 +120,17 @@ impl DriftWm {
     /// with the runtime state file layered on top, so runtime wins within a
     /// login session and durable only fills gaps the runtime file lacks.
     pub fn saved_camera_state(&self) -> HashMap<String, (Point<f64, Logical>, f64)> {
-        merge_saved_cameras(
-            &self.session_store.durable_cameras,
-            super::read_all_per_output_state(),
-        )
+        // Camera restore is opt-in: without it, a connecting output starts at
+        // its default centered camera, so the durable seed is withheld here (it
+        // still carries forward on the write side). The runtime state file is
+        // unconditional — it drives within-session output reconnects, a
+        // separate concern from restoring across restarts.
+        let durable = if self.config.session.restore_camera {
+            self.session_store.durable_cameras.clone()
+        } else {
+            HashMap::new()
+        };
+        merge_saved_cameras(&durable, super::read_all_per_output_state())
     }
 
     /// Immediate write for a create/dismiss: cancel any pending debounce and
