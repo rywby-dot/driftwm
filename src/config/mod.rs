@@ -53,6 +53,8 @@ const DEFAULT_BOOKMARKS: &[(&str, [f64; 2])] = &[
 
 /// True if any user binding value across every binding table names the
 /// deprecated `go-to` action, so the deprecation warning fires once per load.
+/// Covers keybindings (normal + tap), mouse/gesture/touch context maps, and the
+/// per-output hot-corner actions.
 fn any_binding_is_go_to(raw: &ConfigFile) -> bool {
     let is_go_to = |v: &String| v.split_whitespace().next() == Some("go-to");
     let ctx_maps: [&Option<HashMap<String, String>>; 9] = [
@@ -66,10 +68,25 @@ fn any_binding_is_go_to(raw: &ConfigFile) -> bool {
         &raw.touch.on_canvas,
         &raw.touch.anywhere,
     ];
+    let mut hot_corner_actions = raw
+        .outputs
+        .iter()
+        .flatten()
+        .filter_map(|o| o.hot_corners.as_ref())
+        .flat_map(|hc| {
+            [
+                &hc.top_left,
+                &hc.top_right,
+                &hc.bottom_left,
+                &hc.bottom_right,
+            ]
+        })
+        .flatten();
     raw.keybindings.iter().flatten().any(|(_, v)| is_go_to(v))
         || ctx_maps
             .into_iter()
             .any(|m| m.iter().flatten().any(|(_, v)| is_go_to(v)))
+        || hot_corner_actions.any(is_go_to)
 }
 
 /// The finger count of a per-direction swipe trigger
@@ -966,6 +983,30 @@ impl Config {
             child_env.insert(k.clone(), v.clone());
         }
 
+        // Y-up values kept as-is (unlike anchors); conversion happens at use
+        // sites. Absent section → corner defaults; explicit-empty → no seeds. A
+        // non-finite coordinate (TOML accepts nan/inf) would serialize to JSON
+        // null and quarantine the whole session file, so drop it here.
+        let navigation_bookmarks: BTreeMap<String, [f64; 2]> = match raw.navigation.bookmarks {
+            Some(map) => map
+                .into_iter()
+                .filter(|(name, [x, y])| {
+                    let ok = x.is_finite() && y.is_finite();
+                    if !ok {
+                        warn_and_collect!(
+                            "config: [navigation.bookmarks] \"{name}\" has a non-finite \
+                             coordinate, ignoring"
+                        );
+                    }
+                    ok
+                })
+                .collect(),
+            None => DEFAULT_BOOKMARKS
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+        };
+
         let config = Self {
             mod_key,
             focus_follows_mouse: raw.focus_follows_mouse.unwrap_or(false),
@@ -1097,18 +1138,7 @@ impl Config {
                 .into_iter()
                 .map(|[x, y]| Point::from((x, -y)))
                 .collect(),
-            // Y-up values kept as-is (unlike anchors); conversion happens at use
-            // sites. Absent section → corner defaults; explicit-empty → no seeds.
-            navigation_bookmarks: raw
-                .navigation
-                .bookmarks
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_else(|| {
-                    DEFAULT_BOOKMARKS
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), *v))
-                        .collect()
-                }),
+            navigation_bookmarks,
             autostart: raw.autostart.unwrap_or_default(),
             env: raw.env,
             child_env,
@@ -1553,6 +1583,57 @@ mod tests {
         let (_config, warnings) = Config::from_toml_collect("").unwrap();
         assert!(
             !warnings.iter().any(|w| w.contains("go-to is deprecated")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn go_to_deprecation_fires_for_hot_corner_bindings() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+            [outputs.hot_corners]
+            top_left = "go-to 0 0"
+        "#;
+        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("go-to is deprecated")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn go_to_bookmark_binding_does_not_trigger_go_to_deprecation() {
+        // The scanner matches the whole action name, not a prefix, so
+        // `go-to-bookmark` must not be mistaken for the deprecated `go-to`.
+        let toml_str = r#"
+            [keybindings]
+            "mod+9" = "go-to-bookmark home"
+        "#;
+        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("go-to is deprecated")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_finite_bookmark_seed_is_dropped_with_warning() {
+        let toml_str = r#"
+            [navigation.bookmarks]
+            "good" = [1.0, 2.0]
+            "bad" = [nan, 0.0]
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(config.navigation_bookmarks.contains_key("good"));
+        assert!(
+            !config.navigation_bookmarks.contains_key("bad"),
+            "a non-finite seed must be dropped, not stored"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("non-finite") && w.contains("bad")),
             "got: {warnings:?}"
         );
     }
