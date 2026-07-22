@@ -604,7 +604,8 @@ pub struct DriftWm {
     /// launchers leak the trigger key into the previously focused window.
     pub suppressed_keys: HashSet<u32>,
 
-    /// Mouse buttons currently held down. Same purpose as `held_keys`.
+    /// Mouse buttons currently held down. Cleared on VT switch and session
+    /// pause alongside `suppressed_keys`.
     pub held_buttons: HashSet<u32>,
 
     pub gesture_state: Option<GestureState>,
@@ -671,6 +672,10 @@ pub struct DriftWm {
     /// `execute_action`, and cleared on touch-grab teardown so it can't leak
     /// into a later action.
     pub pre_exited_fullscreen: Option<Window>,
+    /// Set while an Alt-Tab cycle step is navigating, so the focus change it
+    /// causes is recognized as cycle-initiated: `focus_changed` neither commits
+    /// the session nor promotes. Any other focus change during a session commits.
+    pub cycle_navigating: bool,
     /// Virtual output placeholders kept when all physical outputs disconnect,
     /// so `active_output().unwrap()` doesn't panic.
     pub disconnected_outputs: HashSet<String>,
@@ -694,10 +699,10 @@ pub struct DriftWm {
         smithay::reexports::wayland_server::backend::ObjectId,
     )>,
 
-    /// Corner currently occupied by the pointer, per output. Entry is latched
-    /// even when fullscreen/dragging suppresses the action; the latch clears
-    /// only after the pointer leaves all corners.
-    pub hot_corners_latched: HashMap<Output, HotCorner>,
+    /// Corner the pointer currently occupies, and the output it's on. Latched
+    /// even when fullscreen/dragging suppresses the action; cleared only when
+    /// the pointer leaves the corner (or that output).
+    pub hot_corner_latch: Option<(Output, HotCorner)>,
 
     /// Click armed for auto-navigate on release (see `auto_navigate_on_click`).
     pub pending_click_navigate: Option<PendingClickNavigate>,

@@ -6,7 +6,7 @@ use smithay::{
 
 use crate::state::{DriftWm, HomeReturn};
 use driftwm::canvas::{self};
-use driftwm::config::{Action, LayoutSwitch};
+use driftwm::config::{Action, LayoutSwitch, Modifiers};
 use driftwm::window_ext::WindowExt;
 
 /// Use the focused window as the cone-search origin only when it's fully
@@ -28,6 +28,13 @@ impl DriftWm {
     }
 
     pub fn execute_action(&mut self, action: &Action) {
+        // A non-cycle action from any input source ends an in-progress Alt-Tab
+        // cycle here, committing the selection before it runs. CycleWindows
+        // itself is exempt so stepping deeper keeps working.
+        if !matches!(action, Action::CycleWindows { .. }) && self.stage.cycle_state().is_some() {
+            self.end_cycle();
+        }
+
         // Snapshot fullscreen window before the guard exits it. Also check
         // pre_exited_fullscreen (set by input-layer code that exited fullscreen
         // ahead of dispatching this action).
@@ -214,7 +221,23 @@ impl DriftWm {
                 let Some(window) = self.stage.cycle_step(*backward, anchor.as_ref()) else {
                     return;
                 };
+                // Mark the focus change this navigate causes as cycle-initiated so
+                // `focus_changed` freezes the history instead of committing.
+                self.cycle_navigating = true;
                 self.navigate_to_window(&window, false);
+                self.cycle_navigating = false;
+                // A truly modifier-less fire (gesture, bare wheel, IPC) has no key
+                // release to end the session, so each fire is a single step with a
+                // fresh anchor and commits now. If any real modifier is physically
+                // held (alt+tab, mod+wheel with any mod_key), keep the session: the
+                // modifier's release is a keyboard event and the keyboard check
+                // commits then, so a session still can't dangle. Lock states
+                // (num_lock, caps_lock) are ignored — `from_state` reads only the
+                // real modifiers, so a num_lock-on keyboard still commits.
+                let mods = self.seat.get_keyboard().unwrap().modifier_state();
+                if Modifiers::from_state(&mods).is_empty() {
+                    self.end_cycle();
+                }
             }
             Action::HomeToggle => {
                 let viewport_size = self.get_viewport_size();

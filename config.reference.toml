@@ -432,22 +432,28 @@
 # # Gesture bindings: `"Modifier+N-finger-<type>" = "action"`
 # # Context-aware: on-window, on-canvas, anywhere.
 # # Unbound gestures are forwarded to the focused app.
-# # "none" unbinds (prevents anywhere fallback, still forwards).
+# # "none" unbinds.
 # #
 # # Gesture types (2–5 fingers):
 # #   N-finger-swipe            — continuous OR threshold (action determines behavior)
-# #   N-finger-swipe-up/down/left/right — threshold only, checked before swipe fallback
-# #   3-finger-doubletap-swipe  — continuous OR threshold (3-finger tap then swipe)
+# #   N-finger-swipe-up/down/left/right — threshold only, physical finger direction
+# #   3-finger-doubletap-swipe  — continuous only (window grabs; 3-finger tap then swipe)
 # #   N-finger-pinch            — continuous only (use pinch-in/out for discrete)
 # #   N-finger-pinch-in/out     — threshold only
 # #   N-finger-hold             — threshold only (fires on release)
 # #
-# # Continuous actions: pan-viewport, zoom, move-window, move-snapped-windows, resize-window, resize-window-snapped
-# # Threshold actions: any action from the [keybindings] Actions list except
-# # `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g.
-# # center-nearest, home-toggle, zoom-to-fit, zoom-to-fit-snapped, fit-window,
-# # fill-window, `exec <cmd>`.
-# # center-nearest works on swipe triggers only (direction comes from the swipe).
+# # Continuous actions, locked to their triggers:
+# #   pan-viewport            — swipe
+# #   zoom                    — pinch
+# #   move-window             — swipe or doubletap-swipe
+# #   move-snapped-windows    — swipe or doubletap-swipe
+# #   resize-window           — swipe or doubletap-swipe
+# #   resize-window-snapped   — swipe or doubletap-swipe
+# #
+# # Threshold actions: any action from the [keybindings] Actions list.
+# # center-nearest may also be bound bare — its direction is the pan direction of
+# # the swipe (fingers left looks right), unlike the named per-direction triggers
+# # above which are physical (swipe triggers only).
 
 [gestures.on-window]
 # "alt+3-finger-swipe" = "resize-window"
@@ -467,9 +473,11 @@
 # "3-finger-swipe" = "pan-viewport"         # continuous (per-frame dx/dy)
 # "4-finger-swipe" = "center-nearest"       # threshold (accumulate, detect direction, fire once)
 # "mod+3-finger-swipe" = "center-nearest"   # mod makes 3-finger swipe navigate too
-# # Example: per-direction overrides (threshold only, checked before swipe fallback)
+# # Example: per-direction overrides (threshold only)
 # # "4-finger-swipe-up" = "exec brightnessctl set +5%"
 # # "4-finger-swipe-down" = "exec brightnessctl set 5%-"
+# # "4-finger-swipe-right" = "cycle-windows forward"
+# # "4-finger-swipe-left" = "cycle-windows backward"
 # "mod+2-finger-pinch" = "zoom"             # mod overrides app forwarding
 # "3-finger-pinch" = "zoom"                 # continuous
 # "4-finger-pinch-in" = "zoom-to-fit"       # threshold
@@ -481,38 +489,23 @@
 # "mod+3-finger-hold" = "center-window"
 
 [touch]
-# # Touchscreen gesture BINDINGS. Distinct from [input.touch], which holds the
-# # touch *device* settings (enable, map_to_output) — put those there, not here
-# # (same split as [gestures] bindings vs [input.trackpad] device settings).
-# #
 # # Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers)
 # # Context-aware: on-window, on-canvas, anywhere.
 # # Unbound gestures are forwarded to the focused app.
-# # "none" removes a binding in its context (under [touch.anywhere] it also drops
-# # the anywhere fallback). A fully unbound gesture forwards to the app.
+# # "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 # #
 # # Touch gesture types (1–5 fingers):
 # #   N-finger-swipe            — continuous OR threshold (action determines behavior)
-# #   N-finger-swipe-up/down/left/right — threshold only, checked before swipe fallback
+# #   N-finger-swipe-up/down/left/right — threshold only, physical finger direction
 # #   N-finger-pinch            — continuous only (use pinch-in/out for discrete)
 # #   N-finger-pinch-in/out     — threshold only
 # #   N-finger-tap              — threshold only (quick touch, no movement)
 # #   N-finger-doubletap        — threshold only (two quick taps)
 # #   N-finger-doubletap-swipe  — continuous only (tap then drag)
+# #   N-finger-doubletap-hold-swipe  — continuous only (tap, hold, then drag)
 # #   N-finger-hold-swipe       — continuous only (dwell then drag)
 # #
-# # Continuous actions: pan-viewport (swipe), zoom (pinch), and the window grabs —
-# # move-window / move-snapped-windows / resize-window / resize-window-snapped
-# # (doubletap-swipe / hold-swipe). A held move-window also extends to the snap-cluster.
-# # Threshold actions: any action from the [keybindings] Actions list except
-# # `nudge-window`, `go-to`, `cycle-windows`, and `pan-viewport <dir>` — e.g.
-# # center-nearest, center-window, home-toggle, zoom-to-fit, fit-window,
-# # fill-window, `exec <cmd>`.
-# # center-nearest works on swipe triggers only (direction comes from the swipe).
-# #
-# # Note: within one physical gesture, a continuous translation (pan) and a
-# # threshold pinch on the same finger count don't combine — either bind both axes
-# # continuous (pan + zoom) or drive discrete actions from a threshold swipe/pinch.
+# # Continuous and threshold actions: the same sets and rules as under [gestures].
 
 [touch.on-window]
 # # 1–2 fingers starting on a window forward to the app, and the 3+ finger
@@ -520,8 +513,9 @@
 # # too. The window-targeted gestures live here: they act on the window the
 # # fingers land on (a gesture starting on empty canvas just pans).
 # "3-finger-doubletap" = "fit-window"
-# "3-finger-doubletap-swipe" = "move-window"  # continuous (hold to move the cluster)
+# "3-finger-doubletap-swipe" = "move-window"  # continuous
 # "3-finger-hold-swipe" = "resize-window"     # continuous (dwell then drag)
+# "3-finger-doubletap-hold-swipe" = "move-snapped-windows"  # continuous (tap, hold, then drag — moves the whole snap cluster)
 
 [touch.on-canvas]
 # "1-finger-swipe" = "pan-viewport"
@@ -613,11 +607,13 @@
 # # when the cursor enters that corner of THIS output (per-monitor setting),
 # # and re-arms when the cursor leaves. The whole `[[outputs]]` block can be
 # # omitted if you don't need any hot corners on a particular monitor.
+# # A `name = "*"` entry's hot corners apply to any output without an
+# # exact-name `[[outputs]]` entry; an exact entry replaces the wildcard
+# # wholesale (fields don't merge), so an exact entry with no `hot_corners`
+# # table gets none.
 # #
-# # Supported actions: any of the actions documented in `[keybindings]` /
-# # `[mouse]` (exec, exec-terminal, exec-launcher, spawn, zoom-to-fit,
-# # cycle-windows, reload-config, quit, ...). Pass "none" to leave a corner
-# # unbound.
+# # Corner actions: any action from the [keybindings] Actions list. Pass
+# # "none" to leave a corner unbound.
 # #
 # # Example:
 # # [[outputs]]
@@ -633,7 +629,7 @@
 # # mode = "1920x1080@60"
 # #
 # # [outputs.hot_corners]
-# # threshold = 4         # activation radius in logical px (default: 4)
+# # threshold = 4         # corner zone size in logical px (default: 4)
 # # top_left = "zoom-to-fit"
 # # top_right = "none"
 # # bottom_left = "spawn grim - | wl-copy"

@@ -68,6 +68,18 @@ impl DriftWm {
         (binding, has_modifier)
     }
 
+    /// Keep `held_buttons` in sync with a button event. Must run for every
+    /// button event on every dispatch path (including the locked-session one),
+    /// or a release missed while locked leaves a stuck entry that suppresses
+    /// hot corners until the button is pressed and released again.
+    pub(super) fn track_held_button(&mut self, button: u32, state: ButtonState) {
+        if state == ButtonState::Pressed {
+            self.held_buttons.insert(button);
+        } else {
+            self.held_buttons.remove(&button);
+        }
+    }
+
     /// Priority order when button pressed:
     /// 1. Configured mouse bindings (move, resize, pan, etc.)
     /// 2. Normal click on window → focus + raise + forward to client
@@ -75,11 +87,7 @@ impl DriftWm {
     pub(super) fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let button = event.button_code();
         let button_state = event.state();
-        if button_state == ButtonState::Pressed {
-            self.held_buttons.insert(button);
-        } else {
-            self.held_buttons.remove(&button);
-        }
+        self.track_held_button(button, button_state);
 
         // Outputs can transiently disappear (cable unplug, GPU resume race);
         // bail out so downstream active_output() / position lookups can't panic.

@@ -350,7 +350,10 @@ impl DriftWm {
                 if *fired {
                     return;
                 }
-                *cumulative += Point::from((-delta.x, -delta.y));
+                // Accumulate the physical finger vector: named per-direction
+                // triggers (swipe-up/down/left/right) fire in physical direction.
+                // CenterNearest negates it back to content/pan orientation below.
+                *cumulative += Point::from((delta.x, delta.y));
                 let mag_sq = cumulative.x.powi(2) + cumulative.y.powi(2);
                 if mag_sq >= self.config.gesture_thresholds.swipe_distance.powi(2) {
                     *fired = true;
@@ -588,7 +591,9 @@ impl DriftWm {
         self.gesture_state = Some(GestureState::SwipeResizeGrab);
     }
 
-    /// Execute a threshold action, injecting direction from the swipe vector for CenterNearest.
+    /// Execute a threshold action, injecting direction from the swipe vector for
+    /// CenterNearest. The vector is physical; CenterNearest keeps content/pan
+    /// orientation (fingers left looks right), so it negates.
     fn execute_threshold_action(
         &mut self,
         action: &ThresholdAction,
@@ -596,7 +601,7 @@ impl DriftWm {
     ) {
         match action {
             ThresholdAction::CenterNearest => {
-                let dir = direction_from_vector(cumulative);
+                let dir = direction_from_vector(Point::from((-cumulative.x, -cumulative.y)));
                 self.execute_action(&Action::CenterNearest(dir));
             }
             ThresholdAction::Fixed(a) => {

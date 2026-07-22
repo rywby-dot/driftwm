@@ -382,53 +382,93 @@ fn keybinding_actions_are_all_documented() {
     );
 }
 
-/// Guards the threshold-exception claim in the `[gestures]`/`[touch]` docs: the
-/// set of `[keybindings]` actions a per-direction swipe (a threshold-only
-/// trigger) rejects must equal the documented exception list. The claim is
-/// defined by subtraction, so a keyboard action added without a
-/// `parse_threshold_action` arm would silently become an undocumented
-/// exception; this forces the docs and code to move together. Touch
-/// per-direction swipes share the same recognizer, so covering gestures suffices.
+/// The docs claim threshold gestures accept "any action from the [keybindings]
+/// Actions list" with no exceptions — this keeps that literally true: every
+/// action parses clean on the threshold triggers. Bare `center-nearest` is the
+/// one direction-from-swipe special case: valid on a swipe, rejected on triggers
+/// that carry no direction.
 #[test]
-fn threshold_gesture_exceptions_match_docs() {
-    const EXCEPTIONS: &[&str] = &["nudge-window", "go-to", "cycle-windows", "pan-viewport"];
-
+fn threshold_gestures_accept_every_action() {
     for (name, sample) in ACTION_NAMES {
-        let toml = format!("[gestures.anywhere]\n\"4-finger-swipe-up\" = \"{sample}\"\n");
-        let (_, warnings) = Config::from_toml_collect(&toml)
-            .unwrap_or_else(|e| panic!("gesture binding for {sample:?} failed to parse: {e}"));
-        let rejected = !warnings.is_empty();
-
-        // center-nearest's directional keyboard form is rejected here — the
-        // gesture takes its direction from the swipe — but it is not a
-        // documented exception, so it sits outside the EXCEPTIONS comparison.
-        if *name == "center-nearest" {
+        // Covers the base-swipe threshold branch, the per-direction/pinch-in/hold
+        // triggers, and the touch tap arm.
+        for (section, trigger) in [
+            ("gestures.anywhere", "4-finger-swipe-up"),
+            ("gestures.anywhere", "4-finger-pinch-in"),
+            ("gestures.anywhere", "4-finger-hold"),
+            ("gestures.anywhere", "4-finger-swipe"),
+            ("touch.anywhere", "3-finger-tap"),
+        ] {
+            let toml = format!("[{section}]\n\"{trigger}\" = \"{sample}\"\n");
+            let (_, warnings) = Config::from_toml_collect(&toml).unwrap_or_else(|e| {
+                panic!("{name} on {trigger} in [{section}] failed to parse: {e}")
+            });
             assert!(
-                rejected,
-                "directional `{sample}` must be rejected on a per-direction swipe"
+                warnings.is_empty(),
+                "`{sample}` should be a valid threshold action on {trigger} [{section}]: {warnings:?}"
             );
-            continue;
         }
-
-        assert_eq!(
-            rejected,
-            EXCEPTIONS.contains(name),
-            "`{name}` (sample `{sample}`) swipe-up rejected={rejected}, but the \
-             [gestures]/[touch] threshold paragraphs in config.reference.toml list \
-             exceptions {EXCEPTIONS:?}: extend the documented list (rejected but \
-             undocumented) or shrink it (documented but now parses)"
-        );
     }
 
-    // The docs' swipe-only sentence: bare center-nearest takes its direction
-    // from the swipe and parses clean.
-    let toml = "[gestures.anywhere]\n\"4-finger-swipe-up\" = \"center-nearest\"\n";
     let (_, warnings) =
-        Config::from_toml_collect(toml).expect("bare center-nearest gesture binding must parse");
+        Config::from_toml_collect("[gestures.anywhere]\n\"4-finger-swipe\" = \"center-nearest\"\n")
+            .expect("must parse");
     assert!(
         warnings.is_empty(),
-        "bare `center-nearest` on a swipe trigger should parse clean: {warnings:?}"
+        "bare center-nearest on a swipe should parse clean: {warnings:?}"
     );
+    for trigger in ["4-finger-pinch-in", "4-finger-hold"] {
+        let toml = format!("[gestures.anywhere]\n\"{trigger}\" = \"center-nearest\"\n");
+        let (_, warnings) = Config::from_toml_collect(&toml).expect("must parse");
+        assert!(
+            !warnings.is_empty(),
+            "bare center-nearest should be rejected on {trigger} (no direction)"
+        );
+    }
+}
+
+/// Touch and trackpad share the same swipe/pinch/grab rules (touch only adds its
+/// own tap / doubletap arms), so pin their agreement: across every shared trigger
+/// kind, a candidate is accepted by both parsers or rejected by both — no
+/// exceptions.
+#[test]
+fn gesture_and_touch_rules_match() {
+    const CONTINUOUS: &[&str] = &[
+        "pan-viewport",
+        "zoom",
+        "move-window",
+        "move-snapped-windows",
+        "resize-window",
+        "resize-window-snapped",
+    ];
+    const KINDS: &[&str] = &["swipe", "swipe-up", "pinch", "pinch-in", "doubletap-swipe"];
+
+    let candidates: Vec<String> = ACTION_NAMES
+        .iter()
+        .map(|(_, sample)| sample.to_string())
+        .chain(CONTINUOUS.iter().map(|s| s.to_string()))
+        .chain(std::iter::once("center-nearest".to_string()))
+        .collect();
+
+    let accepted = |section: &str, trigger: &str, action: &str| -> bool {
+        let toml = format!("[{section}]\n\"{trigger}\" = \"{action}\"\n");
+        let (_, warnings) = Config::from_toml_collect(&toml).unwrap_or_else(|e| {
+            panic!("{action} on {trigger} in [{section}] failed to parse: {e}")
+        });
+        warnings.is_empty()
+    };
+
+    for candidate in &candidates {
+        for kind in KINDS {
+            let trigger = format!("3-finger-{kind}");
+            let g = accepted("gestures.anywhere", &trigger, candidate);
+            let t = accepted("touch.anywhere", &trigger, candidate);
+            assert_eq!(
+                g, t,
+                "`{candidate}` on 3-finger-{kind}: gestures={g} touch={t} must agree"
+            );
+        }
+    }
 }
 
 /// The body of every ```` ```toml ```` fence in a markdown document.

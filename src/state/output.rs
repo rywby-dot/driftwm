@@ -230,6 +230,7 @@ impl DriftWm {
             self.stage.take_fullscreen(&output.name());
             self.dpms_off_outputs.remove(output);
             self.pending_dpms.remove(output);
+            self.hot_corner_latch.take_if(|(o, _)| o == output);
 
             if self.focused_output.as_ref().is_some_and(|fo| fo == output) {
                 self.focused_output = self.space.outputs().next().cloned();

@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use smithay::backend::input::TouchSlot;
 use smithay::utils::{Logical, Point};
 
-use driftwm::config::{Action, ContextBindings, Direction};
+use driftwm::config::{Action, ContextBindings, ContinuousAction, Direction};
 
 use super::{Config, Decision, TapOutcome, TouchInput, TouchKind, TouchRecognizer};
 
@@ -225,6 +225,399 @@ fn four_finger_swipe_fires_exactly_one_threshold() {
             Decision::FireThreshold(Action::CenterNearest(Direction::Right))
         )),
         "expected CenterNearest(Right), got {decs:?}"
+    );
+}
+
+#[test]
+fn named_swipe_direction_is_physical() {
+    // Named per-direction triggers fire in physical finger direction (unlike bare
+    // center-nearest, which stays content-oriented). Base swipe and pinch unbound
+    // so the one-shot direction engine runs cleanly. Fingers move up → swipe-up.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-swipe\" = \"none\"\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-swipe-up\" = \"home-toggle\"\n",
+    )
+    .unwrap();
+    let seq = vec![
+        down(0, 500.0, 800.0, false, 0),
+        down(1, 600.0, 800.0, false, 5),
+        down(2, 700.0, 800.0, false, 10),
+        motion(0, 500.0, 720.0, 20),
+        motion(1, 600.0, 720.0, 25),
+        motion(2, 700.0, 720.0, 30),
+        motion(0, 500.0, 640.0, 40),
+        motion(1, 600.0, 640.0, 45),
+        motion(2, 700.0, 640.0, 50),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "a physical up-swipe must fire the swipe-up binding, got {decs:?}"
+    );
+}
+
+fn is_grab(d: &Decision) -> bool {
+    matches!(d, Decision::StartWindowGrab { .. })
+}
+
+#[test]
+fn three_finger_swipe_bound_to_move_starts_grab_not_pan() {
+    let cfg =
+        Config::from_toml("[touch.anywhere]\n\"3-finger-swipe\" = \"move-window\"\n").unwrap();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 600.0, 500.0, false, 5),
+        down(2, 700.0, 500.0, false, 10),
+        motion(0, 500.0, 560.0, 20),
+        motion(1, 600.0, 560.0, 25),
+        motion(2, 700.0, 560.0, 30),
+        motion(0, 500.0, 620.0, 40),
+        motion(1, 600.0, 620.0, 45),
+        motion(2, 700.0, 620.0, 50),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert_eq!(
+        count(&decs, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        1,
+        "a move-bound swipe must start exactly one non-cluster grab, got {decs:?}"
+    );
+    assert_eq!(
+        count(&decs, is_pan),
+        0,
+        "a grab-bound swipe must not pan, got {decs:?}"
+    );
+}
+
+#[test]
+fn three_finger_swipe_pan_default_still_pans() {
+    let cfg = cfg_default();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 600.0, 500.0, false, 5),
+        down(2, 700.0, 500.0, false, 10),
+        motion(0, 500.0, 560.0, 20),
+        motion(1, 600.0, 560.0, 25),
+        motion(2, 700.0, 560.0, 30),
+        motion(0, 500.0, 620.0, 40),
+        motion(1, 600.0, 620.0, 45),
+        motion(2, 700.0, 620.0, 50),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        count(&decs, is_pan) >= 1,
+        "default 3-finger swipe must pan, got {decs:?}"
+    );
+    assert_eq!(
+        count(&decs, is_grab),
+        0,
+        "a pan swipe must not start a grab, got {decs:?}"
+    );
+}
+
+#[test]
+fn armed_doubletap_swipe_wins_over_swipe_grab() {
+    // Unbind the default 3-finger pinch so a staggered drag can't engage zoom and
+    // mask the grab under test.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-tap\" = \"center-window\"\n\
+         \"3-finger-doubletap-swipe\" = \"move-window\"\n\
+         \"3-finger-swipe\" = \"resize-window\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(&cfg);
+    // A clean 3-finger tap records the last-tap time, arming the next drag.
+    h.run(&[
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 45),
+        up(2, 50),
+    ]);
+    // Within the double-tap window a fresh 3-finger drag arms move: the
+    // doubletap-swipe grab (move) wins over the swipe-slot grab (resize).
+    h.run(&[
+        down(0, 500.0, 500.0, false, 100),
+        down(1, 550.0, 500.0, false, 110),
+        down(2, 600.0, 500.0, false, 120),
+        motion(0, 500.0, 560.0, 140),
+        motion(1, 550.0, 560.0, 145),
+        motion(2, 600.0, 560.0, 150),
+    ]);
+    assert!(
+        h.decisions.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        "armed doubletap-swipe (move) must win over the swipe grab, got {:?}",
+        h.decisions
+    );
+    assert_eq!(
+        count(&h.decisions, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::ResizeWindow
+            }
+        )),
+        0,
+        "the swipe-slot resize grab must not fire while armed, got {:?}",
+        h.decisions
+    );
+}
+
+#[test]
+fn held_hold_swipe_wins_over_swipe_grab() {
+    // Unbind the default 3-finger pinch so a staggered drag can't engage zoom and
+    // mask the grab under test.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-hold-swipe\" = \"resize-window\"\n\
+         \"3-finger-swipe\" = \"move-window\"\n",
+    )
+    .unwrap();
+    // The fingers dwell past HOLD_MS (350ms) before the drag activates → the
+    // hold-swipe grab (resize) wins over the swipe-slot grab (move).
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        motion(0, 500.0, 560.0, 400),
+        motion(1, 550.0, 560.0, 405),
+        motion(2, 600.0, 560.0, 410),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::ResizeWindow
+            }
+        )),
+        "held hold-swipe (resize) must win over the swipe grab, got {decs:?}"
+    );
+    assert_eq!(
+        count(&decs, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        0,
+        "the swipe-slot move grab must not fire while held, got {decs:?}"
+    );
+}
+
+#[test]
+fn armed_held_uses_doubletap_hold_swipe_for_cluster() {
+    // A double-tap then hold-drag resolves to the doubletap-hold-swipe binding
+    // (move-snapped-windows, a cluster move). Pinch unbound so a staggered drag
+    // can't engage zoom and mask the grab.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-tap\" = \"center-window\"\n\
+         \"3-finger-doubletap-swipe\" = \"move-window\"\n\
+         \"3-finger-doubletap-hold-swipe\" = \"move-snapped-windows\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(&cfg);
+    // A clean 3-finger tap arms the next drag.
+    h.run(&[
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 45),
+        up(2, 50),
+    ]);
+    // Armed drag that dwells past HOLD_MS (350ms) before activating → armed AND
+    // held → the doubletap-hold-swipe binding (cluster move).
+    h.run(&[
+        down(0, 500.0, 500.0, false, 100),
+        down(1, 550.0, 500.0, false, 110),
+        down(2, 600.0, 500.0, false, 120),
+        motion(0, 500.0, 560.0, 480),
+        motion(1, 550.0, 560.0, 485),
+        motion(2, 600.0, 560.0, 490),
+    ]);
+    assert!(
+        h.decisions.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveSnappedWindows
+            }
+        )),
+        "armed+held must start a cluster move via doubletap-hold-swipe, got {:?}",
+        h.decisions
+    );
+    assert_eq!(
+        count(&h.decisions, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        0,
+        "the plain move (doubletap-swipe) must not fire when armed+held, got {:?}",
+        h.decisions
+    );
+}
+
+#[test]
+fn armed_held_without_doubletap_hold_swipe_does_not_upgrade() {
+    // With no doubletap-hold-swipe bound, armed+held resolves to the plain
+    // doubletap-swipe (move-window); there's no implicit cluster upgrade.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-tap\" = \"center-window\"\n\
+         \"3-finger-doubletap-swipe\" = \"move-window\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(&cfg);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 45),
+        up(2, 50),
+    ]);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 100),
+        down(1, 550.0, 500.0, false, 110),
+        down(2, 600.0, 500.0, false, 120),
+        motion(0, 500.0, 560.0, 480),
+        motion(1, 550.0, 560.0, 485),
+        motion(2, 600.0, 560.0, 490),
+    ]);
+    assert!(
+        h.decisions.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        "armed+held with no doubletap-hold-swipe must stay plain move, got {:?}",
+        h.decisions
+    );
+    assert_eq!(
+        count(&h.decisions, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveSnappedWindows
+            }
+        )),
+        0,
+        "no cluster upgrade without a doubletap-hold-swipe binding, got {:?}",
+        h.decisions
+    );
+}
+
+#[test]
+fn armed_held_prefers_doubletap_swipe_over_hold_swipe() {
+    // Both doubletap-swipe and hold-swipe bound, no doubletap-hold-swipe: armed +
+    // held resolves to doubletap-swipe (arm 2), never hold-swipe (arm 3). Pins the
+    // arm ordering — swapping arms 2 and 3 would flip this to resize.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-tap\" = \"center-window\"\n\
+         \"3-finger-doubletap-swipe\" = \"move-window\"\n\
+         \"3-finger-hold-swipe\" = \"resize-window\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(&cfg);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 45),
+        up(2, 50),
+    ]);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 100),
+        down(1, 550.0, 500.0, false, 110),
+        down(2, 600.0, 500.0, false, 120),
+        motion(0, 500.0, 560.0, 480),
+        motion(1, 550.0, 560.0, 485),
+        motion(2, 600.0, 560.0, 490),
+    ]);
+    assert!(
+        h.decisions.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        "armed+held must prefer doubletap-swipe (move), got {:?}",
+        h.decisions
+    );
+    assert_eq!(
+        count(&h.decisions, |d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::ResizeWindow
+            }
+        )),
+        0,
+        "hold-swipe (resize) must not win over doubletap-swipe, got {:?}",
+        h.decisions
+    );
+}
+
+#[test]
+fn armed_without_doubletap_swipe_falls_through_to_swipe_grab() {
+    // Symmetric fallthrough: armed but no doubletap-swipe bound, and the base
+    // swipe is a grab → the swipe grab fires (not a dead drag). A quick (not held)
+    // tap-then-drag exercises the armed-but-doubletap-swipe-unbound arm.
+    let cfg = Config::from_toml(
+        "[touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-tap\" = \"center-window\"\n\
+         \"3-finger-swipe\" = \"move-window\"\n",
+    )
+    .unwrap();
+    let mut h = Harness::new(&cfg);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 45),
+        up(2, 50),
+    ]);
+    h.run(&[
+        down(0, 500.0, 500.0, false, 100),
+        down(1, 550.0, 500.0, false, 110),
+        down(2, 600.0, 500.0, false, 120),
+        motion(0, 500.0, 560.0, 140),
+        motion(1, 550.0, 560.0, 145),
+        motion(2, 600.0, 560.0, 150),
+    ]);
+    assert!(
+        h.decisions.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::MoveWindow
+            }
+        )),
+        "armed with no doubletap-swipe must fall through to the swipe grab, got {:?}",
+        h.decisions
     );
 }
 

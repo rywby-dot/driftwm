@@ -761,6 +761,10 @@ pub(super) fn default_touch_bindings() -> ContextBindings<GestureTrigger, Gestur
             GestureTrigger::HoldSwipe { fingers: 3 },
             GestureConfigEntry::Continuous(ContinuousAction::ResizeWindow),
         ),
+        (
+            GestureTrigger::DoubletapHoldSwipe { fingers: 3 },
+            GestureConfigEntry::Continuous(ContinuousAction::MoveSnappedWindows),
+        ),
     ]);
 
     let on_canvas = HashMap::from([

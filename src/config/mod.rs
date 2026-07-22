@@ -13,7 +13,8 @@ pub use parse::{
 pub use toml::config_path;
 pub use types::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use smithay::backend::input::AxisSource;
 use smithay::input::keyboard::{Keysym, ModifiersState};
@@ -40,6 +41,85 @@ const TOOLKIT_DEFAULTS: &[(&str, &str)] = &[
     ("GDK_BACKEND", "wayland,x11"),
     ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
 ];
+
+/// The finger count of a per-direction swipe trigger
+/// (`swipe-up/down/left/right`), or `None` for any other trigger.
+fn swipe_direction_fingers(trigger: &GestureTrigger) -> Option<u32> {
+    match trigger {
+        GestureTrigger::SwipeUp { fingers }
+        | GestureTrigger::SwipeDown { fingers }
+        | GestureTrigger::SwipeLeft { fingers }
+        | GestureTrigger::SwipeRight { fingers } => Some(*fingers),
+        _ => None,
+    }
+}
+
+/// The base `…-swipe` combo string of a per-direction combo, e.g.
+/// `"mod+3-finger-swipe-right"` → `"mod+3-finger-swipe"`.
+fn base_swipe_str(combo: &str) -> String {
+    let lower = combo.to_lowercase();
+    for suffix in ["-up", "-down", "-left", "-right"] {
+        if lower.ends_with(suffix) {
+            return combo[..combo.len() - suffix.len()].to_string();
+        }
+    }
+    combo.to_string()
+}
+
+/// Per-direction bindings that can never fire: their base `Swipe` (same key,
+/// resolved with the anywhere fallback) is a continuous action in every context
+/// the binding is reachable in, so the continuous pan/zoom always claims the
+/// swipe before the one-shot direction engine runs. Returns
+/// `(context, combo, base_combo)` triples (context included so the message can
+/// scope the claim — the same combo may fire in another context). `base_key`
+/// maps a per-direction key to its base `Swipe` key.
+fn shadowed_direction_bindings<K: Eq + Hash + Clone>(
+    bindings: &ContextBindings<K, GestureConfigEntry>,
+    candidates: &[(BindingContext, K, String)],
+    base_key: impl Fn(&K) -> Option<K>,
+) -> Vec<(BindingContext, String, String)> {
+    let mut warned: HashSet<(BindingContext, String)> = HashSet::new();
+    let mut out = Vec::new();
+    for (ctx, key, combo) in candidates {
+        let Some(base) = base_key(key) else {
+            continue;
+        };
+        // Skip a candidate a later `none` / rebind removed from the final map.
+        let present = match ctx {
+            BindingContext::OnWindow => bindings.on_window.contains_key(key),
+            BindingContext::OnCanvas => bindings.on_canvas.contains_key(key),
+            BindingContext::Anywhere => bindings.anywhere.contains_key(key),
+        };
+        if !present {
+            continue;
+        }
+        // An anywhere binding is active over both concrete contexts; a
+        // context-specific one only over its own.
+        let reachable = match ctx {
+            BindingContext::Anywhere => vec![BindingContext::OnWindow, BindingContext::OnCanvas],
+            other => vec![*other],
+        };
+        let shadowed = reachable.iter().all(|cc| {
+            matches!(
+                bindings.lookup(&base, *cc),
+                Some(GestureConfigEntry::Continuous(_))
+            )
+        });
+        if shadowed && warned.insert((*ctx, combo.clone())) {
+            out.push((*ctx, combo.clone(), base_swipe_str(combo)));
+        }
+    }
+    out
+}
+
+/// The `[section]` sub-table name of a binding context (`on-window`, etc.).
+fn context_table(context: BindingContext) -> &'static str {
+    match context {
+        BindingContext::OnWindow => "on-window",
+        BindingContext::OnCanvas => "on-canvas",
+        BindingContext::Anywhere => "anywhere",
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Config {
@@ -497,6 +577,9 @@ impl Config {
         } else {
             default_gesture_bindings(mod_key)
         };
+        // (context, per-direction binding, original combo string) recorded here and
+        // checked for base-swipe shadowing once all bindings are built.
+        let mut gesture_dir_candidates: Vec<(BindingContext, GestureBinding, String)> = Vec::new();
         for (ctx, section) in [
             (BindingContext::OnWindow, raw.gestures.on_window),
             (BindingContext::OnCanvas, raw.gestures.on_canvas),
@@ -511,6 +594,13 @@ impl Config {
                             } else {
                                 match parse_gesture_config_entry(&binding.trigger, action_str) {
                                     Ok(entry) => {
+                                        if swipe_direction_fingers(&binding.trigger).is_some() {
+                                            gesture_dir_candidates.push((
+                                                ctx,
+                                                binding.clone(),
+                                                key_str.clone(),
+                                            ));
+                                        }
                                         gesture_bindings.insert(ctx, binding, entry);
                                     }
                                     Err(e) => {
@@ -530,6 +620,7 @@ impl Config {
         }
 
         let mut touch_bindings = default_touch_bindings();
+        let mut touch_dir_candidates: Vec<(BindingContext, GestureTrigger, String)> = Vec::new();
         for (ctx, section) in [
             (BindingContext::OnWindow, raw.touch.on_window),
             (BindingContext::OnCanvas, raw.touch.on_canvas),
@@ -544,6 +635,13 @@ impl Config {
                             } else {
                                 match parse_touch_config_entry(&trigger, action_str) {
                                     Ok(entry) => {
+                                        if swipe_direction_fingers(&trigger).is_some() {
+                                            touch_dir_candidates.push((
+                                                ctx,
+                                                trigger.clone(),
+                                                key_str.clone(),
+                                            ));
+                                        }
                                         touch_bindings.insert(ctx, trigger, entry);
                                     }
                                     Err(e) => {
@@ -560,6 +658,29 @@ impl Config {
                     }
                 }
             }
+        }
+
+        let gesture_shadows =
+            shadowed_direction_bindings(&gesture_bindings, &gesture_dir_candidates, |b| {
+                swipe_direction_fingers(&b.trigger).map(|fingers| GestureBinding {
+                    modifiers: b.modifiers.clone(),
+                    trigger: GestureTrigger::Swipe { fingers },
+                })
+            });
+        let touch_shadows =
+            shadowed_direction_bindings(&touch_bindings, &touch_dir_candidates, |t| {
+                swipe_direction_fingers(t).map(|fingers| GestureTrigger::Swipe { fingers })
+            });
+        for (section, (ctx, combo, base)) in gesture_shadows
+            .into_iter()
+            .map(|s| ("gestures", s))
+            .chain(touch_shadows.into_iter().map(|s| ("touch", s)))
+        {
+            let table = context_table(ctx);
+            warn_and_collect!(
+                "config: [{section}.{table}] \"{combo}\" will never fire: \
+                 \"{base}\" is bound to a continuous action"
+            );
         }
 
         let background = BackgroundConfig {
@@ -1621,10 +1742,12 @@ mod tests {
     }
 
     #[test]
-    fn touch_swipe_rejects_move_window() {
-        // Window grabs on a plain swipe belong to doubletap-swipe/hold-swipe.
+    fn touch_swipe_accepts_move_window() {
         let trigger = GestureTrigger::Swipe { fingers: 3 };
-        assert!(parse_touch_config_entry(&trigger, "move-window").is_err());
+        assert_eq!(
+            parse_touch_config_entry(&trigger, "move-window"),
+            Ok(GestureConfigEntry::Continuous(ContinuousAction::MoveWindow))
+        );
     }
 
     #[test]
@@ -1845,6 +1968,83 @@ mod tests {
         );
         assert!(
             warnings.iter().any(|w| w.contains("invalid touch binding")),
+            "got: {warnings:?}"
+        );
+    }
+
+    fn has_shadow_warning(warnings: &[String], section_table: &str, combo: &str) -> bool {
+        warnings.iter().any(|w| {
+            w.contains("will never fire") && w.contains(section_table) && w.contains(combo)
+        })
+    }
+
+    #[test]
+    fn shadowed_direction_binding_same_context_warns() {
+        let toml_str = r#"
+            [gestures.on-canvas]
+            "3-finger-swipe" = "pan-viewport"
+            "3-finger-swipe-up" = "home-toggle"
+        "#;
+        let (_, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            has_shadow_warning(&warnings, "[gestures.on-canvas]", "3-finger-swipe-up"),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn shadowed_direction_binding_cross_context_fallback_warns() {
+        // Direction on-window, continuous base in anywhere: the on-window
+        // resolution falls back to the anywhere continuous swipe.
+        let toml_str = r#"
+            [gestures.anywhere]
+            "mod+3-finger-swipe" = "pan-viewport"
+            [gestures.on-window]
+            "mod+3-finger-swipe-right" = "home-toggle"
+        "#;
+        let (_, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            has_shadow_warning(&warnings, "[gestures.on-window]", "3-finger-swipe-right"),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn direction_binding_over_non_continuous_base_does_not_warn() {
+        // Base 4-finger swipe is the default center-nearest (threshold); an
+        // unbound base (5-finger, unbound here) never shadows — neither warns.
+        let toml_str = r#"
+            [gestures.anywhere]
+            "4-finger-swipe-up" = "home-toggle"
+            "5-finger-swipe" = "none"
+            "5-finger-swipe-down" = "home-toggle"
+        "#;
+        let (_, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("will never fire")),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn shadowed_touch_direction_binding_warns() {
+        let toml_str = r#"
+            [touch.anywhere]
+            "3-finger-swipe" = "pan-viewport"
+            "3-finger-swipe-up" = "home-toggle"
+        "#;
+        let (_, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(
+            has_shadow_warning(&warnings, "[touch.anywhere]", "3-finger-swipe-up"),
+            "got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn default_config_has_no_shadow_warnings() {
+        let (_, warnings) = Config::from_toml_collect("").unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("will never fire")),
             "got: {warnings:?}"
         );
     }
