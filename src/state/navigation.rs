@@ -436,30 +436,12 @@ impl DriftWm {
     /// Representative point for the directional / nearest navigation searches:
     /// the visual-frame center (content plus the SSD bar strip above it). Works
     /// for a live window or a stand-in; equals `window_visual_center` for a
-    /// client.
+    /// client (both share `visual_frame_center`).
     pub fn nav_center(&self, w: &super::StageWindow) -> Point<f64, Logical> {
         let loc = self.stage.position_of(w).unwrap_or_default();
         let size = w.geometry().size;
         let bar = self.window_ssd_bar(w) as f64;
-        Point::from((
-            loc.x as f64 + size.w as f64 / 2.0,
-            loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
-        ))
-    }
-
-    /// Visual-frame rect (content plus the SSD bar strip above it) for the
-    /// directional nearest search, in canvas coords.
-    pub fn nav_frame(
-        &self,
-        w: &super::StageWindow,
-    ) -> (Point<i32, Logical>, smithay::utils::Size<i32, Logical>) {
-        let loc = self.stage.position_of(w).unwrap_or_default();
-        let size = w.geometry().size;
-        let bar = self.window_ssd_bar(w);
-        (
-            Point::from((loc.x, loc.y - bar)),
-            smithay::utils::Size::from((size.w, size.h + bar)),
-        )
+        super::visual_frame_center(loc, size, bar)
     }
 
     /// Nearest window (by canvas distance from `from_center`) that is at least

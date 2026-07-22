@@ -4,13 +4,7 @@ use smithay::desktop::Window;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::seat::WaylandFocus;
 
-use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm, StageWindow};
-
-/// Border width for an obstacle: the per-rule width for a client, the global
-/// default for a suspended window (no surface to resolve a rule against).
-fn suspended_or_surface_border(state: &DriftWm, w: &StageWindow) -> i32 {
-    state.element_border_width(w)
-}
+use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm};
 
 impl DriftWm {
     /// Spawn pos for `placement = "cursor"`: center the visual frame
@@ -126,7 +120,7 @@ impl DriftWm {
             };
             let size = w.geometry().size;
             let b = self.window_ssd_bar(w);
-            let bw = suspended_or_surface_border(self, w) as f64;
+            let bw = self.element_border_width(w) as f64;
             let idx = rects.len();
             rects.push(driftwm::layout::auto_placement::Rect {
                 x: loc.x as f64 - bw,
@@ -240,7 +234,7 @@ impl DriftWm {
             };
             let size = w.geometry().size;
             let b = self.window_ssd_bar(w);
-            let bw = suspended_or_surface_border(self, w) as f64;
+            let bw = self.element_border_width(w) as f64;
             let idx = rects.len();
             rects.push(driftwm::layout::auto_placement::Rect {
                 x: loc.x as f64 - bw,

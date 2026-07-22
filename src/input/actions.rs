@@ -199,21 +199,19 @@ impl DriftWm {
                     (self.viewport_center_canvas(), None)
                 };
 
-                // Candidates are every canvas element, stand-ins included (their
-                // visual frame drives the distance metric), so a directional
-                // swipe can land on one and Enter relaunches it.
+                // Candidates are every canvas element, stand-ins included, so a
+                // directional swipe can land on one and Enter relaunches it.
                 let windows = self
                     .stage
                     .windows()
                     .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
-                        let (loc, size) = match w {
-                            StageWindow::Client(c) => (
-                                self.stage.position_of(w).unwrap_or_default(),
-                                c.geometry().size,
-                            ),
-                            StageWindow::Suspended(_) => self.nav_frame(w),
-                        };
+                        // Measure every candidate on its bare content rect — a
+                        // client on its geometry, a stand-in on its body — so a
+                        // stand-in's SSD bar strip doesn't tip the proximity
+                        // metric that a client's doesn't.
+                        let loc = self.stage.position_of(w).unwrap_or_default();
+                        let size = w.geometry().size;
                         let closest = canvas::closest_point_on_rect(origin, loc, size);
                         let point = if closest == origin {
                             self.nav_center(w)

@@ -2231,10 +2231,7 @@ impl DriftWm {
         let loc = self.stage.position_of(window)?;
         let size = window.geometry().size;
         let bar = self.window_ssd_bar(window) as f64;
-        Some(Point::from((
-            loc.x as f64 + size.w as f64 / 2.0,
-            loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
-        )))
+        Some(visual_frame_center(loc, size, bar))
     }
 
     /// True if at least `threshold` of the window's area is inside the active
@@ -2270,6 +2267,21 @@ impl DriftWm {
         let size = self.config.cursor_size.unwrap_or(24);
         self.cursor.load_xcursor(name, theme, size)
     }
+}
+
+/// Center of the visual frame (content plus the SSD title-bar strip above it)
+/// from a content top-left, content size, and bar height. Shared by
+/// `window_visual_center` (clients) and `nav_center` (any stage element) so the
+/// two formulas can't drift.
+fn visual_frame_center(
+    loc: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    bar: f64,
+) -> Point<f64, Logical> {
+    Point::from((
+        loc.x as f64 + size.w as f64 / 2.0,
+        loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
+    ))
 }
 
 impl DriftWm {
