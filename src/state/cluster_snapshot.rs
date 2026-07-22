@@ -36,16 +36,6 @@ impl ClusterMember {
         }
     }
 
-    /// A client dies with its surface; a stand-in only leaves on dismissal
-    /// (which needs the pointer this grab already holds), so it's always live
-    /// mid-drag — matching `StageWindow`'s own `IsAlive`.
-    pub fn is_alive(&self) -> bool {
-        match self {
-            Self::Client(w) => smithay::utils::IsAlive::alive(w),
-            Self::Suspended(_) => true,
-        }
-    }
-
     /// Resolve back to the live stage element, or `None` if it left the stage.
     pub fn resolve(&self, stage: &driftwm::stage::Stage<StageWindow>) -> Option<StageWindow> {
         match self {
@@ -156,7 +146,7 @@ impl ClusterResizeSnapshot {
         }
         let width_delta = new_w - initial_size.w;
         let height_delta = new_h - initial_size.h;
-        let shifts = self.compute_shifts(width_delta, height_delta, gap);
+        let shifts = self.compute_shifts(stage, width_delta, height_delta, gap);
 
         for (i, (dx, dy)) in &shifts {
             let m = &self.members[*i];
@@ -178,8 +168,13 @@ impl ClusterResizeSnapshot {
 
     /// Per-member translation vector for one motion tick. Wraps
     /// `resolve_cluster_shifts`, persisting newly-formed bonds across frames.
+    /// `stage` resolves each member's liveness: a client dies with its surface,
+    /// but a stand-in can also leave the stage mid-drag (dismissed via IPC or a
+    /// keybind, or adopted by a relaunch), so both degrade to `DEAD_RECT` rather
+    /// than ghost-push at their frozen rect.
     pub fn compute_shifts(
         &mut self,
+        stage: &driftwm::stage::Stage<StageWindow>,
         width_delta: i32,
         height_delta: i32,
         gap: f64,
@@ -199,7 +194,7 @@ impl ClusterResizeSnapshot {
             .members
             .iter()
             .map(|m| {
-                let alive = m.window.is_alive();
+                let alive = m.window.resolve(stage).is_some();
                 ResizeClassification {
                     axis_x: if alive { m.axis_x } else { None },
                     axis_y: if alive { m.axis_y } else { None },
@@ -638,4 +633,83 @@ fn window_snap_rect(
             y_high: loc.y as f64 + size.h as f64 + bw,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use driftwm::desktop_entry::AppIdentity;
+    use driftwm::layout::cluster::Side;
+    use driftwm::layout::snap::SnapRect;
+    use driftwm::session::Origin;
+    use driftwm::stage::Stage;
+    use smithay::utils::{Point, Size};
+
+    use super::{ClusterMember, ClusterResizeMember, ClusterResizeSnapshot};
+    use crate::state::{StageWindow, SuspendedId, SuspendedWindow};
+
+    fn stand_in(id: u64) -> StageWindow {
+        StageWindow::Suspended(Rc::new(SuspendedWindow::new(
+            SuspendedId(id),
+            Size::from((100, 100)),
+            AppIdentity {
+                app_id: "app".into(),
+                desktop_id: "app.desktop".into(),
+                display_name: "App".into(),
+            },
+            String::new(),
+            Origin::Explicit,
+            false,
+        )))
+    }
+
+    /// A single member shifted along the right edge; primary parked far away so
+    /// no primary-push interferes with the phase-1 static shift.
+    fn snapshot_with_shifted_member(id: u64) -> ClusterResizeSnapshot {
+        let mut snap = ClusterResizeSnapshot::empty();
+        snap.members.push(ClusterResizeMember {
+            window: ClusterMember::Suspended(SuspendedId(id)),
+            initial_pos: Point::from((0, 0)),
+            initial_rect: SnapRect {
+                x_low: 0.0,
+                x_high: 100.0,
+                y_low: 0.0,
+                y_high: 100.0,
+            },
+            axis_x: Some(Side::Right),
+            axis_y: None,
+        });
+        snap.primary_rect = SnapRect {
+            x_low: 5000.0,
+            x_high: 5100.0,
+            y_low: 5000.0,
+            y_high: 5100.0,
+        };
+        snap.resize_edges = 0;
+        snap
+    }
+
+    #[test]
+    fn dismissed_standin_member_degrades_to_dead_rect() {
+        // Alive: the stand-in is on the stage, so its Right-axis classification
+        // yields the static shift.
+        let mut stage: Stage<StageWindow> = Stage::new();
+        stage.map(stand_in(1), Point::from((0, 0)));
+        let shifts = snapshot_with_shifted_member(1).compute_shifts(&stage, 100, 0, 8.0);
+        assert_eq!(
+            shifts.get(&0),
+            Some(&(100, 0)),
+            "a live member takes its edge-delta shift"
+        );
+
+        // Dismissed mid-drag: no stage entry, so liveness resolves false and the
+        // member drops to `DEAD_RECT` with no axis — no shift, no ghost push.
+        let empty: Stage<StageWindow> = Stage::new();
+        let shifts = snapshot_with_shifted_member(1).compute_shifts(&empty, 100, 0, 8.0);
+        assert!(
+            !shifts.contains_key(&0),
+            "a dismissed stand-in no longer pushes as a ghost"
+        );
+    }
 }
