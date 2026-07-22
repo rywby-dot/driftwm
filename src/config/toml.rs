@@ -266,6 +266,9 @@ pub(super) struct WindowRuleFile {
     pub position: Option<[i32; 2]>,
     pub size: Option<[i32; 2]>,
     pub fullscreen: Option<bool>,
+    /// `false` — don't focus or navigate the camera to this window when it
+    /// first maps. Omit to keep the default focus-on-map behavior.
+    pub focus_on_open: Option<bool>,
     #[serde(default)]
     pub widget: bool,
     /// Pin the window to one output's screen space: it ignores pan/zoom and

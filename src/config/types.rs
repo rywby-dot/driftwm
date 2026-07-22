@@ -649,6 +649,9 @@ pub struct WindowRule {
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
     pub fullscreen: Option<bool>,
+    /// `Some(false)` maps the window without focusing it or moving the camera
+    /// to it. `None` keeps the default focus-on-map behavior.
+    pub focus_on_open: Option<bool>,
     /// Widget windows are pinned (immovable), excluded from navigation/alt-tab,
     /// and always stacked below normal windows.
     pub widget: bool,
@@ -713,6 +716,7 @@ impl WindowRule {
 #[derive(Clone, Debug, Default)]
 pub struct AppliedWindowRule {
     pub fullscreen: Option<bool>,
+    pub focus_on_open: Option<bool>,
     pub widget: bool,
     pub pinned_to_screen: bool,
     pub suspend_on_close: Option<bool>,
@@ -751,6 +755,9 @@ impl AppliedWindowRule {
         }
         if rule.preserve_aspect_ratio {
             self.preserve_aspect_ratio = true;
+        }
+        if let Some(f) = rule.focus_on_open {
+            self.focus_on_open = Some(f);
         }
         if rule.blur {
             self.blur = true;
@@ -798,6 +805,7 @@ impl AppliedWindowRule {
 impl From<&WindowRule> for AppliedWindowRule {
     fn from(rule: &WindowRule) -> Self {
         Self {
+            focus_on_open: rule.focus_on_open,
             widget: rule.widget,
             pinned_to_screen: rule.pinned_to_screen,
             suspend_on_close: rule.suspend_on_close,

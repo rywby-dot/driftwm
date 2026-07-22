@@ -405,6 +405,7 @@ pub(super) fn parse_window_rule(
         position: r.position.map(|[x, y]| (x, y)),
         size,
         fullscreen: r.fullscreen,
+        focus_on_open: r.focus_on_open,
         widget: r.widget,
         pinned_to_screen: r.pinned_to_screen,
         suspend_on_close: r.suspend_on_close,

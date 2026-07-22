@@ -331,6 +331,13 @@ impl CompositorHandler for DriftWm {
                         self.config.decorations.default_mode.clone()
                     };
 
+                    // `focus_on_open = false` maps the window without focus or
+                    // camera movement; it still takes focus later through normal
+                    // interaction (hover with focus-follows-mouse, or a click).
+                    let suppress_focus_on_open = applied
+                        .as_ref()
+                        .is_some_and(|a| a.focus_on_open == Some(false));
+
                     let mut placed_at_cursor = false;
                     let mut place_in_background = false;
                     // One-shot: when a rule forces a size, first commit
@@ -406,7 +413,8 @@ impl CompositorHandler for DriftWm {
                         )
                         .0
                         .to_i32_round();
-                        let activate = applied.as_ref().is_none_or(|a| !a.widget);
+                        let activate =
+                            !suppress_focus_on_open && applied.as_ref().is_none_or(|a| !a.widget);
                         self.map_window(window.clone(), canvas, false);
                         if activate {
                             self.activate_riding_batch(&window);
@@ -500,8 +508,9 @@ impl CompositorHandler for DriftWm {
                         // Background-placed windows never activate: keep the
                         // fullscreen window focused and on top. Activation rides
                         // the batched configure below instead of a standalone hint.
-                        let activate =
-                            !place_in_background && applied.as_ref().is_none_or(|a| !a.widget);
+                        let activate = !place_in_background
+                            && !suppress_focus_on_open
+                            && applied.as_ref().is_none_or(|a| !a.widget);
                         self.map_window(window.clone(), pos.into(), false);
                         if activate {
                             self.activate_riding_batch(&window);
@@ -602,6 +611,7 @@ impl CompositorHandler for DriftWm {
                         // Adopted windows keep the suspended rect and z-slot —
                         // never navigate the camera or raise on adopt.
                         if !is_widget
+                            && !suppress_focus_on_open
                             && !is_fullscreen
                             && !place_in_background
                             && !deferred_fit_or_fs

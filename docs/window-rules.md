@@ -361,6 +361,21 @@ the start of each resize, so a video overlay or image viewer won't distort when
 you drag a corner. It affects interactive resizes only; the `size` rule,
 fit/fullscreen, and client-driven sizes are left alone.
 
+### Overlay that opens without taking focus
+
+```toml
+[[window_rules]]
+title            = "my-hud"
+pinned_to_screen = true
+focus_on_open    = false
+```
+
+`focus_on_open = false` maps the window without focusing it or moving the camera
+to it — pairs well with `pinned_to_screen` for an unobtrusive overlay that
+shouldn't grab your keyboard or pull the viewport. The window still takes focus
+later through normal interaction: hover it (with focus-follows-mouse) or click
+it.
+
 ### Suppress iced/libcosmic utility popups
 
 Some apps (cosmic-term, etc.) open small utility windows that share the main

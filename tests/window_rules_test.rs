@@ -9,6 +9,7 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         position: None,
         size: None,
         fullscreen: None,
+        focus_on_open: None,
         widget: false,
         pinned_to_screen: false,
         suspend_on_close: None,
@@ -575,6 +576,43 @@ fn preserve_aspect_ratio_is_sticky_on_in_merge_from() {
     let mut applied = AppliedWindowRule::from(&rule_on);
     applied.merge_from(&rule_off);
     assert!(applied.preserve_aspect_ratio);
+}
+
+// ── focus_on_open ─────────────────────────────────────────────────────────────
+
+#[test]
+fn focus_on_open_defaults_to_none() {
+    let rule = bare_rule(Some("foot"), None);
+    assert_eq!(rule.focus_on_open, None);
+    assert_eq!(AppliedWindowRule::from(&rule).focus_on_open, None);
+}
+
+#[test]
+fn focus_on_open_parses_false_from_toml() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "my-hud"
+        focus_on_open = false
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("my-hud", "title").unwrap();
+    assert_eq!(applied.focus_on_open, Some(false));
+}
+
+#[test]
+fn focus_on_open_last_wins_in_merge_from() {
+    let rule_false = WindowRule {
+        focus_on_open: Some(false),
+        ..bare_rule(Some("x"), None)
+    };
+    let rule_true = WindowRule {
+        focus_on_open: Some(true),
+        ..bare_rule(Some("x"), None)
+    };
+    let mut applied = AppliedWindowRule::from(&rule_false);
+    assert_eq!(applied.focus_on_open, Some(false));
+    applied.merge_from(&rule_true);
+    assert_eq!(applied.focus_on_open, Some(true));
 }
 
 #[test]

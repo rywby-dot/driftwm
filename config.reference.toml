@@ -681,6 +681,11 @@
 # #   size       — [width, height] initial window dimensions (one-shot; user/app
 # #                can resize afterwards, so pair with widget = true to lock it)
 # #   fullscreen — true: force this window to open in fullscreen mode
+# #   focus_on_open — false: map the window without focusing it or moving the
+# #                camera to it. Omit to keep the default focus-on-map behavior.
+# #                Pairs well with pinned_to_screen for unobtrusive overlays; the
+# #                window still takes focus later through normal interaction
+# #                (hover or click). (default: true)
 # #   widget     — true: pinned (immovable), below normal windows, excluded from
 # #                navigation and alt-tab (default: false)
 # #   pinned_to_screen — true: lock the window to the output's screen space —

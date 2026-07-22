@@ -1099,6 +1099,7 @@ Supported fields:
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
 - `size` — [width, height] initial window dimensions (one-shot; user/app can resize afterwards, so pair with widget = true to lock it)
 - `fullscreen` — true: force this window to open in fullscreen mode
+- `focus_on_open` — false: map the window without focusing it or moving the camera to it. Omit to keep the default focus-on-map behavior. Pairs well with pinned_to_screen for unobtrusive overlays; the window still takes focus later through normal interaction (hover or click). (default: true)
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
 - `suspend_on_close` — override [session].suspend_on_close for matched windows (true / false). Escape hatch for terminals and scratchpads that should always really close (or always suspend). (default: inherit)
