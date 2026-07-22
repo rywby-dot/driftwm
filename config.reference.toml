@@ -139,7 +139,7 @@
 # # Example: origin + 4 corners
 # # anchors = [[0, 0], [-1750, 1750], [1750, 1750], [1750, -1750], [-1750, -1750]]
 
-[navigation.bookmarks]
+# [navigation.bookmarks]
 # # Named canvas points for the go-to-bookmark / set-bookmark / move-to-bookmark
 # # actions and `driftwm msg bookmark`. Uses Y-up coordinates (window-center
 # # convention, same as go-to and window rules). This table only SEEDS the

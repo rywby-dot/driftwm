@@ -230,6 +230,8 @@ fn render(reference: &str) -> String {
 
     let mut prose = ProseBuf::default();
     let mut bindings: Vec<[String; 3]> = Vec::new();
+    // The section the pending bindings belong to; drives the table headers.
+    let mut section = String::new();
 
     while i < lines.len() {
         let line = lines[i];
@@ -248,10 +250,16 @@ fn render(reference: &str) -> String {
             continue;
         }
 
-        if line.starts_with('[') {
-            flush_bindings(&mut out, &mut bindings);
+        // A section header, active (`[x]`) or commented out (`# [x]` — an inert
+        // template section whose keys are all defaults, like an explicit-empty
+        // escape hatch). Flush the previous section's bindings first, so their
+        // table headers reflect the section they came from.
+        let header = line.strip_prefix("# ").unwrap_or(line);
+        if header.starts_with('[') && header.ends_with(']') {
+            flush_bindings(&mut out, &mut bindings, &section);
             flush_prose(&mut out, &mut prose);
-            out.push_str(&format!("\n## `{line}`\n\n"));
+            out.push_str(&format!("\n## `{header}`\n\n"));
+            section = header.to_string();
             i += 1;
             continue;
         }
@@ -281,7 +289,7 @@ fn render(reference: &str) -> String {
             } else {
                 // A scalar setting. Prose directly abutting it is its lead-in
                 // description (a blank line would have flushed it already).
-                flush_bindings(&mut out, &mut bindings);
+                flush_bindings(&mut out, &mut bindings, &section);
                 let lead = prose.take();
                 render_setting(&mut out, key, value, &lead, &desc);
             }
@@ -292,7 +300,7 @@ fn render(reference: &str) -> String {
         // `# #` prose, `# ## heading`, or `# # Example:`.
         let hashes = rest.chars().take_while(|c| *c == '#').count();
         if hashes >= 2 {
-            flush_bindings(&mut out, &mut bindings);
+            flush_bindings(&mut out, &mut bindings, &section);
             flush_prose(&mut out, &mut prose);
             let title = rest[hashes..].trim();
             out.push_str(&format!("\n{} {}\n\n", "#".repeat(hashes), title));
@@ -304,7 +312,7 @@ fn render(reference: &str) -> String {
         let content = content_raw.strip_prefix(' ').unwrap_or(content_raw);
 
         if let Some(label) = content.strip_prefix("Example:") {
-            flush_bindings(&mut out, &mut bindings);
+            flush_bindings(&mut out, &mut bindings, &section);
             flush_prose(&mut out, &mut prose);
             let label = label.trim().to_string();
             let mut body: Vec<String> = Vec::new();
@@ -345,7 +353,7 @@ fn render(reference: &str) -> String {
         i += 1;
     }
 
-    flush_bindings(&mut out, &mut bindings);
+    flush_bindings(&mut out, &mut bindings, &section);
     flush_prose(&mut out, &mut prose);
 
     // A heading prepends a blank line and the block before it already ended with
@@ -363,8 +371,23 @@ fn flush_prose(out: &mut String, prose: &mut ProseBuf) {
     }
 }
 
-fn flush_bindings(out: &mut String, bindings: &mut Vec<[String; 3]>) {
+fn flush_bindings(out: &mut String, bindings: &mut Vec<[String; 3]>, section: &str) {
     if bindings.is_empty() {
+        return;
+    }
+    // The bookmark seed table is name → point, not a keybinding, so it takes its
+    // own headers and drops the (always-empty) notes column.
+    if section == "[navigation.bookmarks]" {
+        out.push_str("| Name | Position |\n| --- | --- |\n");
+        for [name, position, _notes] in bindings.iter() {
+            out.push_str(&format!(
+                "| `{}` | `{}` |\n",
+                esc_cell(strip_quotes(name)),
+                esc_cell(position),
+            ));
+        }
+        out.push('\n');
+        bindings.clear();
         return;
     }
     out.push_str("| Binding | Action | Notes |\n| --- | --- | --- |\n");
