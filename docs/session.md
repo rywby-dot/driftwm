@@ -42,9 +42,11 @@ A few things are deliberately different about a suspended window:
 - **Excluded from Alt-Tab and focus history**, the same as a pinned widget —
   it's still focusable by hovering or clicking, but cycling and MRU never
   land on it, and neither does a taskbar's window list.
-- **Excluded from snapping and clusters**, for now — it neither snaps to
-  other windows nor participates in a snap cluster's group move/resize/fit.
-  Planned to change (see [Limitations](#limitations) below).
+- **A full snap/cluster citizen** — it snaps to windows while you drag it,
+  windows snap to it, and it joins a snap cluster like any window: suspending
+  the middle of a cluster leaves the cluster intact, and a group move/resize
+  carries the stand-in along. (It's still never pinned, fullscreen, or fit —
+  those stay off it even inside a group op.)
 - **Unpinnable, unfullscreenable, unfittable** — those actions no-op on it.
 
 If the window was fullscreen or screen-pinned when suspended, it's returned
