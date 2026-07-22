@@ -101,6 +101,16 @@ impl DriftWm {
         // Must target `output`, not the active output — they can differ when
         // fullscreen is requested on a specific monitor.
         if self.is_output_fullscreen(&output) {
+            // Same reasoning: the displaced window's strip rides its exit
+            // configure instead of arriving as a second back-to-back configure
+            // once `activate_riding_batch` deactivates it below.
+            if let Some(displaced) = self
+                .stage
+                .fullscreen_on(&output.name())
+                .map(|fs| fs.window.clone())
+            {
+                displaced.set_activated(false);
+            }
             self.exit_fullscreen_on(&output);
         }
 
@@ -158,6 +168,12 @@ impl DriftWm {
             pinned: saved_pinned,
         });
 
+        // Stage Activated before the fullscreen configure so it rides that send
+        // — map/raise below don't carry activation, so a window that fullscreens
+        // straight from a background placement (deferred fullscreen request)
+        // would otherwise never receive the hint. Any displaced peer is
+        // deactivated on the wire here.
+        self.activate_riding_batch(window);
         window.enter_fullscreen_configure(viewport_size);
 
         // Lock the target output's viewport: stop all animations and momentum
@@ -181,9 +197,10 @@ impl DriftWm {
         super::output_state(&output).camera =
             Point::from((camera_i32.x as f64, camera_i32.y as f64));
 
-        // Place window at viewport origin and raise
-        self.map_window(window.clone(), camera_i32, true);
-        self.raise_window(window, true);
+        // Place window at viewport origin and raise; activation already rode
+        // the fullscreen configure staged above.
+        self.map_window(window.clone(), camera_i32, false);
+        self.raise_window(window, false);
         self.enforce_below_windows();
         self.update_output_from_camera();
 

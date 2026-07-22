@@ -951,14 +951,51 @@ impl DriftWm {
     }
 
     /// Replicates `Space`'s activate semantics: xdg Activated set on `target`,
-    /// cleared on every other window. Pending-only — the configure rides on the
-    /// next send.
+    /// cleared on every other window, and delivered on the wire for any window
+    /// whose hint actually changed — so a focus change (click, raise) that
+    /// isn't followed by another configure still reaches the client. Idempotent:
+    /// a repeat call (hover, re-raise) changes nothing and sends nothing.
     fn set_activated_exclusive<Q>(&self, target: &Q)
     where
         StageWindow: PartialEq<Q>,
     {
+        self.activate_exclusive(target, true);
+    }
+
+    /// Like `set_activated_exclusive`, but for a `target` that is about to
+    /// receive a configure anyway — its batched first-commit or fullscreen
+    /// send. Staging the target's hint lets it ride that configure instead of a
+    /// premature standalone one; only the deactivated peers, which have no other
+    /// configure coming, are flushed here.
+    pub(crate) fn activate_riding_batch<Q>(&self, target: &Q)
+    where
+        StageWindow: PartialEq<Q>,
+    {
+        self.activate_exclusive(target, false);
+    }
+
+    /// Set xdg Activated on `target`, clear it elsewhere, and flush the hint for
+    /// windows whose state changed and already had their initial configure sent
+    /// — flushing a still-pending toplevel would force that configure out early,
+    /// splitting the batched first-commit send. `flush_target` is false when a
+    /// following send will carry the target's hint itself. Stand-ins never
+    /// activate (`set_activated` no-ops, no toplevel), so they stay quiet.
+    fn activate_exclusive<Q>(&self, target: &Q, flush_target: bool)
+    where
+        StageWindow: PartialEq<Q>,
+    {
         for w in self.stage.windows() {
-            w.set_activated(w == target);
+            if !w.set_activated(w == target) {
+                continue;
+            }
+            if w == target && !flush_target {
+                continue;
+            }
+            if let Some(toplevel) = w.toplevel()
+                && toplevel.is_initial_configure_sent()
+            {
+                toplevel.send_pending_configure();
+            }
         }
     }
 
@@ -973,9 +1010,13 @@ impl DriftWm {
     /// directly above its own parent without jumping over unrelated windows
     /// that sit higher in the stack.
     pub fn raise_with_children(&mut self, window: &Window) {
+        // The stage does the raising and returns the raise order; activation is
+        // exclusive to the topmost of it (the order's last element). Toggling it
+        // per raised window instead would ping-pong the hint and flush a burst
+        // of configures between a parent and its modal child.
         let target = StageWindow::from(window.clone());
-        for w in self.stage.raise_with_children(&target) {
-            self.set_activated_exclusive(&w);
+        if let Some(top) = self.stage.raise_with_children(&target).last().cloned() {
+            self.set_activated_exclusive(&top);
         }
     }
 

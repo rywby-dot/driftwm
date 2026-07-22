@@ -105,6 +105,16 @@ Non-empty does **not** imply a pending *resize*: a compositor queues size-less
 owed resize inspect each `ToplevelConfigure`'s `state.size` for a real
 (non-zero) size differing from the committed geometry, not just list length.
 
+### `send_pending_configure` before the initial configure
+`ToplevelSurface::send_pending_configure()` gates on `has_pending_changes()`,
+which is `!initial_configure_sent || <server_pending differs>`. So it does **not**
+no-op before the initial configure — it forces one out. To flush a mid-session
+change (e.g. an Activated flip on focus change) without prematurely sending, and
+thereby fragmenting, a batched first-commit configure, guard on
+`ToplevelSurface::is_initial_configure_sent()` first. `Window::set_activated(bool)
+-> bool` returns whether the hint actually changed, so pair the two: flush only
+when `set_activated` reports a change and the initial configure is already out.
+
 ### Keyboard modifier state
 ```rust
 let modifiers = self.seat.get_keyboard().unwrap().modifier_state();

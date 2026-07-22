@@ -403,6 +403,11 @@ impl DriftWm {
             // already the seat focus (post-map path) the `set_focus` is a no-op
             // and `focus_changed` won't re-add it, so push it back explicitly.
             self.update_focus_history(root);
+            // Activation is no longer granted at birth, and adoption skips the
+            // normal placement's activation, so stage the adopted window's
+            // Activated hint here — it rides the decoration-tail configure the
+            // caller sends, and any displaced peer is deactivated on the wire.
+            self.activate_riding_batch(window);
         }
         self.refresh_pointer_focus();
         // An adopt is an immediate, user-visible change — write through now.

@@ -800,6 +800,44 @@ fn ipc_relaunch_triggers_relaunch_suspended() {
     f.state().dismiss_suspended(sid);
 }
 
+/// An adopted window that inherits the stand-in's focus must receive its
+/// Activated hint on the wire. Activation is no longer granted at birth, and the
+/// adopt path skips normal placement, so the hint is staged to ride the adopt
+/// (decoration-tail) configure rather than sitting pending forever.
+#[test]
+fn adopt_inheriting_focus_delivers_activated() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (500, 500), (600, 400));
+    // The stand-in holds focus — the user is waiting on this relaunch.
+    f.state().focus_and_raise_suspended(sid);
+
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    // First sized commit adopts the slot.
+    finish_window(&mut f, cid, &surface, (300, 200));
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("relaunched window adopted the slot");
+    assert_eq!(
+        f.state().focused_window().as_ref(),
+        Some(&adopted),
+        "the adopted window inherits keyboard focus"
+    );
+    let configs = f.client(cid).window(&surface).format_recent_configures();
+    assert!(
+        configs.contains("Activated"),
+        "an adopted window inheriting focus must get an Activated configure, got:\n{configs}"
+    );
+}
+
 /// `msg relaunch` on a selector that names no suspended window errors instead
 /// of silently doing nothing.
 #[test]

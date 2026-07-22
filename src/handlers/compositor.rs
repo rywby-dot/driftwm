@@ -407,7 +407,10 @@ impl CompositorHandler for DriftWm {
                         .0
                         .to_i32_round();
                         let activate = applied.as_ref().is_none_or(|a| !a.widget);
-                        self.map_window(window.clone(), canvas, activate);
+                        self.map_window(window.clone(), canvas, false);
+                        if activate {
+                            self.activate_riding_batch(&window);
+                        }
                         self.stage.set_pin(
                             &window,
                             driftwm::stage::PinnedSite {
@@ -495,10 +498,14 @@ impl CompositorHandler for DriftWm {
                             }
                         };
                         // Background-placed windows never activate: keep the
-                        // fullscreen window focused and on top.
+                        // fullscreen window focused and on top. Activation rides
+                        // the batched configure below instead of a standalone hint.
                         let activate =
                             !place_in_background && applied.as_ref().is_none_or(|a| !a.widget);
-                        self.map_window(window.clone(), pos.into(), activate);
+                        self.map_window(window.clone(), pos.into(), false);
+                        if activate {
+                            self.activate_riding_batch(&window);
+                        }
                     }
 
                     if let Some(toplevel) = window.toplevel() {

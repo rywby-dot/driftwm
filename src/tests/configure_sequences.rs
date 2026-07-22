@@ -162,6 +162,17 @@ fn second_fullscreen_displaces_first() {
         first_configures.contains("size: 800 × 600") && !first_configures.contains("Fullscreen"),
         "displaced window must get its windowed configure back, got:\n{first_configures}"
     );
+    // ...in a single configure whose strip rides the exit — no stale Activated
+    // on it, and no separate back-to-back deactivate configure trailing it.
+    assert_eq!(
+        first_configures.lines().count(),
+        1,
+        "displaced window must get exactly one configure, got:\n{first_configures}"
+    );
+    assert!(
+        !first_configures.contains("Activated"),
+        "displaced window's exit configure must carry the deactivate, got:\n{first_configures}"
+    );
     // ...and the new one owns the output.
     let second_configures = f.client(id).window(&second).format_recent_configures();
     assert!(
@@ -649,5 +660,53 @@ fn fullscreen_exit_straggler_keeps_position() {
         f.state().stage.position_of(&a),
         Some(pre_pos),
         "a straggler fullscreen-sized commit must not relocate the exiting window"
+    );
+}
+
+/// A window that maps under a fullscreen window and itself requests fullscreen
+/// before its first commit takes the deferred `pending_fullscreen` path:
+/// background-placed, then fullscreened on the buffer commit. Its fullscreen
+/// configure must carry Activated despite the un-activated placement.
+#[test]
+fn background_window_fullscreen_configure_is_activated() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    // A owns the output's fullscreen.
+    let a_surface = map_settled(&mut f, id, "a", (800, 600));
+    let cw = f.client(id).window(&a_surface);
+    cw.set_fullscreen(None);
+    f.double_roundtrip(id);
+    adopt_last_configure(&mut f, id, &a_surface);
+
+    // B requests fullscreen before its first commit, so the request is deferred;
+    // it background-places under A, then the deferred branch takes it fullscreen.
+    let b = f.client(id).create_window();
+    let b_surface = b.surface.clone();
+    b.set_app_id("b");
+    b.set_fullscreen(None);
+    b.commit();
+    f.roundtrip(id);
+    let b = f.client(id).window(&b_surface);
+    b.set_size(400, 300);
+    b.attach_new_buffer();
+    b.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    let mapped = window_by_app_id(&mut f, "b").unwrap();
+    assert_eq!(
+        f.state().stage.fullscreen_output_of(&mapped),
+        Some("HEADLESS-1"),
+        "b must have taken over fullscreen via the deferred path"
+    );
+    let configures = f.client(id).window(&b_surface).format_recent_configures();
+    let fs_line = configures
+        .lines()
+        .find(|l| l.contains("Fullscreen"))
+        .unwrap_or("");
+    assert!(
+        fs_line.contains("Activated"),
+        "b's fullscreen configure must carry Activated, got:\n{configures}"
     );
 }

@@ -67,13 +67,15 @@ impl XdgShellHandler for DriftWm {
         // Sending one here would produce a configure with unresolved state,
         // and a second on first commit — SDL2/SCTK clients have historically
         // desynced on back-to-back initial configures.
-        self.map_window(window.clone(), pos.into(), true);
-        self.raise_window(&window, true);
+        self.map_window(window.clone(), pos.into(), false);
+        self.raise_window(&window, false);
         self.enforce_below_windows();
         // Don't focus here: a pre-buffer wl_keyboard.enter is unusable, and
         // set_focus is a no-op when the target is unchanged, so focusing now
         // would trap the client unfocused (the on-commit re-focus does nothing).
-        // Focus is delivered once mapped, on first commit.
+        // Focus is delivered once mapped, on first commit; activation is
+        // likewise deferred to that commit so it can ride the placement
+        // configure instead of arriving as a premature standalone one.
         self.pending_center.insert(wl_surface);
     }
 
