@@ -312,11 +312,24 @@ impl DriftWm {
         let suspended = StageWindow::Suspended(s.clone());
         let pos = self.stage.position_of(&suspended).unwrap_or_default();
         let body_size = s.size.get();
-        // The stand-in was a full snap/cluster citizen; capture its rect so the
-        // adopted window inherits it as a stable snap rect (below) and keeps its
-        // cluster membership across the adopt, ahead of the body-size configure
-        // the client hasn't acked yet.
-        let standin_rect = self.snap_rect_for(&suspended);
+        // The stand-in was a full snap/cluster citizen; capture its footprint so
+        // the adopted window inherits it as a stable snap rect (below) and keeps
+        // its cluster membership across the adopt, ahead of the body-size
+        // configure the client hasn't acked yet. Inflate with the ADOPTED
+        // window's rule border — not the stand-in's global default — so a
+        // pre-settle close deflates back to the exact body size, since
+        // `markless_suspend_rect` deflates with the live window's rule border.
+        // The bar stays the stand-in's: the adopted window's decoration entry
+        // isn't populated yet on the first-commit adopt path, and the stand-in's
+        // bar faithfully carries what the relaunched window will draw.
+        let bar = self.window_ssd_bar(&suspended) as f64;
+        let bw = self.window_border_width(root) as f64;
+        let standin_rect = Some(driftwm::layout::snap::SnapRect {
+            x_low: pos.x as f64 - bw,
+            x_high: pos.x as f64 + body_size.w as f64 + bw,
+            y_low: pos.y as f64 - bar - bw,
+            y_high: pos.y as f64 + body_size.h as f64 + bw,
+        });
 
         // Inherit the suspended window's focus if it held it (a relaunch the
         // user is waiting on ends up focused); focus that already moved on is
