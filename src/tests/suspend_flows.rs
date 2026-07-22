@@ -1390,6 +1390,73 @@ fn unmap_then_remap_does_not_convert_or_leak() {
     assert_eq!(f.state().stage.windows().count(), 0);
 }
 
+/// A crash — the client connection drops without an orderly toplevel destroy —
+/// still converts under `suspend_on_close`: smithay fires the destroy handler on
+/// disconnect too, so the crash promise holds (no unmap, no mark, live geometry
+/// seats the stand-in).
+#[test]
+fn suspend_on_close_converts_on_client_crash() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (_surface, _target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+
+    // Abrupt disconnect: no unmap, no mark — the socket just closes.
+    f.kill_client(id);
+    f.pump(10);
+
+    let sid = suspended_id(&mut f).expect("a crash converted under the flag");
+    let s = f.state().find_suspended(sid).unwrap();
+    assert_eq!(s.identity.app_id, "myapp");
+    let elem = StageWindow::Suspended(s.clone());
+    assert_eq!(
+        f.state().stage.position_of(&elem),
+        Some(Point::from((200, 200))),
+        "the stand-in sits at the crashed window's rect"
+    );
+    assert_eq!(s.size.get(), Size::from((400, 300)));
+    f.state().dismiss_suspended(sid);
+}
+
+/// A `suspend-window` mark on a client that then unmaps before destroying still
+/// converts, seating the stand-in at the MARK's rect (marks decide first, so the
+/// unmap snapshot never supplies the geometry) — the suspend-mark counterpart to
+/// the real-close ordering below.
+#[test]
+fn suspend_mark_wins_over_unmap_before_destroy() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with(""));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&target, serial);
+
+    // suspend-window plants a mark capturing the (200,200) + (400,300) rect.
+    f.state().execute_action(&Action::SuspendWindow);
+    assert_eq!(f.state().debug_counters()["suspend_marks"], 1);
+
+    // The client unmaps (role reset wipes live geometry) then destroys.
+    client_unmap(&mut f, id, &surface);
+    client_close(&mut f, id, &surface);
+
+    let sid = suspended_id(&mut f).expect("the suspend mark converted the unmap-then-destroy");
+    let s = f.state().find_suspended(sid).unwrap();
+    let elem = StageWindow::Suspended(s.clone());
+    assert_eq!(
+        f.state().stage.position_of(&elem),
+        Some(Point::from((200, 200))),
+        "the stand-in sits at the mark's rect, not a snapshot fallback"
+    );
+    assert_eq!(s.size.get(), Size::from((400, 300)), "the mark's body size");
+    f.state().dismiss_suspended(sid);
+}
+
 /// A live real-close mark still wins over the unmap snapshot: a compositor close
 /// (close-window) on a client that then unmaps before destroying stays a real
 /// close, no stand-in.

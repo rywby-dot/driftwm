@@ -1025,8 +1025,10 @@ impl DriftWm {
         self.pending_ssd.remove(&id);
         self.pending_recenter.remove(&id);
         self.stable_snap_rects.remove(&id);
-        // A crash (disconnect without an orderly destroy) skips
-        // `resolve_suspend_conversion`, so drop any unmap snapshot here too.
+        // `resolve_suspend_conversion` consumes the unmap snapshot on the normal
+        // destroy path; drop it here too so a surface torn down through a path
+        // that never reached that consume (the wl_surface-level cleanup safety
+        // net) can't strand a snapshot past its surface.
         self.unmap_snapshots.remove(&id);
         self.pending_center.remove(surface);
         self.pending_size.remove(surface);
