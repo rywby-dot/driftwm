@@ -888,7 +888,27 @@ impl DriftWm {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        // During a grab (e.g. window move) the grab owns edge_pan_velocity.
+        // A data-device drag is a pointer grab too, but unlike move/resize grabs
+        // it has no compositor-owned grab implementation in which to maintain
+        // edge-pan. Give it the same depth-sensitive `zone` behavior as a
+        // window move. The protocol icon cannot identify this state because it
+        // is optional.
+        if self.pointer_dnd_active {
+            if pointer.is_grabbed() {
+                self.refresh_dnd_edge_pan();
+                return;
+            }
+
+            // A server-side cancellation does not reach DndGrabHandler::dropped.
+            // Notice the released grab here so stale DnD state cannot turn a
+            // later unrelated grab into edge-pan.
+            self.pointer_dnd_active = false;
+            for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+                self.clear_edge_pan(&output);
+            }
+        }
+
+        // Compositor-owned grabs manage their own edge-pan behavior.
         if pointer.is_grabbed() {
             return;
         }
@@ -957,6 +977,41 @@ impl DriftWm {
             screen_pos,
             usable,
             self.config.edge_pan_cursor_zone,
+            self.config.edge_pan_max,
+        );
+        self.update_edge_pan_request(&output, velocity, screen_pos);
+    }
+
+    /// Re-arm ordinary edge-pan for an active pointer data-device drag.
+    /// Called every animation frame so panning continues while the pointer is
+    /// held still at an edge, exactly like a compositor window move.
+    fn refresh_dnd_edge_pan(&mut self) {
+        let active = self.active_output();
+        let outputs: Vec<_> = self.space.outputs().cloned().collect();
+        for output in &outputs {
+            if active.as_ref() != Some(output) {
+                self.clear_edge_pan(output);
+            }
+        }
+
+        let Some(output) = active else {
+            return;
+        };
+        let (camera, zoom) = {
+            let os = crate::state::output_state(&output);
+            (os.camera, os.zoom)
+        };
+        let canvas_pos = self.seat.get_pointer().unwrap().current_location();
+        let screen_pos =
+            driftwm::canvas::canvas_to_screen(driftwm::canvas::CanvasPos(canvas_pos), camera, zoom)
+                .0;
+        let size = crate::state::output_logical_size(&output);
+        let velocity = crate::grabs::MoveSurfaceGrab::edge_pan_velocity(
+            screen_pos,
+            size.w as f64,
+            size.h as f64,
+            self.config.edge_zone,
+            self.config.edge_pan_min,
             self.config.edge_pan_max,
         );
         self.update_edge_pan_request(&output, velocity, screen_pos);

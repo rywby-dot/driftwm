@@ -113,6 +113,20 @@ impl DriftWm {
         }
 
         if pointer.is_grabbed() {
+            // Camera motion does not change the cursor's local position over a
+            // screen-space surface (layer-shell panels and pinned windows).
+            // During data-device DnD, forwarding a synthetic motion anyway can
+            // make such a target commit a new frame for every animation tick;
+            // that feeds the render loop and turns a px/frame edge-pan into an
+            // apparent speed far above its configured maximum. Keep Smithay's
+            // canvas-space pointer location in sync without emitting a
+            // redundant DnD motion. Canvas targets still need the event because
+            // the surface beneath the fixed cursor changes as the camera pans.
+            if self.pointer_dnd_active && self.pointer_over_screen_space {
+                pointer.set_location(new_pos);
+                return;
+            }
+
             let under = self.focus_under(new_pos);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             pointer.motion(

@@ -279,6 +279,7 @@ impl DriftWm {
             seat,
             cursor: CursorState::new(),
             dnd_icon: None,
+            pointer_dnd_active: false,
             backend: None,
             ipc_server: None,
             ipc_subscribers: Vec::new(),

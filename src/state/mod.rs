@@ -444,6 +444,9 @@ pub struct DriftWm {
 
     pub cursor: CursorState,
     pub dnd_icon: Option<DndIcon>,
+    /// True while the data-device protocol owns a pointer drag. This is kept
+    /// separately from `dnd_icon`: drag icons are optional in Wayland.
+    pub pointer_dnd_active: bool,
 
     pub backend: Option<Backend>,
     // -- global: IPC server --

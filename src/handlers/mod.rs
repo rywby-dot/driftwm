@@ -164,6 +164,7 @@ impl WaylandDndGrabHandler for DriftWm {
         });
         match type_ {
             dnd::GrabType::Pointer => {
+                self.pointer_dnd_active = true;
                 let pointer = seat.get_pointer().unwrap();
                 let start_data = pointer.grab_start_data().unwrap();
                 let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
@@ -187,6 +188,10 @@ impl dnd::DndGrabHandler for DriftWm {
         _location: Point<f64, Logical>,
     ) {
         self.dnd_icon = None;
+        self.pointer_dnd_active = false;
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            self.clear_edge_pan(&output);
+        }
     }
 }
 
