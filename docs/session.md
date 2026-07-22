@@ -21,7 +21,7 @@ live window had, so the footprint doesn't shift:
 
 It's draggable, resizable, raisable, and focusable like any window. Pressing
 `Enter` while it's focused, or clicking/tapping the centered name, relaunches
-the app; while the relaunch is pending the name reads `<app> — launching…`. The
+the app; while the relaunch is pending the name reads `<app> launching…`. The
 new window takes over the stand-in's exact geometry and z-order slot. Firing
 `suspend-window` again on a focused suspended window dismisses it — the put-away
 gesture, repeated, escalates to "gone".

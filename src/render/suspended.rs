@@ -47,7 +47,7 @@ pub(crate) fn ensure_label(
     }
 
     let text = if launching {
-        format!("{} — launching…", s.identity.display_name)
+        format!("{} launching…", s.identity.display_name)
     } else {
         s.identity.display_name.clone()
     };
