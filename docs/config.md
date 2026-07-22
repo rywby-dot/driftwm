@@ -756,6 +756,12 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 "mod+g" = "fill-window"
 ```
 
+**Example: suspend-window (unbound by default)**
+
+```toml
+"mod+s" = "suspend-window"
+```
+
 ## `[mouse]`
 
 ### `resize_on_border`

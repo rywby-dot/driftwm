@@ -382,6 +382,8 @@
 # # "alt+shift" = "switch-layout next"
 # # Example: fill-window (unbound by default)
 # # "mod+g" = "fill-window"
+# # Example: suspend-window (unbound by default)
+# # "mod+s" = "suspend-window"
 
 [mouse]
 # # When true (default), dragging a window's edge or corner resizes it via the
