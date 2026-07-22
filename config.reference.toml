@@ -20,19 +20,6 @@
 # # Moving to empty canvas keeps focus; click empty canvas to unfocus.
 # focus_follows_mouse = false
 
-# # Suspend instead of close when a window is closed by the client
-# # (titlebar X, in-app quit). close-window bindings, `msg close`, and
-# # taskbar closes still close for real. Per-window overridable via a
-# # `suspend_on_close` window rule. See docs/session.md.
-# suspend_on_close = false
-
-# # Restore your canvas after a restart: on quit or logout, windows that
-# # resolve to a .desktop entry are saved and come back as suspended windows
-# # on the next launch (nothing auto-launches). Suspended windows are saved
-# # to ~/.local/state/driftwm/session.json regardless of this setting; it
-# # only controls whether still-open windows are saved too. See docs/session.md.
-# restore_session = false
-
 # # Where new windows spawn when no window rule positions them:
 # #   "center"  — viewport center; camera animates to the new window.
 # #   "cursor"           — centered on the cursor (clamped to the active output's
@@ -55,6 +42,26 @@
 # #   systemctl --user mask xdg-desktop-autostart.target
 # # Example:
 # # autostart = ["waybar", "swaync"]
+
+# ## Session
+# # Persist your canvas across restarts. Suspended windows are always saved to
+# # ~/.local/state/driftwm/session.json; these flags control the rest.
+[session]
+# # Suspend instead of close when a window is closed by the client
+# # (titlebar X, in-app quit). close-window bindings, `msg close`, and
+# # taskbar closes still close for real. Per-window overridable via a
+# # `suspend_on_close` window rule. See docs/session.md.
+# suspend_on_close = false
+
+# # Restore still-open windows after a restart: on quit or logout, windows
+# # that resolve to a .desktop entry are saved and come back as suspended
+# # windows on the next launch (nothing auto-launches). See docs/session.md.
+# restore_windows = false
+
+# # Restore each output's camera position and zoom from the saved session on
+# # the next launch. Off by default, so a fresh start centers every output.
+# # Read at launch: a mid-session change applies on the next launch.
+# restore_camera = false
 
 [env]
 # # Environment variables set before any clients launch.
@@ -678,7 +685,7 @@
 # #                ignores pan/zoom, floats above normal windows (PiP, toolbars).
 # #                `position` becomes output-relative; movable unless widget = true.
 # #                Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
-# #   suspend_on_close — override the global suspend_on_close for matched windows
+# #   suspend_on_close — override [session].suspend_on_close for matched windows
 # #                (true / false). Escape hatch for terminals and scratchpads that
 # #                should always really close (or always suspend). (default: inherit)
 # #   decoration — overrides [decorations] default_mode for matched windows.

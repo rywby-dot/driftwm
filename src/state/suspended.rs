@@ -15,6 +15,7 @@ use smithay::desktop::Window;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Logical, Rectangle, SERIAL_COUNTER, Size};
+use smithay::wayland::compositor::{BufferAssignment, SurfaceAttributes, with_states};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::xdg_activation::XdgActivationToken;
 
@@ -35,6 +36,23 @@ pub struct SuspendMark {
     pub rect: Rectangle<i32, Logical>,
     pub title: String,
     pub deadline: Instant,
+}
+
+/// The markless-conversion inputs captured the instant a mapped toplevel
+/// unmaps (a null-buffer commit). smithay resets the xdg role on unmap, so by
+/// the time `toplevel_destroyed` runs on a client that unmaps before destroying,
+/// the app_id / title / parent / geometry are all gone — an eligible close then
+/// resolves to an empty identity and vanishes instead of leaving a stand-in.
+/// The snapshot is consumed by the destroy that follows and dropped if the
+/// surface remaps (an app that unmaps to hide must never leave a stand-in).
+pub struct UnmapSnapshot {
+    pub app_id: String,
+    pub title: String,
+    pub is_widget: bool,
+    pub has_parent: bool,
+    pub is_modal: bool,
+    pub rect: Rectangle<i32, Logical>,
+    pub has_bar: bool,
 }
 
 /// How long a suspend / real-close mark stays live. A client that refuses to
@@ -532,6 +550,69 @@ impl DriftWm {
             .insert(surface.id(), Instant::now() + MARK_TTL);
     }
 
+    /// Runs as a pre-commit hook: snapshot the markless-conversion inputs the
+    /// instant a mapped toplevel unmaps, before the xdg role reset on the null
+    /// buffer wipes them. Registered ahead of the role-reset hook, so the reads
+    /// here still see the pre-unmap identity, geometry, and decoration state.
+    /// A remap (a fresh buffer) drops any stale snapshot; every other commit is
+    /// a no-op.
+    pub fn capture_unmap_snapshot(&mut self, surface: &WlSurface) {
+        enum Change {
+            Unmap,
+            Remap,
+            Other,
+        }
+        let change = with_states(surface, |states| {
+            match states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .pending()
+                .buffer
+            {
+                Some(BufferAssignment::Removed) => Change::Unmap,
+                Some(BufferAssignment::NewBuffer(_)) => Change::Remap,
+                None => Change::Other,
+            }
+        });
+        match change {
+            Change::Unmap => {}
+            Change::Remap => {
+                // An app that unmaps to hide and shows itself again must never
+                // leave a stand-in behind on a later close.
+                self.unmap_snapshots.remove(&surface.id());
+                return;
+            }
+            Change::Other => return,
+        }
+
+        let Some(window) = self.window_for_surface(surface) else {
+            return;
+        };
+        // The initial commit can also carry a null buffer; only a currently
+        // mapped window (non-zero geometry, still intact this side of the role
+        // reset) is genuinely unmapping.
+        let live = window.geometry().size;
+        if live.w <= 0 || live.h <= 0 {
+            return;
+        }
+        let has_bar = self
+            .decorations
+            .contains_key(&DecorationKey::Surface(surface.id()));
+        let rect = self.markless_suspend_rect(&window, surface);
+        self.unmap_snapshots.insert(
+            surface.id(),
+            UnmapSnapshot {
+                app_id: window.app_id_or_class().unwrap_or_default(),
+                title: window.window_title().unwrap_or_default(),
+                is_widget: window.is_widget(),
+                has_parent: window.parent_surface().is_some(),
+                is_modal: window.is_modal(),
+                rect,
+                has_bar,
+            },
+        );
+    }
+
     /// Resolve a surface `app_id` to a launchable identity, using the warmed
     /// desktop-entry cache (built synchronously on the first miss if the warm
     /// hasn't landed). Refreshes on directory-mtime change (cheap).
@@ -553,7 +634,7 @@ impl DriftWm {
         self.config
             .resolve_window_rules(app_id, title)
             .and_then(|r| r.suspend_on_close)
-            .unwrap_or(self.config.suspend_on_close)
+            .unwrap_or(self.config.session.suspend_on_close)
     }
 
     /// Decide whether a destroying `window` converts into a suspended window,
@@ -585,6 +666,11 @@ impl DriftWm {
             .suspend_marks
             .remove(&surface.id())
             .filter(|mark| mark.deadline > now);
+        // A client that unmaps before destroying loses its role state on the
+        // unmap commit; the snapshot taken then carries the eligibility inputs
+        // and pre-unmap footprint that the live reads below can no longer see.
+        // Consumed here whichever branch wins, so it never outlives the destroy.
+        let snapshot = self.unmap_snapshots.remove(&surface.id());
         if let Some(real) = real_close_deadline
             && suspend_mark
                 .as_ref()
@@ -592,12 +678,15 @@ impl DriftWm {
         {
             return None;
         }
-        // Read while the surface is still live (before `cleanup_surface_state`):
-        // an SSD window has a decoration entry, a CSD one doesn't. The stand-in
-        // keeps the same footprint — bar + body, or body only.
-        let has_bar = self
-            .decorations
-            .contains_key(&DecorationKey::Surface(surface.id()));
+        // An SSD window has a decoration entry, a CSD one doesn't, and the
+        // stand-in keeps the same footprint (bar + body, or body only). The
+        // decoration map can flip during an unmap-before-destroy teardown, so
+        // the snapshot's pre-unmap truth wins where present; otherwise the live
+        // read (still valid this side of `cleanup_surface_state`).
+        let has_bar = snapshot.as_ref().map(|s| s.has_bar).unwrap_or_else(|| {
+            self.decorations
+                .contains_key(&DecorationKey::Surface(surface.id()))
+        });
         if let Some(mark) = suspend_mark {
             return Some(SuspendConversion {
                 identity: mark.identity,
@@ -607,11 +696,27 @@ impl DriftWm {
             });
         }
 
-        if window.is_widget() || window.parent_surface().is_some() || window.is_modal() {
+        // Eligibility + identity read from the snapshot when the surface unmapped
+        // before destroying (the live reads are wiped by then), else live.
+        let (is_widget, has_parent, is_modal, app_id, title) = match &snapshot {
+            Some(s) => (
+                s.is_widget,
+                s.has_parent,
+                s.is_modal,
+                s.app_id.clone(),
+                s.title.clone(),
+            ),
+            None => (
+                window.is_widget(),
+                window.parent_surface().is_some(),
+                window.is_modal(),
+                window.app_id_or_class().unwrap_or_default(),
+                window.window_title().unwrap_or_default(),
+            ),
+        };
+        if is_widget || has_parent || is_modal {
             return None;
         }
-        let app_id = window.app_id_or_class().unwrap_or_default();
-        let title = window.window_title().unwrap_or_default();
         if !self.resolve_suspend_on_close(&app_id, &title) {
             return None;
         }
@@ -619,9 +724,11 @@ impl DriftWm {
         // A fullscreen self-close reports the fullscreen buffer size at its
         // camera park, not the windowed rect — the pre-fullscreen saved rect
         // (same source the explicit action and the shutdown serializer use)
-        // seats the stand-in where the window actually was.
-        let rect =
-            fullscreen_restore_rect.unwrap_or_else(|| self.markless_suspend_rect(window, surface));
+        // seats the stand-in where the window actually was. Failing that, the
+        // pre-unmap snapshot rect, then the live markless rect.
+        let rect = fullscreen_restore_rect
+            .or_else(|| snapshot.as_ref().map(|s| s.rect))
+            .unwrap_or_else(|| self.markless_suspend_rect(window, surface));
         Some(SuspendConversion {
             identity,
             rect,

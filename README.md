@@ -229,8 +229,9 @@ canvas spot — press `Enter` or click its name to bring the app right back, in
 the same place. `suspend_on_close` does this automatically for every
 client-initiated close (including the title-bar `×`, which is otherwise
 indistinguishable from the app quitting) — cheap crash recovery as a side
-effect. `restore_session` saves your whole canvas on quit/logout and restores
-it (dormant, nothing auto-launches) on the next start.
+effect. `[session]` `restore_windows` saves your whole canvas on quit/logout
+and restores it (dormant, nothing auto-launches) on the next start, with
+`restore_camera` bringing each output's view back too.
 
 See [docs/session.md](docs/session.md).
 

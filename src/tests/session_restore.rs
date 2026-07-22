@@ -1,5 +1,5 @@
 //! Durable session store + restore: the quit-serialize round-trip, origin
-//! filtering with carry-forward when `restore_session` is off, fresh-boot camera
+//! filtering with carry-forward when `restore_windows` is off, fresh-boot camera
 //! seeding, and the immediate write on create/dismiss. The fixture drives the
 //! same `serialize_session_on_shutdown` the main.rs choke point calls; the
 //! post-`run()` wiring itself (Quit + signalfd both reaching it) is hardware
@@ -20,10 +20,10 @@ use crate::state::{StageWindow, SuspendedWindow};
 use super::real::TempDir;
 use super::{Fixture, map_window, window_by_app_id};
 
-/// SSD-on config with `restore_session` set as asked.
+/// SSD-on config with `[session].restore_windows` set as asked.
 fn config_restore(on: bool) -> Config {
     Config::from_toml(&format!(
-        "restore_session = {on}\n[decorations]\ndefault_mode = \"server\"\n"
+        "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n"
     ))
     .unwrap()
 }
@@ -81,7 +81,7 @@ fn entry(id: u64, app: &str, origin: Origin) -> SessionEntry {
     }
 }
 
-/// Serialize live windows on quit (`restore_session = true`), then a fresh
+/// Serialize live windows on quit (`restore_windows = true`), then a fresh
 /// `DriftWm` materializes them in z-order at their exact rects with `Quit`
 /// origin. Drives the factored serialize fn the choke point calls.
 #[test]
@@ -200,7 +200,7 @@ fn restored_stand_in_has_clickable_label() {
     f.state().dismiss_suspended(sid);
 }
 
-/// With `restore_session` off, an explicit entry materializes but a quit entry
+/// With `restore_windows` off, an explicit entry materializes but a quit entry
 /// does not — and the quit entry is carried forward on the next rewrite, so a
 /// flag-off session never destroys the saved session.
 #[test]
@@ -273,7 +273,7 @@ fn restore_flip_on_drops_carried_quit_for_relaunched_app() {
     map_at(&mut f, id, "onlyquit", (400, 300), (300, 300));
 
     // Config hot-reload flips restore on; shutdown serializes the live windows.
-    f.state().config.restore_session = true;
+    f.state().config.session.restore_windows = true;
     f.state().serialize_session_on_shutdown();
 
     // The app is written exactly once (the live window), not duplicated by the
@@ -323,7 +323,7 @@ fn restore_flip_on_preserves_unrelaunched_carried_quit() {
     map_at(&mut f, id, "appa", (400, 300), (300, 300));
 
     // Flip restore on, then quit.
-    f.state().config.restore_session = true;
+    f.state().config.session.restore_windows = true;
     f.state().serialize_session_on_shutdown();
 
     let after = session::read(&path);
@@ -343,9 +343,9 @@ fn restore_flip_on_preserves_unrelaunched_carried_quit() {
     );
 }
 
-/// A durable per-output camera seeds a freshly connected output on fresh boot
-/// (no runtime entry). Runtime-wins is exercised by the `merge_saved_cameras`
-/// unit test.
+/// With `[session].restore_camera` on, a durable per-output camera seeds a
+/// freshly connected output on fresh boot (no runtime entry). Runtime-wins is
+/// exercised by the `merge_saved_cameras` unit test.
 #[test]
 fn durable_camera_seeds_fresh_boot() {
     let tmp = TempDir::new();
@@ -370,6 +370,7 @@ fn durable_camera_seeds_fresh_boot() {
     session::write(&path, &envelope, false).unwrap();
 
     let mut f = Fixture::with_config(config_restore(false));
+    f.state().config.session.restore_camera = true;
     f.state().session_store.path = Some(path.clone());
     f.state().load_session();
 
@@ -451,6 +452,7 @@ fn invalid_zoom_seed_is_ignored_and_reserializes_sane() {
     session::write(&path, &envelope, false).unwrap();
 
     let mut f = Fixture::with_config(config_restore(false));
+    f.state().config.session.restore_camera = true;
     f.state().session_store.path = Some(path.clone());
     f.state().load_session();
 
@@ -483,6 +485,71 @@ fn invalid_zoom_seed_is_ignored_and_reserializes_sane() {
         Some(1.0),
         "the corrupt zoom self-healed on the next write"
     );
+}
+
+/// With `restore_camera` off (the default), a durable per-output camera is not
+/// seeded — the output connects at its default centered camera — while saved
+/// windows still materialize.
+#[test]
+fn restore_camera_off_skips_seed_but_materializes_windows() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "HEADLESS-1".to_string(),
+        SessionOutput {
+            camera: [-1234.0, -5678.0],
+            zoom: 0.75,
+        },
+    );
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        saved_at: 0,
+        // An Explicit entry materializes regardless of restore_windows, so this
+        // isolates the camera flag.
+        entries: vec![entry(1, "good", Origin::Explicit)],
+        outputs,
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Default config: restore_camera is off.
+    let mut f = Fixture::with_config(Config::default());
+    assert!(
+        !f.state().config.session.restore_camera,
+        "restore_camera defaults off"
+    );
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    // No durable camera seed was stashed.
+    assert!(
+        f.state().session_store.durable_cameras.is_empty(),
+        "restore_camera off skips the durable camera seed"
+    );
+    // The saved window still came back.
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1, "the saved window materialized");
+    assert_eq!(restored[0].0.identity.app_id, "good");
+
+    // The output connects at its default centered camera, not the saved one.
+    let seed = f.state().session_store.durable_cameras.clone();
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
+    let (camera, zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert_eq!(
+        camera,
+        Point::from((-960.0, -540.0)),
+        "default centered camera"
+    );
+    assert_eq!(zoom, 1.0, "default zoom");
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
 }
 
 /// A create writes the durable file immediately; a dismiss rewrites it. Drives

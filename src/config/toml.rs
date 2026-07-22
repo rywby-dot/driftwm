@@ -7,12 +7,7 @@ use serde::{Deserialize, Serialize};
 pub(super) struct ConfigFile {
     pub mod_key: Option<String>,
     pub focus_follows_mouse: Option<bool>,
-    /// Convert client-initiated closes into suspended windows instead of
-    /// destroying them. Per-window overridable via a `suspend_on_close` rule.
-    pub suspend_on_close: Option<bool>,
-    /// Save eligible windows on graceful shutdown and bring them back as
-    /// suspended windows on the next launch.
-    pub restore_session: Option<bool>,
+    pub session: SessionFileConfig,
     pub input: InputConfig,
     pub cursor: CursorConfig,
     pub navigation: NavigationConfig,
@@ -155,6 +150,21 @@ pub(super) struct EdgePanConfig {
     /// Delay before edge-pan starts at an edge bordering another output (ms).
     /// Defaults to 120. Set to 0 to disable.
     pub latency_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct SessionFileConfig {
+    /// Convert client-initiated closes into suspended windows instead of
+    /// destroying them. Per-window overridable via a `suspend_on_close` rule.
+    pub suspend_on_close: Option<bool>,
+    /// Save eligible windows on graceful shutdown and bring them back as
+    /// suspended windows on the next launch.
+    pub restore_windows: Option<bool>,
+    /// Seed each output's camera and zoom from the durable session on the next
+    /// launch. Off by default, so the default config starts every output at its
+    /// centered camera.
+    pub restore_camera: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

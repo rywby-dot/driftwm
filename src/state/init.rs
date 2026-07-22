@@ -342,6 +342,7 @@ impl DriftWm {
             stable_snap_rects: HashMap::new(),
             suspend_marks: HashMap::new(),
             real_close_marks: HashMap::new(),
+            unmap_snapshots: HashMap::new(),
             desktop_entry_cache: None,
             next_suspended_id: 0,
             pending_relaunches: BTreeMap::new(),

@@ -65,6 +65,7 @@ never come back.
 ## `suspend_on_close`
 
 ```toml
+[session]
 suspend_on_close = true
 ```
 
@@ -97,10 +98,11 @@ Escape hatches, for closes you want to stay real closes:
 > about: with `suspend_on_close` on, a crashed app's window and position
 > aren't just gone, and `Enter` brings it right back.
 
-## `restore_session`
+## `restore_windows`
 
 ```toml
-restore_session = true
+[session]
+restore_windows = true
 ```
 
 On a graceful shutdown — `quit`/`Super+Ctrl+Shift+Q` or a logout that sends
@@ -112,9 +114,22 @@ entirely — those aren't "graceful."
 
 Suspended windows themselves are **always** saved and restored, regardless of
 this flag — they're already an explicit, user-visible artifact on your canvas.
-`restore_session` only decides whether still-_open_ windows get saved too on
-the way out. Per-output camera position and zoom are restored across restarts
-as well.
+`restore_windows` only decides whether still-_open_ windows get saved too on
+the way out.
+
+## `restore_camera`
+
+```toml
+[session]
+restore_camera = true
+```
+
+With this on, each output's camera position and zoom are restored across
+restarts too, so your canvas comes back framed exactly where you left it. It's
+off by default — the default config starts every output at its centered camera.
+The flag is read at launch, so flipping it mid-session takes effect on the next
+launch, not immediately. (Cameras are always saved regardless, so turning it on
+later restores what your session had.)
 
 The session lives at `~/.local/state/driftwm/session.json` (respects
 `XDG_STATE_HOME`). It's written through immediately on anything you'd notice

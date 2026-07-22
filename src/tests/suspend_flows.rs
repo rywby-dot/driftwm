@@ -18,7 +18,7 @@ use crate::state::{StageWindow, SuspendedId};
 use super::real::TempDir;
 use super::{Fixture, map_window, server_surface, window_by_app_id};
 
-/// SSD-on config plus an optional top-level / per-rule `suspend_on_close` body.
+/// SSD-on config plus an optional `[session]` / per-rule `suspend_on_close` body.
 fn config_with(body: &str) -> Config {
     Config::from_toml(&format!(
         "{body}\n[decorations]\ndefault_mode = \"server\"\n"
@@ -317,7 +317,7 @@ fn explicit_suspend_of_fullscreen_uses_windowed_rect() {
 #[test]
 fn suspend_on_close_of_fullscreen_uses_windowed_rect() {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["myapp"]);
     let id = f.add_client();
@@ -424,7 +424,7 @@ fn suspend_mark_expires_then_close_is_plain() {
 #[test]
 fn real_close_mark_expires_allowing_conversion() {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["myapp"]);
     let id = f.add_client();
@@ -502,7 +502,7 @@ fn later_mark_wins_when_both_are_live() {
 #[test]
 fn suspend_on_close_client_self_close_converts() {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["myapp"]);
     let id = f.add_client();
@@ -521,7 +521,7 @@ fn suspend_on_close_compositor_closes_do_not_convert() {
     // close-window action.
     {
         let tmp = TempDir::new();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["myapp"]);
         let id = f.add_client();
@@ -540,7 +540,7 @@ fn suspend_on_close_compositor_closes_do_not_convert() {
     // msg close.
     {
         let tmp = TempDir::new();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["myapp"]);
         let id = f.add_client();
@@ -558,7 +558,7 @@ fn suspend_on_close_compositor_closes_do_not_convert() {
     {
         use driftwm::protocols::foreign_toplevel::ForeignToplevelHandler;
         let tmp = TempDir::new();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["myapp"]);
         let id = f.add_client();
@@ -580,7 +580,7 @@ fn suspend_on_close_compositor_closes_do_not_convert() {
 #[test]
 fn suspend_on_close_dialog_with_parent_does_not_convert() {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["parent", "dialog"]);
     // Parent + dialog share one client — a toplevel's parent must be its own
@@ -679,7 +679,7 @@ fn suspend_on_close_rule_override_wins() {
     {
         let tmp = TempDir::new();
         let mut f = Fixture::with_config(config_with(
-            "suspend_on_close = true\n[[window_rules]]\napp_id = \"term\"\nsuspend_on_close = false",
+            "[session]\nsuspend_on_close = true\n[[window_rules]]\napp_id = \"term\"\nsuspend_on_close = false",
         ));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["term"]);
@@ -694,7 +694,7 @@ fn suspend_on_close_rule_override_wins() {
     {
         let tmp = TempDir::new();
         let mut f = Fixture::with_config(config_with(
-            "suspend_on_close = false\n[[window_rules]]\napp_id = \"keepme\"\nsuspend_on_close = true",
+            "[session]\nsuspend_on_close = false\n[[window_rules]]\napp_id = \"keepme\"\nsuspend_on_close = true",
         ));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["keepme"]);
@@ -718,7 +718,7 @@ fn suspend_on_close_terminal_and_widget_ineligible() {
             "[Desktop Entry]\nType=Application\nName=Shell\nExec=shellapp\nTerminal=true\n",
         )
         .unwrap();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         f.state().desktop_entry_cache =
             Some(DesktopEntryCache::new(vec![tmp.path().to_path_buf()]));
@@ -736,7 +736,7 @@ fn suspend_on_close_terminal_and_widget_ineligible() {
     {
         let tmp = TempDir::new();
         let mut f = Fixture::with_config(config_with(
-            "suspend_on_close = true\n[[window_rules]]\napp_id = \"panel\"\nwidget = true",
+            "[session]\nsuspend_on_close = true\n[[window_rules]]\napp_id = \"panel\"\nwidget = true",
         ));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["panel"]);
@@ -756,7 +756,7 @@ fn suspend_on_close_geometry_prefers_stable_when_live_shrinks() {
     // stable larger than live → the stand-in keeps the stable (settled) size.
     {
         let tmp = TempDir::new();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["myapp"]);
         let id = f.add_client();
@@ -775,7 +775,7 @@ fn suspend_on_close_geometry_prefers_stable_when_live_shrinks() {
     // stable smaller than live → live is authoritative (cached rect is stale).
     {
         let tmp = TempDir::new();
-        let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+        let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
         f.add_output(1, (1920, 1080));
         inject_cache(&mut f, &tmp, &["myapp"]);
         let id = f.add_client();
@@ -933,7 +933,7 @@ fn fill_action_on_suspended_focus_is_noop() {
 #[test]
 fn suspend_clears_fill_state_through_adoption() {
     let tmp = TempDir::new();
-    let mut f = Fixture::with_config(config_with("suspend_on_close = true"));
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
     f.add_output(1, (1920, 1080));
     inject_cache(&mut f, &tmp, &["myapp"]);
     let id = f.add_client();
@@ -1254,6 +1254,167 @@ fn screenshot_window_resolves_suspended_by_id() {
     );
 
     f.state().dismiss_suspended(sid);
+}
+
+/// Client unmap: attach a null buffer and commit, then let the server's
+/// refresh/frame logic run — mirroring the unmap-before-destroy teardown some
+/// toolkits perform (a null-buffer commit that resets the xdg role) with server
+/// work landing between the unmap and the destroys.
+fn client_unmap(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+) {
+    f.client(id).window(surface).attach_null();
+    f.client(id).window(surface).commit();
+    f.roundtrip(id);
+    f.dispatch();
+}
+
+/// `suspend_on_close` converts a client that unmaps its toplevel before
+/// destroying it (a null-buffer commit that resets the xdg role, wiping
+/// app_id / geometry). An SSD-origin window keeps its bar; a CSD one is
+/// body-only — the footprint the pre-unmap snapshot captured is preserved.
+#[test]
+fn suspend_on_close_converts_on_unmap_before_destroy() {
+    // SSD origin: the stand-in carries a bar.
+    {
+        let tmp = TempDir::new();
+        let mut f = Fixture::with_config(
+            Config::from_toml(
+                "[session]\nsuspend_on_close = true\n[[window_rules]]\napp_id = \"myapp\"\ndecoration = \"server\"\n",
+            )
+            .unwrap(),
+        );
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &tmp, &["myapp"]);
+        let id = f.add_client();
+        let (surface, _target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+        origin_view(&mut f);
+
+        client_unmap(&mut f, id, &surface);
+        client_close(&mut f, id, &surface);
+
+        let sid = suspended_id(&mut f).expect("unmap-then-destroy converted under the flag");
+        let s = f.state().find_suspended(sid).unwrap();
+        assert!(s.has_bar, "an SSD-origin stand-in keeps its bar");
+        let elem = StageWindow::Suspended(s.clone());
+        assert_eq!(
+            f.state().stage.position_of(&elem),
+            Some(Point::from((200, 200))),
+            "the stand-in sits at the pre-unmap position"
+        );
+        assert_eq!(
+            s.size.get(),
+            Size::from((400, 300)),
+            "the pre-unmap body size"
+        );
+        f.state().dismiss_suspended(sid);
+    }
+    // CSD origin: the stand-in is body-only.
+    {
+        let tmp = TempDir::new();
+        let mut f = Fixture::with_config(
+            Config::from_toml(
+                "[session]\nsuspend_on_close = true\n[decorations]\ndefault_mode = \"client\"\n",
+            )
+            .unwrap(),
+        );
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &tmp, &["myapp"]);
+        let id = f.add_client();
+        let (surface, _target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+        origin_view(&mut f);
+
+        client_unmap(&mut f, id, &surface);
+        client_close(&mut f, id, &surface);
+
+        let sid = suspended_id(&mut f).expect("unmap-then-destroy converted under the flag");
+        let s = f.state().find_suspended(sid).unwrap();
+        assert!(!s.has_bar, "a CSD-origin stand-in is body-only");
+        f.state().dismiss_suspended(sid);
+    }
+}
+
+/// An app that unmaps to hide and remaps to show (a null-buffer commit followed
+/// by a fresh buffer) never leaves a stand-in: the unmap alone does not convert,
+/// the remap drops the snapshot, and the live window is still on the stage.
+#[test]
+fn unmap_then_remap_does_not_convert_or_leak() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (surface, _target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+
+    // Unmap: a snapshot is stashed, but no conversion happens without a destroy.
+    client_unmap(&mut f, id, &surface);
+    assert!(
+        suspended_id(&mut f).is_none(),
+        "an unmap alone leaves no stand-in"
+    );
+    assert_eq!(
+        f.state().debug_counters()["unmap_snapshots"],
+        1,
+        "the unmap stashed a snapshot"
+    );
+
+    // Remap: re-ack the role's fresh initial configure, attach a buffer, commit.
+    // (The role reset wiped the app_id server-side; the client library doesn't
+    // re-send it, so the remapped window is identified by its live stage entry,
+    // not app_id.)
+    let window = f.client(id).window(&surface);
+    window.set_size(400, 300);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    assert_eq!(
+        f.state().debug_counters()["unmap_snapshots"],
+        0,
+        "the remap dropped the stale snapshot"
+    );
+    assert!(suspended_id(&mut f).is_none(), "no stand-in after a remap");
+    let live = f
+        .state()
+        .stage
+        .windows()
+        .find_map(|w| w.client().cloned())
+        .expect("the remapped window is live on the stage, not converted");
+
+    // A real close for cleanup (the flag is on, so mark it).
+    f.state().mark_real_close(&live);
+    client_close(&mut f, id, &surface);
+    assert_eq!(f.state().stage.windows().count(), 0);
+}
+
+/// A live real-close mark still wins over the unmap snapshot: a compositor close
+/// (close-window) on a client that then unmaps before destroying stays a real
+/// close, no stand-in.
+#[test]
+fn real_close_mark_wins_over_unmap_before_destroy() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(config_with("[session]\nsuspend_on_close = true"));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    let id = f.add_client();
+    let (surface, target) = map_at(&mut f, id, "myapp", (400, 300), (200, 200));
+    origin_view(&mut f);
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&target, serial);
+
+    // close-window plants a real-close mark, then the client unmaps and destroys.
+    f.state().execute_action(&Action::CloseWindow);
+    client_unmap(&mut f, id, &surface);
+    client_close(&mut f, id, &surface);
+
+    assert!(
+        suspended_id(&mut f).is_none(),
+        "a real-close mark keeps an unmap-then-destroy a real close"
+    );
+    assert_eq!(f.state().stage.windows().count(), 0);
 }
 
 /// The mark maps are exposed as debug counters (leak tracking + fixture

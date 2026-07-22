@@ -76,6 +76,15 @@ impl CompositorHandler for DriftWm {
             });
         });
 
+        // Snapshot a mapped toplevel's markless-conversion inputs the instant it
+        // unmaps. Registered before smithay's xdg role-reset hook (which fires on
+        // the null-buffer commit and wipes app_id / title / geometry), so a
+        // client that unmaps before destroying still converts under
+        // `suspend_on_close`.
+        add_pre_commit_hook::<DriftWm, _>(surface, |state, _dh, surface| {
+            state.capture_unmap_snapshot(surface);
+        });
+
         // DMA-BUF readiness blocker. Must inspect the *pending* buffer here
         // (not in commit()) so the blocker delays the commit it belongs to —
         // by commit() time pending has already merged into current.

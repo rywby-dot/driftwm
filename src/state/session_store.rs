@@ -4,7 +4,7 @@
 //!
 //! Cadence: a create or dismiss writes immediately; a move or resize arms a
 //! short debounce timer; graceful shutdown fsync's a final write. Suspended
-//! windows are saved regardless of `restore_session`; live windows are saved
+//! windows are saved regardless of `restore_windows`; live windows are saved
 //! as `Quit` records only when it's on. `path == None` disables everything (a
 //! winit dev session without `--session-file`, or a fixture without an
 //! injected path).
@@ -57,17 +57,22 @@ impl DriftWm {
             return;
         };
         let envelope = session::read(&path);
-        self.session_store.durable_cameras = envelope
-            .outputs
-            .iter()
-            .filter(|(_, o)| valid_camera_seed(Point::from((o.camera[0], o.camera[1])), o.zoom))
-            .map(|(name, o)| {
-                (
-                    name.clone(),
-                    (Point::from((o.camera[0], o.camera[1])), o.zoom),
-                )
-            })
-            .collect();
+        // Camera restore is opt-in: without it, outputs start at their default
+        // centered camera. The write side stays unconditional, so flipping it
+        // back on later just works on the next launch.
+        if self.config.session.restore_camera {
+            self.session_store.durable_cameras = envelope
+                .outputs
+                .iter()
+                .filter(|(_, o)| valid_camera_seed(Point::from((o.camera[0], o.camera[1])), o.zoom))
+                .map(|(name, o)| {
+                    (
+                        name.clone(),
+                        (Point::from((o.camera[0], o.camera[1])), o.zoom),
+                    )
+                })
+                .collect();
+        }
         // Drop entries with out-of-range geometry entirely — neither
         // materialized nor carried forward, so a hand-edit or a flipped byte
         // that would panic `Size::from` (debug) or overflow `rule_to_internal`
@@ -78,7 +83,7 @@ impl DriftWm {
             .filter(valid_entry_geometry)
             .collect();
         let (materialize, carried) =
-            session::partition_for_restore(entries, self.config.restore_session);
+            session::partition_for_restore(entries, self.config.session.restore_windows);
         self.session_store.carried_forward = carried;
         for entry in materialize {
             self.materialize_entry(entry);
@@ -157,12 +162,12 @@ impl DriftWm {
 
     /// Flush the durable session at graceful shutdown (keybind quit or
     /// SIGTERM/SIGHUP), fsync'd. Suspended windows are always saved; live
-    /// windows are added as `Quit` records only when `restore_session` is on.
+    /// windows are added as `Quit` records only when `restore_windows` is on.
     pub fn serialize_session_on_shutdown(&mut self) {
         if self.session_store.path.is_none() {
             return;
         }
-        self.write_session(self.config.restore_session, true);
+        self.write_session(self.config.session.restore_windows, true);
     }
 
     /// Steady-state write: suspended windows + carried-forward + cameras, no

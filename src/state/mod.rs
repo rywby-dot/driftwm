@@ -26,7 +26,7 @@ pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
 pub use session_store::SessionStore;
 pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
-pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark};
+pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot};
 
 use smithay::{
     desktop::{PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window},
@@ -587,6 +587,13 @@ pub struct DriftWm {
     /// close can't real-close a crash days later.
     pub real_close_marks:
         HashMap<smithay::reexports::wayland_server::backend::ObjectId, std::time::Instant>,
+    /// Markless-conversion inputs captured when a mapped toplevel unmaps, so a
+    /// client that unmaps before destroying (which resets its xdg role and wipes
+    /// app_id / title / geometry) still converts under `suspend_on_close`. Keyed
+    /// by surface id; consumed by the destroy and dropped on remap. See
+    /// [`UnmapSnapshot`].
+    pub unmap_snapshots:
+        HashMap<smithay::reexports::wayland_server::backend::ObjectId, UnmapSnapshot>,
     /// Resolved desktop-entry database for identity + relaunch. Warmed on a
     /// background thread at startup (delivered by ping); a suspend before the
     /// warm lands builds it synchronously. `None` until either populates it.
@@ -1018,6 +1025,9 @@ impl DriftWm {
         self.pending_ssd.remove(&id);
         self.pending_recenter.remove(&id);
         self.stable_snap_rects.remove(&id);
+        // A crash (disconnect without an orderly destroy) skips
+        // `resolve_suspend_conversion`, so drop any unmap snapshot here too.
+        self.unmap_snapshots.remove(&id);
         self.pending_center.remove(surface);
         self.pending_size.remove(surface);
         self.pending_fit.remove(surface);
@@ -2299,6 +2309,7 @@ impl DriftWm {
             ("stable_snap_rects", self.stable_snap_rects.len()),
             ("suspend_marks", self.suspend_marks.len()),
             ("real_close_marks", self.real_close_marks.len()),
+            ("unmap_snapshots", self.unmap_snapshots.len()),
             ("pending_relaunches", self.pending_relaunches.len()),
             ("pending_adoptions", self.pending_adoptions.len()),
             (

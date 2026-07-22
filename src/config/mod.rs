@@ -121,10 +121,9 @@ fn context_table(context: BindingContext) -> &'static str {
     }
 }
 
+/// Session-persistence settings (`[session]`).
 #[derive(Debug, PartialEq)]
-pub struct Config {
-    pub mod_key: ModKey,
-    pub focus_follows_mouse: bool,
+pub struct SessionConfig {
     /// When true, a client-initiated close (titlebar X, in-app quit, shell exit)
     /// leaves a suspended window behind instead of destroying the window.
     /// Overridable per window rule. Read at close time, so hot-reload applies.
@@ -132,7 +131,19 @@ pub struct Config {
     /// When true, eligible windows are serialized on graceful shutdown (keybind
     /// quit or SIGTERM/SIGHUP) and materialized as suspended windows on the next
     /// launch. Read at use, so hot-reload applies.
-    pub restore_session: bool,
+    pub restore_windows: bool,
+    /// When true, each output's camera and zoom are seeded from the durable
+    /// session on the next launch. Read at load time, so a mid-session flip
+    /// takes effect on the next launch, not immediately.
+    pub restore_camera: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Config {
+    pub mod_key: ModKey,
+    pub focus_follows_mouse: bool,
+    /// Session persistence: close-to-suspend, window restore, and camera restore.
+    pub session: SessionConfig,
     /// Multiplier for trackpad scroll and gesture pan deltas. 1.0 = raw trackpad.
     pub trackpad_speed: f64,
     /// Multiplier for mouse drag pan (Mod+LMB or LMB on canvas). 1.0 = direct.
@@ -914,8 +925,11 @@ impl Config {
         let config = Self {
             mod_key,
             focus_follows_mouse: raw.focus_follows_mouse.unwrap_or(false),
-            suspend_on_close: raw.suspend_on_close.unwrap_or(false),
-            restore_session: raw.restore_session.unwrap_or(false),
+            session: SessionConfig {
+                suspend_on_close: raw.session.suspend_on_close.unwrap_or(false),
+                restore_windows: raw.session.restore_windows.unwrap_or(false),
+                restore_camera: raw.session.restore_camera.unwrap_or(false),
+            },
             trackpad_speed,
             mouse_speed,
             touch_speed,

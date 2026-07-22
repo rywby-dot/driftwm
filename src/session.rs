@@ -20,7 +20,7 @@ pub const VERSION: u32 = 1;
 
 /// Why a durable entry exists, which decides whether it materializes on restore.
 /// `Explicit` (a live suspend) always comes back; `Quit` (serialized at
-/// graceful shutdown) only when `restore_session` is on.
+/// graceful shutdown) only when `restore_windows` is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
@@ -150,11 +150,11 @@ pub fn write(path: &Path, envelope: &SessionEnvelope, fsync: bool) -> std::io::R
 /// destroys the saved session.
 pub fn partition_for_restore(
     entries: Vec<SessionEntry>,
-    restore_session: bool,
+    restore_windows: bool,
 ) -> (Vec<SessionEntry>, Vec<SessionEntry>) {
     entries
         .into_iter()
-        .partition(|e| restore_session || e.origin == Origin::Explicit)
+        .partition(|e| restore_windows || e.origin == Origin::Explicit)
 }
 
 /// Rename a bad file aside (`.<label>.<unix-ts>`) so startup can continue from
