@@ -262,10 +262,10 @@ impl DriftWm {
         let app_id = window.app_id_or_class().unwrap_or_default();
         let identity = self.resolve_identity(&app_id)?;
         let title = window.window_title().unwrap_or_default();
-        // A CSD window (no SSD bar) restores to a stand-in whose body is shrunk
-        // under the bar, so persist that shrunken body — the same rect a live
-        // suspend leaves, so restore + adopt reproduce the original footprint.
-        let csd = self.window_ssd_bar(window) == 0;
+        // A CSD window restores to a stand-in whose body is shrunk under the
+        // bar, so persist that shrunken body — the same rect a live suspend
+        // leaves, so restore + adopt reproduce the original footprint.
+        let csd = client.wl_surface().is_none_or(|s| self.surface_is_csd(&s));
         let (loc, size) = self.live_window_rect(&client);
         let body = self.standin_body_rect(Rectangle::new(loc, size), csd);
         let (x, y) = internal_to_rule(body.loc, body.size);

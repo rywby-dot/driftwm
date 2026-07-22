@@ -630,9 +630,7 @@ impl DriftWm {
         // A CSD window has no decoration entry; the stand-in records that origin
         // so adopt can hand back the full geometry (the bar it grows shrinks the
         // body, not the footprint).
-        let csd = !self
-            .decorations
-            .contains_key(&DecorationKey::Surface(surface.id()));
+        let csd = self.surface_is_csd(surface);
         let rect = self.markless_suspend_rect(&window, surface);
         self.unmap_snapshots.insert(
             surface.id(),
@@ -719,11 +717,10 @@ impl DriftWm {
         // unmap-before-destroy teardown, so the snapshot's pre-unmap truth wins
         // where present; otherwise the live read (still valid this side of
         // `cleanup_surface_state`).
-        let csd = snapshot.as_ref().map(|s| s.csd).unwrap_or_else(|| {
-            !self
-                .decorations
-                .contains_key(&DecorationKey::Surface(surface.id()))
-        });
+        let csd = snapshot
+            .as_ref()
+            .map(|s| s.csd)
+            .unwrap_or_else(|| self.surface_is_csd(surface));
         if let Some(mark) = suspend_mark {
             return Some(SuspendConversion {
                 identity: mark.identity,
@@ -807,6 +804,17 @@ impl DriftWm {
                 .unwrap_or(live),
         };
         Rectangle::new(loc, size)
+    }
+
+    /// Whether the window behind `surface` is client-decorated — the single
+    /// source of truth for the stand-in `csd` flag, shared by conversion and
+    /// quit-save so they can't drift. An SSD window owns a `decorations` entry
+    /// keyed by its surface; a CSD one never does. (Reading the entry, not
+    /// `window_ssd_bar == 0`, keeps it correct even at a zero title-bar height.)
+    pub(crate) fn surface_is_csd(&self, surface: &WlSurface) -> bool {
+        !self
+            .decorations
+            .contains_key(&DecorationKey::Surface(surface.id()))
     }
 
     /// The stand-in's stage rect (its body) for a conversion. An SSD origin
