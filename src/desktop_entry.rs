@@ -378,6 +378,69 @@ mod tests {
         format!("[Desktop Entry]\nType=Application\n{fields}\n")
     }
 
+    /// foot ships three sibling entries (`foot`, `footclient`, `foot-server`),
+    /// all `Terminal=false` (foot *is* a terminal; it is not launched inside
+    /// one) and none carrying `StartupWMClass`. foot's window app-id defaults to
+    /// `foot` (normal) / `footclient` (server mode), which match the stems
+    /// directly. All three must resolve to launchable entries: a real-world
+    /// shape check so a scan/dedup regression that drops foot is caught here.
+    #[test]
+    fn foot_family_resolves_from_real_world_shapes() {
+        let tmp = TempDir::new();
+        let home = tmp.subdir("home");
+        let system = tmp.subdir("system");
+        // System entries (as shipped by the foot package).
+        write_entry(
+            &system,
+            "foot.desktop",
+            &desktop("Name=Foot\nExec=foot\nTerminal=false\nCategories=System;TerminalEmulator;"),
+        );
+        write_entry(
+            &system,
+            "footclient.desktop",
+            &desktop(
+                "Name=Foot Client\nExec=footclient\nTerminal=false\nCategories=System;TerminalEmulator;",
+            ),
+        );
+        write_entry(
+            &system,
+            "foot-server.desktop",
+            &desktop(
+                "Name=Foot Server\nExec=foot --server\nTerminal=false\nCategories=System;TerminalEmulator;",
+            ),
+        );
+        // A user copy of foot/footclient shadows the system ones (data-home wins).
+        write_entry(
+            &home,
+            "foot.desktop",
+            &desktop("Name=Foot\nExec=foot\nTerminal=false"),
+        );
+        write_entry(
+            &home,
+            "footclient.desktop",
+            &desktop("Name=Foot Client\nExec=footclient\nTerminal=false"),
+        );
+
+        let cache = DesktopEntryCache::new(vec![home, system]);
+
+        let foot = cache.resolve("foot").expect("foot resolves");
+        assert_eq!(foot.desktop_id, "foot");
+        assert_eq!(cache.launch_command("foot").unwrap(), vec!["foot"]);
+
+        let client = cache.resolve("footclient").expect("footclient resolves");
+        assert_eq!(client.desktop_id, "footclient");
+        assert_eq!(
+            cache.launch_command("footclient").unwrap(),
+            vec!["footclient"]
+        );
+
+        // foot-server lives only in the system dir; its Exec keeps the argument.
+        assert_eq!(
+            cache.launch_command("foot-server").unwrap(),
+            vec!["foot", "--server"]
+        );
+    }
+
     #[test]
     fn resolves_by_exact_filename_stem() {
         let tmp = TempDir::new();
