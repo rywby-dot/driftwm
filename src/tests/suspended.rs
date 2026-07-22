@@ -747,6 +747,62 @@ fn auto_placement_obstacle_includes_bar_strip() {
     f.state().dismiss_suspended(sid);
 }
 
+/// A stand-in is a full auto-placement citizen, not just an obstacle: with a
+/// neighbor of the same frame gap-adjacent to the anchor, a new window lands in
+/// the exact same slot whether that neighbor is a live SSD window or a stand-in
+/// — so the stand-in is an eligible adjacency target, placed beside, not just
+/// avoided.
+#[test]
+fn auto_placement_treats_a_stand_in_like_a_window() {
+    // "nb" is SSD via a rule, so its live frame (bar + default border) matches a
+    // stand-in's; every other placement input is identical across the two scenes.
+    let toml = "[decorations]\ndefault_mode = \"server\"\n\
+                [[window_rules]]\napp_id = \"nb\"\ndecoration = \"server\"\n";
+
+    let place = |stand_in: bool| -> Option<(i32, i32)> {
+        let mut f = Fixture::with_config(Config::from_toml(toml).unwrap());
+        f.add_output(1, (1920, 1080));
+        let id = f.add_client();
+        map_window(&mut f, id, "anchor", (200, 200));
+        let placing_surface = map_window(&mut f, id, "placing", (200, 200));
+        origin_view(&mut f);
+        let anchor = window_by_app_id(&mut f, "anchor").unwrap();
+        let placing = window_by_app_id(&mut f, "placing").unwrap();
+        let _ = placing_surface;
+        f.state().map_window(
+            StageWindow::Client(anchor.clone()),
+            Point::from((500, 500)),
+            true,
+        );
+        // Neighbor gap-adjacent to the anchor's right edge, so it clusters.
+        let nb_pos = Point::from((760, 500));
+        if stand_in {
+            f.state()
+                .insert_suspended_for_test(1, nb_pos, Size::from((200, 200)), "nb", "NB");
+        } else {
+            let nb = f.add_client();
+            map_window(&mut f, nb, "nb", (200, 200));
+            let nb_win = window_by_app_id(&mut f, "nb").unwrap();
+            f.state()
+                .map_window(StageWindow::Client(nb_win), nb_pos, true);
+        }
+        let pos = f
+            .state()
+            .place_adjacent_to(&anchor, &placing, Size::from((200, 200)), 25);
+        // A throwaway measurement fixture — the scene is never torn down.
+        f.skip_baseline_check();
+        pos
+    };
+
+    let with_live = place(false);
+    let with_standin = place(true);
+    assert!(with_live.is_some(), "the live-neighbor scene finds a slot");
+    assert_eq!(
+        with_standin, with_live,
+        "a stand-in places a new window identically to a live window of the same frame"
+    );
+}
+
 /// Navigation parity: with no focused window, `center-window` (the nearest
 /// fallback) considers stand-ins, so it lands on the nearest one and sets the
 /// suspended focus intent — Enter then relaunches it.
