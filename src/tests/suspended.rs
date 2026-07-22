@@ -693,6 +693,64 @@ fn stand_in_body_is_focus_only() {
     }
 }
 
+/// A CSD-origin stand-in's bar is a real drag target and its close button
+/// really dismisses — the uniform chrome grammar isn't just hit-testing, the
+/// interactions it drives are the same as an SSD-origin stand-in's.
+#[test]
+fn csd_stand_in_bar_drags_and_close_button_dismisses() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let pointer = f.state().seat.get_pointer().unwrap();
+
+    // A bare press on the title-bar band starts a move grab.
+    let sid = f.state().insert_suspended_csd_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let serial = SERIAL_COUNTER.next_serial();
+    let bar_point = pt(500.0 + 50.0, 500.0 - 12.0);
+    let consumed = f.state().try_suspended_button(
+        &pointer,
+        bar_point,
+        BTN_LEFT,
+        serial,
+        ModifiersState::default(),
+    );
+    assert!(consumed);
+    assert!(
+        f.state().seat.get_pointer().unwrap().is_grabbed(),
+        "a bare press on the bar starts a move grab for a CSD-origin stand-in"
+    );
+    f.state().dismiss_suspended(sid);
+
+    // The close button dismisses it, same as an SSD-origin stand-in.
+    let sid2 = f.state().insert_suspended_csd_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let close = pt(500.0 + 400.0 - 20.0, 500.0 - 12.0);
+    let serial = SERIAL_COUNTER.next_serial();
+    let consumed = f.state().try_suspended_button(
+        &pointer,
+        close,
+        BTN_LEFT,
+        serial,
+        ModifiersState::default(),
+    );
+    assert!(consumed);
+    assert!(
+        f.state().find_suspended(sid2).is_none(),
+        "the close button dismisses a CSD-origin stand-in same as an SSD-origin one"
+    );
+}
+
 /// Auto-placement treats a suspended window as an obstacle, including its title
 /// bar strip above the content rect.
 #[test]
