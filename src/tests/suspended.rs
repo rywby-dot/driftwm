@@ -4,6 +4,7 @@
 //! production never builds a suspended element in this chunk.
 
 use driftwm::config::{BTN_LEFT, Config};
+use driftwm::layout::snap::SnapState;
 use smithay::input::keyboard::ModifiersState;
 use smithay::utils::{Point, Rectangle, SERIAL_COUNTER, Size};
 
@@ -728,10 +729,11 @@ fn center_nearest_reaches_a_stand_in() {
     f.state().dismiss_suspended(sid);
 }
 
-/// Suspended windows are excluded from snap/cluster (surface-gated
-/// `snap_rect_for`) but included in navigation extents (`visual_frame_rect`).
+/// A suspended stand-in is a snap target like any window: its `snap_rect_for`
+/// equals the frame the live window had (body + SSD bar + border), and it
+/// counts in `all_windows_with_snap_rects`.
 #[test]
-fn suspended_excluded_from_snap_included_in_navigation() {
+fn suspended_is_a_snap_target() {
     let mut f = Fixture::with_config(config_ssd());
     f.add_output(1, (1920, 1080));
     let id = f.add_client();
@@ -749,14 +751,308 @@ fn suspended_excluded_from_snap_included_in_navigation() {
 
     assert_eq!(
         f.state().all_windows_with_snap_rects().len(),
-        before,
-        "a suspended window is never a snap target"
+        before + 1,
+        "a suspended stand-in is a snap target"
     );
     let elem = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
-    assert!(
-        f.state().visual_frame_rect(&elem).is_some(),
-        "a suspended window has a navigation frame rect"
+    let rect = f
+        .state()
+        .snap_rect_for(&elem)
+        .expect("stand-in has a snap rect");
+    // Body top-left (600, 400), size 400×300; SSD bar + default border inflate
+    // it exactly as the live window's rect would have been.
+    let bar = f.state().window_ssd_bar(&elem) as f64;
+    let bw = f.state().default_border_width() as f64;
+    assert_eq!(rect.x_low, 600.0 - bw);
+    assert_eq!(rect.x_high, 600.0 + 400.0 + bw);
+    assert_eq!(rect.y_low, 400.0 - bar - bw);
+    assert_eq!(rect.y_high, 400.0 + 300.0 + bw);
+    // The navigation alias reports the same rect.
+    assert_eq!(
+        f.state().visual_frame_rect(&elem).map(|r| r.x_low),
+        Some(rect.x_low)
     );
 
     f.state().dismiss_suspended(sid);
+}
+
+/// A barless CSD-origin stand-in's snap rect has no title-bar strip — its top
+/// edge is the body top (minus border), exactly like the live CSD window it
+/// replaced. A barred SSD-origin stand-in keeps the bar strip.
+#[test]
+fn barless_stand_in_snap_rect_has_no_bar_strip() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+
+    let barred = f.state().insert_suspended_for_test(
+        1,
+        Point::from((600, 400)),
+        Size::from((400, 300)),
+        "b",
+        "B",
+    );
+    let barless = f.state().insert_suspended_barless_for_test(
+        2,
+        Point::from((600, 900)),
+        Size::from((400, 300)),
+        "c",
+        "C",
+    );
+    let barred_elem = StageWindow::Suspended(f.state().find_suspended(barred).unwrap());
+    let barless_elem = StageWindow::Suspended(f.state().find_suspended(barless).unwrap());
+
+    let bw = f.state().default_border_width() as f64;
+    let bar = f.state().config.decorations.title_bar_height as f64;
+    let br = f.state().snap_rect_for(&barred_elem).unwrap();
+    let bl = f.state().snap_rect_for(&barless_elem).unwrap();
+
+    assert_eq!(br.y_low, 400.0 - bar - bw, "barred stand-in keeps its bar");
+    assert_eq!(bl.y_low, 900.0 - bw, "barless stand-in has no bar strip");
+    assert!(
+        bar > 0.0,
+        "config must actually give SSD a bar for this to bite"
+    );
+
+    f.state().dismiss_suspended(barred);
+    f.state().dismiss_suspended(barless);
+}
+
+/// A client dragged against a stand-in's edge snaps to it, docking side-by-side
+/// with the configured gap — the same magnetic snap it gets against a window.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn client_snaps_to_a_stand_in() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    origin_view(&mut f);
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().map_window(
+        StageWindow::Client(a.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((1000, 300)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let target = f.state().snap_rect_for(&standin).unwrap();
+    let gap = f.state().config.snap_gap;
+    let a_w = a.geometry().size.w as f64;
+
+    // Drag A so its right edge lands just short of the stand-in's left edge.
+    let natural = Point::from((target.x_low - gap - a_w + 3.0, 300.0));
+    let mut snap = SnapState::default();
+    let excludes = std::collections::HashSet::new();
+    let snapped =
+        f.state()
+            .snap_move_location(&StageWindow::Client(a), 1.0, natural, &mut snap, &excludes);
+
+    assert!(
+        (snapped.x - (target.x_low - gap - a_w)).abs() < 1.0,
+        "client's right edge snapped one gap short of the stand-in ({snapped:?})"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A stand-in dragged against a client's edge snaps to it — the suspended move
+/// grab's snap math is the client move grab's, so it docks the same way.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn stand_in_snaps_to_a_client() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    map_window(&mut f, id, "a", (400, 300));
+    origin_view(&mut f);
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().map_window(
+        StageWindow::Client(a.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    let a_rect = f.state().snap_rect_for(&StageWindow::Client(a)).unwrap();
+    let gap = f.state().config.snap_gap;
+
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((1400, 300)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+
+    // Drag the stand-in so its left edge lands just short of docking to A's right.
+    let natural = Point::from((a_rect.x_high + gap - 3.0, 300.0));
+    let mut snap = SnapState::default();
+    let excludes = std::collections::HashSet::new();
+    let snapped = f
+        .state()
+        .snap_move_location(&standin, 1.0, natural, &mut snap, &excludes);
+
+    assert!(
+        (snapped.x - (a_rect.x_high + gap)).abs() < 1.0,
+        "stand-in's left edge snapped one gap past the client ({snapped:?})"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A stand-in is an ordinary cluster member: it bridges two clients it sits
+/// between, so the whole run is one snap-cluster — this is what keeps a cluster
+/// intact when its middle window is suspended.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn stand_in_bridges_a_cluster() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let gap = f.state().config.snap_gap as i32;
+
+    let ida = f.add_client();
+    map_window(&mut f, ida, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().map_window(
+        StageWindow::Client(a.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+
+    // Stand-in gap-adjacent to A's right (border is 0 in this config).
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((800 + gap, 300)),
+        Size::from((200, 300)),
+        "s",
+        "S",
+    );
+
+    let idc = f.add_client();
+    map_window(&mut f, idc, "c", (300, 300));
+    let c = window_by_app_id(&mut f, "c").unwrap();
+    // Gap-adjacent to the stand-in's right edge (800+gap+200).
+    f.state().map_window(
+        StageWindow::Client(c.clone()),
+        Point::from((1000 + 2 * gap, 300)),
+        true,
+    );
+
+    let rects = f.state().all_windows_with_snap_rects();
+    let cluster = driftwm::layout::cluster::cluster_of(
+        &StageWindow::Client(a.clone()),
+        &rects,
+        f.state().config.snap_gap,
+    );
+
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    assert_eq!(cluster.len(), 3, "all three form one cluster");
+    assert!(cluster.contains(&standin), "the stand-in is a member");
+    assert!(cluster.contains(&StageWindow::Client(c)));
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A group move carries a stand-in member along at its frozen offset, and the
+/// move never leaks the stand-in into the fit / fullscreen / pin sets (those
+/// exclusions stay ratified).
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn group_move_carries_stand_in_without_membership_leak() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let gap = f.state().config.snap_gap as i32;
+
+    let ida = f.add_client();
+    map_window(&mut f, ida, "a", (400, 300));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    f.state().map_window(
+        StageWindow::Client(a.clone()),
+        Point::from((400, 300)),
+        true,
+    );
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((800 + gap, 300)),
+        Size::from((400, 300)),
+        "s",
+        "S",
+    );
+
+    let members = f
+        .state()
+        .cluster_snapshot_for_drag(&StageWindow::Client(a.clone()), Point::from((400, 300)));
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    assert_eq!(members.len(), 1, "the stand-in is captured as a member");
+    let (member, offset) = &members[0];
+    assert_eq!(*member, standin);
+    assert_eq!(*offset, Point::from((400 + gap, 0)));
+
+    // Apply the move the grab would: primary to a new spot, member at + offset.
+    let new_a = Point::from((900, 500));
+    for (m, off) in &members {
+        f.state().map_window(m.clone(), new_a + *off, false);
+    }
+    f.state().map_window(StageWindow::Client(a), new_a, true);
+
+    assert_eq!(
+        f.state().stage.position_of(&standin),
+        Some(new_a + Point::from((400 + gap, 0))),
+        "the stand-in rode along with the group"
+    );
+    assert!(!f.state().stage.is_fit(&standin), "no fit-set leak");
+    assert!(
+        !f.state().is_window_fullscreen(&standin),
+        "no fullscreen leak"
+    );
+    assert!(!f.state().is_pinned(&standin), "no pin leak");
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// Two adjacent restored stand-ins (all a session materialize produces) form a
+/// cluster with no live client involved — membership is geometry-derived, so it
+/// comes for free.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn restored_adjacent_stand_ins_form_a_cluster() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let gap = f.state().config.snap_gap as i32;
+
+    let a = f.state().insert_suspended_for_test(
+        1,
+        Point::from((400, 300)),
+        Size::from((400, 300)),
+        "a",
+        "A",
+    );
+    let b = f.state().insert_suspended_for_test(
+        2,
+        Point::from((800 + gap, 300)),
+        Size::from((400, 300)),
+        "b",
+        "B",
+    );
+    let a_elem = StageWindow::Suspended(f.state().find_suspended(a).unwrap());
+    let b_elem = StageWindow::Suspended(f.state().find_suspended(b).unwrap());
+
+    let rects = f.state().all_windows_with_snap_rects();
+    let cluster = driftwm::layout::cluster::cluster_of(&a_elem, &rects, f.state().config.snap_gap);
+
+    assert_eq!(cluster.len(), 2);
+    assert!(cluster.contains(&b_elem), "adjacent stand-ins cluster");
+
+    f.state().dismiss_suspended(a);
+    f.state().dismiss_suspended(b);
 }

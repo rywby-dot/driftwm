@@ -203,6 +203,83 @@ fn token_adopt_pre_first_commit_preserves_slot_id_and_geometry() {
     client_close(&mut f, bg, &bg_surface);
 }
 
+/// Adopting a relaunched window back into a clustered stand-in keeps the
+/// cluster: the adopted window seats at the stand-in's slot/rect, so it stays
+/// snap-adjacent to the neighbor, and it inherits the stand-in's snap rect as a
+/// stable rect right away (before it settles to the body size) so a close in
+/// that window can't dissolve the cluster.
+#[test]
+#[allow(clippy::mutable_key_type)]
+fn adopt_keeps_cluster_and_seeds_stable_rect() {
+    use smithay::reexports::wayland_server::Resource;
+
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(
+        Config::from_toml("[decorations]\ndefault_mode = \"server\"\n").unwrap(),
+    );
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // Stand-in "myapp" at a known rect; capture the rect it presents to snap.
+    let sid = insert_suspended(&mut f, 1, "myapp", (500, 500), (600, 400));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let standin_rect = f.state().snap_rect_for(&susp).unwrap();
+    let gap = f.state().config.snap_gap as i32;
+
+    // A neighbor client gap-adjacent to the stand-in's right edge, y-overlapping.
+    let nb = f.add_client();
+    map_window(&mut f, nb, "nb", (400, 400));
+    let neighbor = window_by_app_id(&mut f, "nb").unwrap();
+    f.state().map_window(
+        StageWindow::Client(neighbor.clone()),
+        Point::from((standin_rect.x_high as i32 + gap, 500)),
+        true,
+    );
+    let nb_elem = StageWindow::Client(neighbor.clone());
+    let rects = f.state().all_windows_with_snap_rects();
+    let before = driftwm::layout::cluster::cluster_of(&nb_elem, &rects, f.state().config.snap_gap);
+    assert!(
+        before.contains(&susp),
+        "neighbor clustered with the stand-in"
+    );
+
+    // Relaunch and adopt (token presented before the first buffer).
+    f.state().relaunch_suspended(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+    let cid = f.add_client();
+    let surface = begin_window(&mut f, cid, "myapp");
+    present_token(&mut f, cid, &surface, token);
+    // First sized commit adopts at a not-yet-body size.
+    finish_window(&mut f, cid, &surface, (300, 200));
+    let adopted = mapped_client(&mut f, "myapp").expect("adopted");
+
+    // The seed: the adopted window carries the stand-in's rect immediately,
+    // even though its live geometry is still the pre-body configure size.
+    let seeded = f
+        .state()
+        .stable_snap_rects
+        .get(&server_surface(&adopted).id())
+        .copied()
+        .expect("adopted window seeded a stable snap rect");
+    assert_eq!(seeded.x_low, standin_rect.x_low);
+    assert_eq!(seeded.x_high, standin_rect.x_high);
+    assert_eq!(seeded.y_low, standin_rect.y_low);
+    assert_eq!(seeded.y_high, standin_rect.y_high);
+
+    // Once the client settles to the body size, the live cluster is intact with
+    // the adopted window in the stand-in's place.
+    settle_resize(&mut f, cid, &surface, (600, 400));
+    let rects = f.state().all_windows_with_snap_rects();
+    let after = driftwm::layout::cluster::cluster_of(&nb_elem, &rects, f.state().config.snap_gap);
+    assert!(
+        after.contains(&StageWindow::Client(adopted)),
+        "the adopted live window stayed in the cluster"
+    );
+
+    client_close(&mut f, cid, &surface);
+}
+
 /// Token path, bound after the window is already mapped: adoption happens in the
 /// activation handler with a fresh resize configure, and the adopted window ends
 /// up focused (the suspended window held the focus intent).

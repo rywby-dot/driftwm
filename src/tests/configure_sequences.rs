@@ -460,7 +460,8 @@ fn fill_records_settled_footprint() {
     f.state().set_camera(Point::from((0.0, 0.0)));
     f.state()
         .map_window(a.clone(), Point::from((400, 300)), false);
-    f.state().refresh_stable_snap_rect(&a);
+    f.state()
+        .refresh_stable_snap_rect(&crate::state::StageWindow::Client(a.clone()));
     f.state()
         .map_window(b.clone(), Point::from((1200 + gap, 300)), false);
 
