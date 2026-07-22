@@ -89,6 +89,7 @@ use crate::input::gestures::GestureState;
 use crate::input::keyboard::TapTracker;
 use driftwm::canvas::MomentumState;
 use driftwm::config::{Config, HotCorner};
+use driftwm::stage::StageElement;
 use driftwm::window_ext::WindowExt;
 
 /// Min visible fraction of the focused window for auto-placement to anchor a
@@ -558,10 +559,12 @@ pub struct DriftWm {
     /// mapped to the client-requested output (if any). Resolved against window
     /// rules + active output when the deferred fullscreen fires on first commit.
     pub pending_fullscreen: HashMap<WlSurface, Option<Output>>,
-    /// Keyboard focus snapshot captured at `new_toplevel` time, keyed by the
-    /// new surface. `Some(None)` means user had no focus (e.g. clicked empty
-    /// canvas); missing entry means snapshot was already consumed.
-    pub auto_anchor_snapshot: HashMap<WlSurface, Option<Window>>,
+    /// Focused-element snapshot captured at `new_toplevel` time, keyed by the
+    /// new surface: the live window or suspended stand-in the user was working
+    /// with, so a new window auto-places beside it. `Some(None)` means user had
+    /// no focus (e.g. clicked empty canvas); missing entry means the snapshot
+    /// was already consumed.
+    pub auto_anchor_snapshot: HashMap<WlSurface, Option<StageWindow>>,
     /// After unfit, re-center around `target_center` once geometry actually
     /// shrinks from `pre_exit_size`. Waiting avoids firing while the client
     /// (Chromium) still reports the fit-era size.
@@ -1053,11 +1056,12 @@ impl DriftWm {
         self.pending_adoptions.remove(surface);
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
-        // Keep `None`-anchor entries (user had no focus — unrelated).
+        // Keep `None`-anchor entries (user had no focus) and stand-in anchors
+        // (no surface — never the destroyed one).
         self.auto_anchor_snapshot
             .retain(|_, anchor| match anchor.as_ref() {
                 None => true,
-                Some(w) => w.wl_surface().is_some_and(|s| &*s != surface),
+                Some(w) => w.wl_surface().is_none_or(|s| &*s != surface),
             });
     }
 
@@ -1143,6 +1147,19 @@ impl DriftWm {
         match &self.window_focus {
             Some(FocusIntent::Surface(t)) => Some(t),
             _ => None,
+        }
+    }
+
+    /// The focus *intent* resolved to a stage element, for auto-placement
+    /// anchoring: a live window for a `Surface` intent, the stand-in for a
+    /// `Suspended` one. Reads intent (not the derived seat focus) so it survives
+    /// a launcher's transient keyboard focus, matching `window_focus_surface`.
+    /// `None` when the user had no focused window (empty-canvas click) or the
+    /// intended target is already gone.
+    pub fn focused_anchor_element(&self) -> Option<StageWindow> {
+        match self.window_focus.as_ref()? {
+            FocusIntent::Surface(t) => self.window_for_surface(&t.0).map(StageWindow::Client),
+            FocusIntent::Suspended(id) => self.find_suspended(*id).map(StageWindow::Suspended),
         }
     }
 
@@ -2234,26 +2251,29 @@ impl DriftWm {
 
     /// True if at least `threshold` of the window's area is inside the active
     /// output's viewport.
-    pub fn window_visible_at_least(&self, window: &Window, threshold: f64) -> bool {
+    pub fn window_visible_at_least<W>(&self, window: &W, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
         self.active_output()
             .is_some_and(|o| self.window_visible_at_least_on(window, &o, threshold))
     }
 
     /// As `window_visible_at_least`, but against `output`'s viewport instead
     /// of the active one.
-    pub fn window_visible_at_least_on(
-        &self,
-        window: &Window,
-        output: &Output,
-        threshold: f64,
-    ) -> bool {
+    pub fn window_visible_at_least_on<W>(&self, window: &W, output: &Output, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
         let Some(loc) = self.stage.position_of(window) else {
             return false;
         };
         let os = output_state(output);
         driftwm::canvas::visible_fraction(
             loc,
-            window.geometry().size,
+            StageElement::size(window),
             os.camera,
             output_logical_size(output),
             os.zoom,

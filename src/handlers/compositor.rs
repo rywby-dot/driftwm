@@ -1016,7 +1016,9 @@ impl DriftWm {
 
         let content_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
-        let Some((x, y)) = self.place_adjacent_to(&anchor, window, content_size, bar) else {
+        let Some((x, y)) =
+            self.place_adjacent_to(&StageWindow::Client(anchor), window, content_size, bar)
+        else {
             return;
         };
         let new_loc = Point::from((x, y));

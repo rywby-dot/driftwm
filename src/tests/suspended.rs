@@ -732,10 +732,12 @@ fn auto_placement_obstacle_includes_bar_strip() {
     );
 
     // Placement adjacent to the anchor must not land on the suspended frame.
-    if let Some((x, y)) = f
-        .state()
-        .place_adjacent_to(&anchor, &placing, Size::from((200, 200)), 25)
-    {
+    if let Some((x, y)) = f.state().place_adjacent_to(
+        &StageWindow::Client(anchor.clone()),
+        &placing,
+        Size::from((200, 200)),
+        25,
+    ) {
         let new_top = y - 25; // frame top (above content)
         let overlaps = (x as f64) < frame.x_high
             && frame.x_low < (x + 200) as f64
@@ -786,9 +788,12 @@ fn auto_placement_treats_a_stand_in_like_a_window() {
             f.state()
                 .map_window(StageWindow::Client(nb_win), nb_pos, true);
         }
-        let pos = f
-            .state()
-            .place_adjacent_to(&anchor, &placing, Size::from((200, 200)), 25);
+        let pos = f.state().place_adjacent_to(
+            &StageWindow::Client(anchor.clone()),
+            &placing,
+            Size::from((200, 200)),
+            25,
+        );
         // A throwaway measurement fixture — the scene is never torn down.
         f.skip_baseline_check();
         pos
@@ -800,6 +805,133 @@ fn auto_placement_treats_a_stand_in_like_a_window() {
     assert_eq!(
         with_standin, with_live,
         "a stand-in places a new window identically to a live window of the same frame"
+    );
+}
+
+/// The map-time anchor snapshot captures a focused stand-in the same way it
+/// captures a focused live window — under sloppy focus, hovering a stand-in
+/// focuses it, so it must be able to anchor a newly-mapped window.
+#[test]
+fn focused_anchor_element_captures_a_focused_stand_in() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((200, 200)),
+        "s",
+        "S",
+    );
+    f.state().focus_and_raise_suspended(sid);
+
+    let anchor = f.state().focused_anchor_element();
+    let expected = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    assert_eq!(
+        anchor,
+        Some(expected),
+        "a focused stand-in is captured as the anchor"
+    );
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// A new window auto-places beside a focused stand-in: the map-time snapshot
+/// anchors on the stand-in, so placement docks the new window gap-adjacent to
+/// the stand-in's frame instead of dropping on top of it.
+#[test]
+fn auto_placement_anchors_a_new_window_against_a_focused_stand_in() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    // A visible stand-in the user is hovering (sloppy focus focuses it).
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((200, 200)),
+        "s",
+        "S",
+    );
+    f.state().focus_and_raise_suspended(sid);
+    // new_toplevel snapshots the focus that existed *before* the new window —
+    // the stand-in — so capture it now, before mapping steals focus.
+    let anchor = f.state().focused_anchor_element();
+
+    let id = f.add_client();
+    map_window(&mut f, id, "placing", (200, 200));
+    let placing = window_by_app_id(&mut f, "placing").unwrap();
+    let surface = super::server_surface(&placing);
+    f.state().auto_anchor_snapshot.insert(surface, anchor);
+
+    let bar = f
+        .state()
+        .window_ssd_bar(&StageWindow::Client(placing.clone()));
+    let (x, y) = f
+        .state()
+        .auto_placement_pos(&placing, Size::from((200, 200)), bar)
+        .expect("auto placement anchored on the stand-in");
+
+    // Seat the new window and compare frames: docked gap-adjacent, not overlapping.
+    f.state().map_window(
+        StageWindow::Client(placing.clone()),
+        Point::from((x, y)),
+        true,
+    );
+    let new_frame = f
+        .state()
+        .visual_frame_rect(&StageWindow::Client(placing.clone()))
+        .unwrap();
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let standin_frame = f.state().visual_frame_rect(&standin).unwrap();
+    let gap = f.state().config.snap_gap;
+    assert!(
+        driftwm::layout::cluster::adjacent_side(&new_frame, &standin_frame, gap).is_some(),
+        "the new window docked gap-adjacent to the stand-in"
+    );
+    let overlaps = new_frame.x_low < standin_frame.x_high
+        && standin_frame.x_low < new_frame.x_high
+        && new_frame.y_low < standin_frame.y_high
+        && standin_frame.y_low < new_frame.y_high;
+    assert!(!overlaps, "and does not overlap the stand-in");
+
+    f.state().dismiss_suspended(sid);
+}
+
+/// If the anchored stand-in is dismissed between the snapshot and the placement,
+/// the anchor no longer resolves and placement degrades to the same center
+/// fallback (`None`) as a closed live anchor — no special-casing.
+#[test]
+fn auto_placement_falls_back_when_the_anchored_stand_in_is_dismissed() {
+    let mut f = Fixture::with_config(config_ssd());
+    f.add_output(1, (1920, 1080));
+    origin_view(&mut f);
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((500, 500)),
+        Size::from((200, 200)),
+        "s",
+        "S",
+    );
+    f.state().focus_and_raise_suspended(sid);
+    let anchor = f.state().focused_anchor_element();
+
+    let id = f.add_client();
+    map_window(&mut f, id, "placing", (200, 200));
+    let placing = window_by_app_id(&mut f, "placing").unwrap();
+    let surface = super::server_surface(&placing);
+    f.state().auto_anchor_snapshot.insert(surface, anchor);
+
+    // The stand-in vanishes before the new window's placement runs.
+    f.state().dismiss_suspended(sid);
+
+    let bar = f
+        .state()
+        .window_ssd_bar(&StageWindow::Client(placing.clone()));
+    assert!(
+        f.state()
+            .auto_placement_pos(&placing, Size::from((200, 200)), bar)
+            .is_none(),
+        "a dismissed stand-in anchor falls back to center placement"
     );
 }
 

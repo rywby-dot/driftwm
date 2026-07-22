@@ -4,7 +4,7 @@ use smithay::desktop::Window;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::seat::WaylandFocus;
 
-use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm};
+use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm, StageWindow};
 
 impl DriftWm {
     /// Spawn pos for `placement = "cursor"`: center the visual frame
@@ -87,11 +87,13 @@ impl DriftWm {
 
     /// Geometry-only placement of `placing` (content sized `new_size`, SSD
     /// bar `bar`) adjacent to `anchor`'s snap cluster, treating every other
-    /// mapped window as an obstacle. Returns the content top-left in canvas
-    /// coords, or `None` when `anchor` is ineligible or no slot fits.
+    /// mapped window (live or a suspended stand-in) as an obstacle. The anchor
+    /// is a `StageWindow` so a focused stand-in can be anchored against, the
+    /// same as a live window. Returns the content top-left in canvas coords, or
+    /// `None` when `anchor` is ineligible or no slot fits.
     pub fn place_adjacent_to(
         &self,
-        anchor: &Window,
+        anchor: &StageWindow,
         placing: &Window,
         new_size: Size<i32, Logical>,
         bar: i32,
