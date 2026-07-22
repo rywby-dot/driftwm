@@ -86,11 +86,16 @@ pub(crate) fn ensure_label(
         Transform::Normal,
         None,
     ));
-    // Body-local rect for the Label hit region, centered in the body.
+    // Body-local rect for the Label hit region. The bar sits above the body, so
+    // center within the full bar+body footprint (shift up by half the bar) to
+    // read as centered together with the title bar rather than in the body alone.
     let lw = (buf_w / scale).max(1);
     let lh = (buf_h / scale).max(1);
     chrome.label_rect = Some(Rectangle::new(
-        Point::from(((body.w - lw) / 2, (body.h - lh) / 2)),
+        Point::from((
+            (body.w - lw) / 2,
+            (body.h - config.title_bar_height - lh) / 2,
+        )),
         Size::from((lw, lh)),
     ));
     chrome.label_key = Some(key);
