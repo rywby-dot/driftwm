@@ -3,7 +3,9 @@
 
 use driftwm::config::{Action, Config, DecorationMode};
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::Point;
+use smithay::utils::{Point, Size};
+
+use crate::state::StageWindow;
 
 use super::{Fixture, window_by_app_id};
 
@@ -28,6 +30,63 @@ fn map_settled(
     f.double_roundtrip(id);
     f.client(id).window(&surface).format_recent_configures();
     surface
+}
+
+/// A window snapped only to a suspended stand-in reflows when it grows into it,
+/// exactly as it would beside a live window: the grow-reflow neighbor set counts
+/// stand-ins, so a font-bump next to a stand-in relocates instead of overlapping.
+#[test]
+fn grow_reflows_off_a_stand_in_neighbor() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    // A settled live window "a"; pin the camera (mapping pans it) and park it.
+    let a_surface = map_settled(&mut f, id, "a", (800, 600));
+    let a = window_by_app_id(&mut f, "a").unwrap();
+    let a_elem = StageWindow::Client(a.clone());
+    f.state().set_camera(Point::from((0.0, 0.0)));
+    f.state()
+        .map_window(a.clone(), Point::from((400, 300)), false);
+    f.state().refresh_stable_snap_rect(&a_elem);
+
+    // A stand-in as "a"'s only neighbor, gap-adjacent to its right edge and
+    // y-overlapping (the reflow's "was snapped" anchor precondition).
+    let a_frame = f.state().visual_frame_rect(&a_elem).unwrap();
+    let gap = f.state().config.snap_gap as i32;
+    let bw = f.state().default_border_width();
+    let sx = a_frame.x_high as i32 + gap + bw;
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((sx, 300)),
+        Size::from((300, 400)),
+        "s",
+        "S",
+    );
+    let standin = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let standin_frame = f.state().visual_frame_rect(&standin).unwrap();
+
+    let before = f.state().stage.position_of(&a_elem).unwrap();
+
+    // "a" grows past the stand-in (a font bump would do this): a spontaneous
+    // CSD resize larger than its settled width, colliding with the neighbor.
+    let win = f.client(id).window(&a_surface);
+    win.set_size(1000, 600);
+    win.attach_new_buffer();
+    win.commit();
+    f.double_roundtrip(id);
+
+    // The grow reflowed "a" off the stand-in instead of overlapping it.
+    let after = f.state().stage.position_of(&a_elem).unwrap();
+    assert_ne!(after, before, "the grown window relocated off the stand-in");
+    let a_after = f.state().visual_frame_rect(&a_elem).unwrap();
+    let overlaps = a_after.x_low < standin_frame.x_high
+        && standin_frame.x_low < a_after.x_high
+        && a_after.y_low < standin_frame.y_high
+        && standin_frame.y_low < a_after.y_high;
+    assert!(!overlaps, "and no longer overlaps the stand-in frame");
+
+    f.state().dismiss_suspended(sid);
 }
 
 #[test]

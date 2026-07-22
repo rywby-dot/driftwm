@@ -983,17 +983,17 @@ impl DriftWm {
         }
 
         let gap = self.config.snap_gap;
-        // Reflow anchors to a client neighbor (place_adjacent_to needs one), so
-        // keep this client-only even though stand-ins are snap targets elsewhere.
-        let others: Vec<(smithay::desktop::Window, driftwm::layout::snap::SnapRect)> = self
+        // Every snap-rect citizen — live windows and suspended stand-ins alike —
+        // counts as a neighbor; `snap_rect_for` drops widgets / pinned /
+        // fullscreen. The growing window itself is excluded.
+        let others: Vec<(StageWindow, driftwm::layout::snap::SnapRect)> = self
             .stage
             .windows()
             .filter_map(|w| {
-                let c = w.client()?;
-                if c == window {
+                if w == window {
                     return None;
                 }
-                Some((c.clone(), self.snap_rect_for(w)?))
+                Some((w.clone(), self.snap_rect_for(w)?))
             })
             .collect();
 
@@ -1016,9 +1016,7 @@ impl DriftWm {
 
         let content_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
-        let Some((x, y)) =
-            self.place_adjacent_to(&StageWindow::Client(anchor), window, content_size, bar)
-        else {
+        let Some((x, y)) = self.place_adjacent_to(&anchor, window, content_size, bar) else {
             return;
         };
         let new_loc = Point::from((x, y));
