@@ -100,7 +100,7 @@ entirely — those aren't "graceful."
 
 Suspended windows themselves are **always** saved and restored, regardless of
 this flag — they're already an explicit, user-visible artifact on your canvas.
-`restore_session` only decides whether still-*open* windows get saved too on
+`restore_session` only decides whether still-_open_ windows get saved too on
 the way out. Per-output camera position and zoom are restored across restarts
 as well.
 
@@ -142,7 +142,6 @@ stand-in by, in order:
   client can end up adopted into the wrong one's rect.
 - Touch only taps a suspended window (focus, raise, relaunch) — drag-move and
   drag-resize by touch aren't wired up yet.
-- No icons yet — just the app's name.
 
 ## Nested / dev sessions
 
@@ -158,7 +157,7 @@ This is unrelated to suspended windows within a single run — those are on the
 canvas the moment they're created, in any backend. Durability, though, needs a
 store: the udev backend uses the default path, and a winit run persists only
 with `--session-file`. Without a store path nothing is written — the flag only
-affects whether a *quit* is saved to (and a *startup* is restored from) a file
+affects whether a _quit_ is saved to (and a _startup_ is restored from) a file
 at all.
 
 ## IPC
