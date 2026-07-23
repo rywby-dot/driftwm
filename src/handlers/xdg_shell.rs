@@ -419,6 +419,7 @@ impl XdgShellHandler for DriftWm {
             };
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
+            self.arm_interactive_move(&window);
             let grab = MoveSurfaceGrab::new(
                 start_data,
                 window,
@@ -446,6 +447,7 @@ impl XdgShellHandler for DriftWm {
                 };
                 // Revoke the client's in-flight touch sequence (see the canvas branch below).
                 touch.cancel(self);
+                self.arm_interactive_move(&window);
                 touch.set_grab(self, grab, serial);
                 return;
             }
@@ -464,6 +466,7 @@ impl XdgShellHandler for DriftWm {
             touch.cancel(self);
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
+            self.arm_interactive_move(&window);
             let grab = MoveSurfaceGrab::new_touch(
                 touch_start,
                 window,

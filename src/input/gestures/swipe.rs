@@ -469,6 +469,7 @@ impl DriftWm {
         for (member, _) in &members {
             self.stage.clear_fill(member);
         }
+        self.arm_interactive_move(&window);
         let grab = MoveSurfaceGrab::new(
             GrabStartData {
                 focus: None,

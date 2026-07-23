@@ -329,10 +329,6 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
         _focus: Option<(<DriftWm as SeatHandler>::PointerFocus, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
-        // Mark this window as actively dragged so the relaunch adopt path won't
-        // teleport it out from under its own grab.
-        data.interactive_move = Some(self.window.clone());
-
         // A fullscreen output renders only its fullscreen window — everything
         // else on it is culled — so a window dragged there would just vanish.
         // Freeze the drag while the cursor is over one; the cross-output branch
@@ -437,7 +433,7 @@ impl PointerGrab<DriftWm> for MoveSurfaceGrab {
 
     fn unset(&mut self, data: &mut DriftWm) {
         data.clear_edge_pan(&self.output);
-        data.interactive_move = None;
+        data.disarm_interactive_move(&self.window);
     }
 
     crate::grabs::forward_pointer_grab_methods!();
@@ -641,10 +637,6 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
         event: &TouchMotionEvent,
         seq: Serial,
     ) {
-        // Same as the pointer path: flag the dragged window against a mid-drag
-        // relaunch adopt.
-        data.interactive_move = Some(self.window.clone());
-
         if event.slot != self.touch_start.as_ref().expect("touch move grab").slot {
             handle.motion(data, None, event, seq);
             return;
@@ -726,6 +718,6 @@ impl TouchGrab<DriftWm> for MoveSurfaceGrab {
     fn unset(&mut self, data: &mut DriftWm) {
         data.clear_edge_pan(&self.output);
         data.touch_state.edge_pan = None;
-        data.interactive_move = None;
+        data.disarm_interactive_move(&self.window);
     }
 }

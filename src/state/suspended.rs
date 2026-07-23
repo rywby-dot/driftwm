@@ -317,7 +317,7 @@ impl DriftWm {
         window: &Window,
         surface: &WlSurface,
     ) -> bool {
-        if self.interactive_move.as_ref() == Some(window) {
+        if self.interactive_move.iter().any(|w| w == window) {
             return true;
         }
         with_states(surface, |states| {

@@ -331,6 +331,7 @@ impl DriftWm {
                                 // Moving re-anchors the window, so a fill restore
                                 // point (which includes position) no longer applies.
                                 self.stage.clear_fill(&window);
+                                self.arm_interactive_move(&window);
                                 let grab = MoveSurfaceGrab::new(
                                     start_data,
                                     window,
@@ -407,6 +408,7 @@ impl DriftWm {
                             for (member, _) in &cluster_members {
                                 self.stage.clear_fill(member);
                             }
+                            self.arm_interactive_move(&window);
                             let grab = MoveSurfaceGrab::new(
                                 start_data,
                                 window,
@@ -913,6 +915,7 @@ impl DriftWm {
             button,
             location: pos,
         };
+        self.arm_interactive_move(window);
         let grab = MoveSurfaceGrab::new_pinned(start_data, window.clone(), output, grab_offset);
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }

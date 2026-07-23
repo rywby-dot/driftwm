@@ -115,6 +115,16 @@ fn token_count(f: &mut Fixture) -> usize {
     f.state().xdg_activation_state.tokens().count()
 }
 
+/// The live client windows in MRU (focus-history) order, front = most recent.
+fn mru_client_order(f: &mut Fixture) -> Vec<smithay::desktop::Window> {
+    f.state()
+        .stage
+        .focus_history()
+        .iter()
+        .filter_map(|w| w.client().cloned())
+        .collect()
+}
+
 /// Token path, bound before first commit: the marker is honored ahead of both
 /// the serial gate (our token is serial-less) and the zero-size early return
 /// (the surface has no buffer yet), stashing for the placement arm. Adoption
@@ -913,10 +923,10 @@ fn late_token_does_not_adopt_a_pinned_window() {
     client_close(&mut f, cid, &win_surface);
 }
 
-/// Adopting an UNFOCUSED already-open window preserves its MRU standing. The
-/// stand-in didn't hold focus and a newer window does, so the refocus path
-/// doesn't run — but the adopted window must still be reachable in the focus
-/// history, not silently dropped out of the Alt-Tab cycle.
+/// Adopting an UNFOCUSED already-open window preserves its MRU *slot*, not just
+/// its presence. The stand-in didn't hold focus and a newer window does, so the
+/// refocus path doesn't run — the adopted window must keep its exact place in
+/// the Alt-Tab order, never getting silently dropped or front-pushed.
 #[test]
 fn adopt_of_unfocused_window_keeps_focus_history() {
     let tmp = TempDir::new();
@@ -926,7 +936,7 @@ fn adopt_of_unfocused_window_keeps_focus_history() {
     origin_view(&mut f);
 
     // A of the app opens (focused on map); then B opens and takes focus, so A is
-    // unfocused but still in the MRU history behind B.
+    // unfocused and sits behind B in the MRU: order is [B, A].
     let cid = f.add_client();
     let a = map_window(&mut f, cid, "myapp", (300, 200));
     let bid = f.add_client();
@@ -938,13 +948,11 @@ fn adopt_of_unfocused_window_keeps_focus_history() {
         Some(&b_win),
         "B holds focus, A is unfocused"
     );
-    assert!(
-        f.state()
-            .stage
-            .focus_history()
-            .iter()
-            .any(|w| w.client() == Some(&a_win)),
-        "A is in the MRU before adoption"
+    let order_before = mru_client_order(&mut f);
+    assert_eq!(
+        order_before,
+        vec![b_win.clone(), a_win.clone()],
+        "MRU is [B, A] before adoption — A trails B"
     );
 
     // Relaunch a same-app stand-in; unfocused A forwards the token.
@@ -959,18 +967,86 @@ fn adopt_of_unfocused_window_keeps_focus_history() {
         Some(&b_win),
         "focus stayed on B — the non-refocus adopt path ran"
     );
-    assert!(
-        f.state()
-            .stage
-            .focus_history()
-            .iter()
-            .any(|w| w.client() == Some(&adopted)),
-        "the adopted window is still reachable in the Alt-Tab cycle"
+    assert_eq!(
+        mru_client_order(&mut f),
+        vec![b_win, adopted],
+        "the adopted window kept A's exact MRU slot (behind B), not front-pushed or dropped"
     );
 
     settle_resize(&mut f, cid, &a, (400, 300));
     client_close(&mut f, cid, &a);
     client_close(&mut f, bid, &b);
+}
+
+/// A window under an active interactive move grab must NOT be adopted mid-drag:
+/// teleporting it into the stand-in slot would fight the live grab. The token
+/// bails — leaving the pending relaunch live and the stand-in intact — rather
+/// than dismissing. Once the drag ends and the guard clears, the same still-
+/// registered token adopts normally.
+#[test]
+fn mid_move_grab_defers_adoption_then_adopts_when_it_ends() {
+    let tmp = TempDir::new();
+    let mut f = Fixture::with_config(Config::default());
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &tmp, &["myapp"]);
+    origin_view(&mut f);
+
+    // An existing window of the app is open; a same-app stand-in is relaunched.
+    let cid = f.add_client();
+    let existing = map_window(&mut f, cid, "myapp", (300, 200));
+    let win = window_by_app_id(&mut f, "myapp").unwrap();
+    let pos_before = f.state().stage.position_of(&win);
+
+    let sid = insert_suspended(&mut f, 1, "myapp", (800, 500), (400, 300));
+    let susp = StageWindow::Suspended(f.state().find_suspended(sid).unwrap());
+    let eid = f.state().stage.id_of(&susp).unwrap();
+    f.state().relaunch_suspended(sid);
+    f.state().expire_relaunch_fallback_for_test(sid);
+    let token = f.state().pending_relaunch_token_for_test(sid).unwrap();
+
+    // The window is under a live interactive move grab; the token arrives.
+    f.state().interactive_move.push(win.clone());
+    present_token(&mut f, cid, &existing, token.clone());
+
+    // Bail, not adopt: the window stayed put, the stand-in and pending survive.
+    assert_eq!(
+        f.state().stage.position_of(&win),
+        pos_before,
+        "the window was not teleported out from under its grab"
+    );
+    assert!(
+        suspended_present(&mut f),
+        "the stand-in was retained, not dismissed"
+    );
+    assert_eq!(
+        f.state().debug_counters()["pending_relaunches"],
+        1,
+        "the pending relaunch stays live for its TTL"
+    );
+    assert_eq!(token_count(&mut f), 1, "the token was not deregistered");
+
+    // The drag ends; the same still-registered token now adopts.
+    f.state().interactive_move.clear();
+    present_token(&mut f, cid, &existing, token);
+
+    let adopted = window_by_app_id(&mut f, "myapp").expect("adopted once the grab ended");
+    assert_eq!(
+        f.state().stage.id_of(&adopted),
+        Some(eid),
+        "took the stand-in's ElementId"
+    );
+    assert_eq!(
+        f.state().stage.position_of(&adopted),
+        Some(Point::from((800, 500))),
+        "relocated onto the stand-in rect after the grab cleared"
+    );
+    assert!(
+        !suspended_present(&mut f),
+        "the stand-in was consumed by the adopt"
+    );
+
+    settle_resize(&mut f, cid, &existing, (400, 300));
+    client_close(&mut f, cid, &existing);
 }
 
 /// A dismiss while a relaunch is in flight cancels it: the token is deregistered

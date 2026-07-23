@@ -246,6 +246,7 @@ impl TouchGestureGrab {
         // All current fingers are already down; seed the count so the move grab
         // stays alive until every one of them lifts.
         let slots = self.core.finger_count();
+        data.arm_interactive_move(&window);
         let grab =
             MoveSurfaceGrab::new_touch(start, window, initial, self.output.clone(), slots, members);
         handle.set_grab(self, data, seq, grab);

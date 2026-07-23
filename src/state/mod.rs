@@ -631,11 +631,13 @@ pub struct DriftWm {
     pub on_demand_layer: Option<WlSurface>,
     /// The active popup keyboard/pointer grab, if any. See [`PopupGrabState`].
     pub popup_grab: Option<PopupGrabState>,
-    /// The window under an active interactive `MoveSurfaceGrab`, tracked so the
+    /// Windows under an active interactive `MoveSurfaceGrab`, tracked so the
     /// relaunch adopt path can tell whether *this* window is being dragged right
     /// now — a plain "any grab active" check would wrongly block adoption while
-    /// some other window is being moved. Set on grab motion, cleared on unset.
-    pub interactive_move: Option<Window>,
+    /// some other window is being moved. A multiset (not an `Option`) because a
+    /// pointer move and a touch move can run on different windows at once; grabs
+    /// push on install and remove on unset.
+    pub interactive_move: Vec<Window>,
 
     pub held_action: Option<(u32, driftwm::config::Action, Instant)>,
 
@@ -1121,6 +1123,21 @@ impl DriftWm {
             .find(|w| w.wl_surface().as_deref() == Some(surface))
             .and_then(|w| w.client())
             .cloned()
+    }
+
+    /// Record `window` as under a fresh interactive move grab. Called at grab
+    /// install (not first motion) so a press-and-hold with no motion is still
+    /// guarded; balanced by `disarm_interactive_move` on grab unset.
+    pub fn arm_interactive_move(&mut self, window: &Window) {
+        self.interactive_move.push(window.clone());
+    }
+
+    /// Drop one `window` entry armed by `arm_interactive_move`. Removes a single
+    /// occurrence so overlapping pointer/touch moves stay balanced.
+    pub fn disarm_interactive_move(&mut self, window: &Window) {
+        if let Some(i) = self.interactive_move.iter().position(|w| w == window) {
+            self.interactive_move.remove(i);
+        }
     }
 
     /// Innermost modal descendant for focus redirect. Chases modal chains

@@ -618,6 +618,7 @@ impl DriftWm {
             return;
         };
         self.raise_and_focus(window, serial);
+        self.arm_interactive_move(window);
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
     }
 
@@ -642,6 +643,7 @@ impl DriftWm {
         };
         // One finger down (the titlebar press); the grab intercepts its motion
         // and up directly, so no `down` forward is needed.
+        self.arm_interactive_move(window);
         let grab =
             MoveSurfaceGrab::new_touch(start, window.clone(), initial, output, 1, Vec::new());
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
