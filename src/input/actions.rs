@@ -348,7 +348,6 @@ impl DriftWm {
                     }
                 }
             }
-            Action::GoToPosition(x, y) => self.go_to_canvas_point(*x, *y),
             Action::GoToBookmark(name) => match self.bookmarks.get(name) {
                 Some(&[x, y]) => self.go_to_canvas_point(x, y),
                 None => {
@@ -359,8 +358,8 @@ impl DriftWm {
                 let vc = self.usable_center_screen();
                 let zoom = self.zoom();
                 // Capture the destination of an in-flight animation, not a
-                // mid-flight frame, so set→go-to round-trips exactly. This is
-                // the exact inverse of `go_to_canvas_point`'s camera math.
+                // mid-flight frame, so set → go-to-bookmark round-trips exactly.
+                // This is the exact inverse of `go_to_canvas_point`'s camera math.
                 let cam = self.camera_target().unwrap_or_else(|| self.camera());
                 let x = cam.x + vc.x / zoom;
                 let y = -(cam.y + vc.y / zoom);
@@ -642,9 +641,8 @@ impl DriftWm {
     }
 
     /// Jump the camera so the viewport centers on canvas point `(x, y)` (Y-up),
-    /// panel-aware (`usable_center_screen`). Shared by `GoToPosition` and
-    /// `GoToBookmark` so their camera math can never diverge; `SetBookmark`
-    /// captures the exact inverse. Zoom is untouched.
+    /// panel-aware (`usable_center_screen`). `SetBookmark` captures the exact
+    /// inverse, so set → go-to-bookmark round-trips. Zoom is untouched.
     fn go_to_canvas_point(&mut self, x: f64, y: f64) {
         let vc = self.usable_center_screen();
         let zoom = self.zoom();

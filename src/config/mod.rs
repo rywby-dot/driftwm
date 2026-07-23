@@ -51,44 +51,6 @@ const DEFAULT_BOOKMARKS: &[(&str, [f64; 2])] = &[
     ("4", [-1750.0, -1750.0]),
 ];
 
-/// True if any user binding value across every binding table names the
-/// deprecated `go-to` action, so the deprecation warning fires once per load.
-/// Covers keybindings (normal + tap), mouse/gesture/touch context maps, and the
-/// per-output hot-corner actions.
-fn any_binding_is_go_to(raw: &ConfigFile) -> bool {
-    let is_go_to = |v: &String| v.split_whitespace().next() == Some("go-to");
-    let ctx_maps: [&Option<HashMap<String, String>>; 9] = [
-        &raw.mouse.on_window,
-        &raw.mouse.on_canvas,
-        &raw.mouse.anywhere,
-        &raw.gestures.on_window,
-        &raw.gestures.on_canvas,
-        &raw.gestures.anywhere,
-        &raw.touch.on_window,
-        &raw.touch.on_canvas,
-        &raw.touch.anywhere,
-    ];
-    let mut hot_corner_actions = raw
-        .outputs
-        .iter()
-        .flatten()
-        .filter_map(|o| o.hot_corners.as_ref())
-        .flat_map(|hc| {
-            [
-                &hc.top_left,
-                &hc.top_right,
-                &hc.bottom_left,
-                &hc.bottom_right,
-            ]
-        })
-        .flatten();
-    raw.keybindings.iter().flatten().any(|(_, v)| is_go_to(v))
-        || ctx_maps
-            .into_iter()
-            .any(|m| m.iter().flatten().any(|(_, v)| is_go_to(v)))
-        || hot_corner_actions.any(is_go_to)
-}
-
 /// The finger count of a per-direction swipe trigger
 /// (`swipe-up/down/left/right`), or `None` for any other trigger.
 fn swipe_direction_fingers(trigger: &GestureTrigger) -> Option<u32> {
@@ -499,12 +461,6 @@ impl Config {
             ($fmt:literal $(, $arg:expr)* $(,)?) => {
                 collect_warn(&mut errors, format!($fmt $(, $arg)*))
             };
-        }
-
-        // One warning per load, not per binding, when any binding still uses the
-        // deprecated `go-to` action. `go-to` still parses and works.
-        if any_binding_is_go_to(&raw) {
-            warn_and_collect!("go-to is deprecated; use bookmarks (go-to-bookmark) instead");
         }
 
         let mod_key = match raw.mod_key.as_deref() {
@@ -1519,101 +1475,40 @@ mod tests {
         assert!(config.nav_anchors.is_empty());
     }
 
+    /// Each binding table wraps errors differently, so check the migration
+    /// message survives all of them, not just one.
     #[test]
-    fn go_to_deprecation_warns_once_and_still_parses() {
-        let toml_str = r#"
-            [keybindings]
-            "mod+5" = "go-to 100 200"
-            "mod+6" = "go-to 300 400"
-        "#;
-        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        let count = warnings
-            .iter()
-            .filter(|w| w.contains("go-to is deprecated"))
-            .count();
+    fn removed_go_to_errors_in_every_binding_table() {
+        let removal = parse_action("go-to 100 200").unwrap_err();
+        for toml_str in [
+            "[keybindings]\n\"mod+5\" = \"go-to 100 200\"\n",
+            "[gestures.anywhere]\n\"4-finger-swipe-up\" = \"go-to 0 0\"\n",
+            "[mouse.on-canvas]\n\"middle\" = \"go-to 50 50\"\n",
+            "[[outputs]]\nname = \"eDP-1\"\n[outputs.hot_corners]\ntop_left = \"go-to 0 0\"\n",
+        ] {
+            let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+            assert!(
+                warnings.iter().any(|w| w.contains(&removal)),
+                "got: {warnings:?} for {toml_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_go_to_binding_is_dropped_and_bookmarks_still_bind() {
+        let (config, _) = Config::from_toml_collect(
+            "[keybindings]\n\"mod+5\" = \"go-to 100 200\"\n\"mod+9\" = \"go-to-bookmark home\"\n",
+        )
+        .unwrap();
+        let combo = |s| {
+            let mut c = parse::parse_key_combo(s, ModKey::Super).unwrap();
+            c.normalize();
+            c
+        };
+        assert!(!config.bindings.contains_key(&combo("mod+5")));
         assert_eq!(
-            count, 1,
-            "one warning per load, not per binding: {warnings:?}"
-        );
-        // go-to still parses and binds despite the deprecation.
-        assert_eq!(
-            parse_action("go-to 100 200"),
-            Ok(Action::GoToPosition(100.0, 200.0))
-        );
-    }
-
-    #[test]
-    fn go_to_deprecation_fires_for_gesture_bindings_too() {
-        let toml_str = r#"
-            [gestures.anywhere]
-            "4-finger-swipe-up" = "go-to 0 0"
-        "#;
-        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert!(
-            warnings.iter().any(|w| w.contains("go-to is deprecated")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn go_to_deprecation_warns_once_across_multiple_sections() {
-        let toml_str = r#"
-            [keybindings]
-            "mod+5" = "go-to 100 200"
-
-            [gestures.anywhere]
-            "4-finger-swipe-up" = "go-to 0 0"
-
-            [mouse.on-canvas]
-            "middle" = "go-to 50 50"
-        "#;
-        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        let count = warnings
-            .iter()
-            .filter(|w| w.contains("go-to is deprecated"))
-            .count();
-        assert_eq!(
-            count, 1,
-            "one warning per load, not one per section: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn no_go_to_binding_does_not_warn() {
-        let (_config, warnings) = Config::from_toml_collect("").unwrap();
-        assert!(
-            !warnings.iter().any(|w| w.contains("go-to is deprecated")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn go_to_deprecation_fires_for_hot_corner_bindings() {
-        let toml_str = r#"
-            [[outputs]]
-            name = "eDP-1"
-            [outputs.hot_corners]
-            top_left = "go-to 0 0"
-        "#;
-        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert!(
-            warnings.iter().any(|w| w.contains("go-to is deprecated")),
-            "got: {warnings:?}"
-        );
-    }
-
-    #[test]
-    fn go_to_bookmark_binding_does_not_trigger_go_to_deprecation() {
-        // The scanner matches the whole action name, not a prefix, so
-        // `go-to-bookmark` must not be mistaken for the deprecated `go-to`.
-        let toml_str = r#"
-            [keybindings]
-            "mod+9" = "go-to-bookmark home"
-        "#;
-        let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert!(
-            !warnings.iter().any(|w| w.contains("go-to is deprecated")),
-            "got: {warnings:?}"
+            config.bindings.get(&combo("mod+9")),
+            Some(&Action::GoToBookmark("home".into()))
         );
     }
 

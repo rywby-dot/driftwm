@@ -59,7 +59,6 @@ pub enum Action {
     CenterNearest(Direction),
     CycleWindows { backward: bool },
     HomeToggle,
-    GoToPosition(f64, f64),
     GoToBookmark(String),
     SetBookmark(String),
     MoveToBookmark(String),

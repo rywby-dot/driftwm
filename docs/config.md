@@ -679,7 +679,6 @@ Actions:
 - `zoom-in` — step zoom in
 - `zoom-out` — step zoom out
 - `zoom-reset` — zoom to 1.0
-- `go-to <x> <y>` — jump camera to canvas position (deprecated, use go-to-bookmark)
 - `go-to-bookmark <name>` — jump the camera to a saved bookmark (position only, zoom untouched)
 - `set-bookmark <name>` — save the current camera center as a bookmark (create or overwrite)
 - `move-to-bookmark <name>` — move the focused window's center to a bookmark point

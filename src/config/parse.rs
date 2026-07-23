@@ -139,20 +139,10 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
             }
         }
         "home-toggle" => Ok(Action::HomeToggle),
-        "go-to" => {
-            let arg = arg.ok_or("go-to requires <x> <y> coordinates")?;
-            let parts: Vec<&str> = arg.split_whitespace().collect();
-            if parts.len() != 2 {
-                return Err("go-to requires exactly two coordinates: go-to <x> <y>".to_string());
-            }
-            let x: f64 = parts[0]
-                .parse()
-                .map_err(|_| format!("invalid x coordinate: {}", parts[0]))?;
-            let y: f64 = parts[1]
-                .parse()
-                .map_err(|_| format!("invalid y coordinate: {}", parts[1]))?;
-            Ok(Action::GoToPosition(x, y))
-        }
+        "go-to" => Err(
+            "go-to was removed — save the point as a bookmark and use go-to-bookmark <name>"
+                .to_string(),
+        ),
         "go-to-bookmark" => {
             let name = arg
                 .filter(|a| !a.is_empty())
@@ -225,7 +215,6 @@ pub const ACTION_NAMES: &[(&str, &str)] = &[
     ("fit-window", "fit-window"),
     ("fit-window-snapped", "fit-window-snapped"),
     ("focus-center", "focus-center"),
-    ("go-to", "go-to 0 0"),
     ("go-to-bookmark", "go-to-bookmark 1"),
     ("home-toggle", "home-toggle"),
     ("move-to-bookmark", "move-to-bookmark 1"),
@@ -248,6 +237,12 @@ pub const ACTION_NAMES: &[(&str, &str)] = &[
     ("zoom-to-fit", "zoom-to-fit"),
     ("zoom-to-fit-snapped", "zoom-to-fit-snapped"),
 ];
+
+/// Actions `parse_action` rejects with a migration message. Not bindable, so
+/// excluded from `ACTION_NAMES`/the docs, but the gesture/touch fallback still
+/// needs to recognize them here or the message degrades to "unknown gesture
+/// action".
+const REMOVED_ACTIONS: &[&str] = &["go-to"];
 
 /// Parse a mouse action string like "move-window" or "zoom".
 /// Continuous/grab actions are matched first; anything else falls through
@@ -379,7 +374,9 @@ fn parse_threshold_action(s: &str) -> Result<Option<ThresholdAction>, String> {
         Ok(action) => Ok(Some(ThresholdAction::Fixed(action))),
         Err(e) => {
             let first = s.split_whitespace().next().unwrap_or("");
-            if ACTION_NAMES.iter().any(|(name, _)| *name == first) {
+            if ACTION_NAMES.iter().any(|(name, _)| *name == first)
+                || REMOVED_ACTIONS.contains(&first)
+            {
                 Err(e)
             } else {
                 Ok(None)
@@ -588,7 +585,6 @@ mod tests {
             Action::CenterNearest(_) => "center-nearest",
             Action::CycleWindows { .. } => "cycle-windows",
             Action::HomeToggle => "home-toggle",
-            Action::GoToPosition(..) => "go-to",
             Action::GoToBookmark(_) => "go-to-bookmark",
             Action::SetBookmark(_) => "set-bookmark",
             Action::MoveToBookmark(_) => "move-to-bookmark",
@@ -648,6 +644,20 @@ mod tests {
                 *name,
                 "sample {sample:?} parsed to a variant whose name is not {name:?}"
             );
+        }
+    }
+
+    #[test]
+    fn removed_actions_keep_their_migration_message_everywhere() {
+        for name in REMOVED_ACTIONS {
+            let err = parse_action(name)
+                .expect_err("a removed action must be rejected, not silently parsed");
+            assert!(
+                !ACTION_NAMES.iter().any(|(n, _)| n == name),
+                "{name} is removed, so it must not stay in the documented catalog"
+            );
+            let trigger = GestureTrigger::Swipe { fingers: 4 };
+            assert_eq!(parse_gesture_config_entry(&trigger, name), Err(err));
         }
     }
 }

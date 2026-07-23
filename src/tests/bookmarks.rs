@@ -1,12 +1,13 @@
 //! Bookmarks: the flat name → canvas-point registry seeded from config and
 //! mutated by the set-bookmark / move-to-bookmark actions, the IPC `bookmark`
-//! verb, session restore, and the hot-reload diff. `go-to-bookmark` reuses the
-//! `go-to` camera math, so set → go-to round-trips exactly.
+//! verb, session restore, and the hot-reload diff. `set-bookmark` captures the
+//! exact inverse of the `go-to-bookmark` camera math, so the two round-trip.
 
 use std::collections::BTreeMap;
 
 use driftwm::config::{Action, parse_action};
 use driftwm::session::{self, SessionEnvelope};
+use smithay::utils::{Logical, Point};
 
 use super::real::TempDir;
 use super::{Fixture, adopt_last_configure, config, map_window, window_by_app_id};
@@ -21,27 +22,36 @@ fn bookmark_request(name: Option<&str>, to: Option<(f64, f64)>, delete: bool) ->
     }
 }
 
+/// Seed `name` at `(x, y)`, jump to it, and return the resulting camera target.
+/// Pass a point the camera isn't already heading to, so a bookmark lookup that
+/// silently missed can't hide behind a stale target from an earlier jump.
+fn jump_to(f: &mut Fixture, name: &str, x: f64, y: f64) -> Point<f64, Logical> {
+    let before = f.state().camera_target();
+    f.state().bookmarks.insert(name.to_string(), [x, y]);
+    f.state()
+        .execute_action(&Action::GoToBookmark(name.to_string()));
+    let target = f
+        .state()
+        .camera_target()
+        .expect("go-to-bookmark sets a camera target");
+    assert_ne!(Some(target), before, "the jump to '{name}' was a no-op");
+    target
+}
+
 #[test]
 fn set_bookmark_then_go_to_round_trips_the_camera() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 
-    // GoToPosition stashes a camera target (the destination of the animation).
-    f.state()
-        .execute_action(&Action::GoToPosition(500.0, -300.0));
-    let dest = f
-        .state()
-        .camera_target()
-        .expect("go-to sets a camera target");
+    let dest = jump_to(&mut f, "dest", 500.0, -300.0);
 
     // set-bookmark captures the pending destination, not a mid-flight frame,
-    // and stores the exact canvas point that go-to would center on.
+    // and stores the exact canvas point the jump centered on.
     f.state().execute_action(&Action::SetBookmark("a".into()));
     assert_eq!(f.state().bookmarks["a"], [500.0, -300.0]);
 
     // Move the target elsewhere, then jump back through the bookmark.
-    f.state()
-        .execute_action(&Action::GoToPosition(-2000.0, 1000.0));
+    jump_to(&mut f, "away", -2000.0, 1000.0);
     f.state().execute_action(&Action::GoToBookmark("a".into()));
 
     let restored = f
@@ -60,19 +70,13 @@ fn set_bookmark_then_go_to_round_trips_at_nondefault_zoom() {
     f.add_output(1, (1920, 1080));
     f.state().set_zoom(2.5);
 
-    f.state()
-        .execute_action(&Action::GoToPosition(500.0, -300.0));
-    let dest = f
-        .state()
-        .camera_target()
-        .expect("go-to sets a camera target");
+    let dest = jump_to(&mut f, "dest", 500.0, -300.0);
 
     f.state().execute_action(&Action::SetBookmark("z".into()));
     // The captured canvas point does not depend on zoom.
     assert_eq!(f.state().bookmarks["z"], [500.0, -300.0]);
 
-    f.state()
-        .execute_action(&Action::GoToPosition(-2000.0, 1000.0));
+    jump_to(&mut f, "away", -2000.0, 1000.0);
     f.state().execute_action(&Action::GoToBookmark("z".into()));
 
     let restored = f
@@ -87,16 +91,13 @@ fn set_bookmark_then_go_to_round_trips_at_nondefault_zoom() {
 
 #[test]
 fn set_bookmark_captures_pending_target_not_a_stale_camera() {
-    use smithay::utils::Point;
-
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 
     // Simulate a camera still mid-flight from an earlier jump: the per-tick
     // camera sits far from a freshly requested destination.
     f.state().set_camera(Point::from((10.0, 10.0)));
-    f.state()
-        .execute_action(&Action::GoToPosition(500.0, -300.0));
+    jump_to(&mut f, "dest", 500.0, -300.0);
     assert_ne!(
         f.state().camera(),
         f.state().camera_target().unwrap(),
@@ -121,15 +122,13 @@ fn bookmark_names_containing_spaces_work_through_parse_and_registry() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 
-    f.state().execute_action(&Action::GoToPosition(80.0, -40.0));
-    let expected = f.state().camera_target().unwrap();
+    jump_to(&mut f, "elsewhere", 0.0, 0.0);
+    jump_to(&mut f, "my spot", 80.0, -40.0);
 
-    f.state().bookmarks.insert("my spot".into(), [80.0, -40.0]);
-    f.state().execute_action(&Action::GoToPosition(0.0, 0.0));
+    // Re-capturing the camera center recovers the spaced name's exact point.
     f.state()
-        .execute_action(&Action::GoToBookmark("my spot".into()));
-
-    assert_eq!(f.state().camera_target(), Some(expected));
+        .execute_action(&Action::SetBookmark("copy".into()));
+    assert_eq!(f.state().bookmarks["copy"], [80.0, -40.0]);
 }
 
 #[test]
@@ -137,8 +136,7 @@ fn go_to_bookmark_unset_name_is_a_no_op() {
     let mut f = Fixture::new();
     f.add_output(1, (1920, 1080));
 
-    f.state()
-        .execute_action(&Action::GoToPosition(100.0, 100.0));
+    jump_to(&mut f, "dest", 100.0, 100.0);
     let before = f.state().camera_target();
     f.state()
         .execute_action(&Action::GoToBookmark("nope".into()));
