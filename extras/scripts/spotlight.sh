@@ -3,7 +3,8 @@
 # Open windows first, suspended stand-ins after (ᶻ prefix), apps last.
 # Selection focuses a window, relaunches a stand-in, or launches an app.
 # Windows come from `driftwm msg state` (one IPC roundtrip; also the only way
-# to see suspended stand-ins — they aren't foreign toplevels).
+# to see suspended stand-ins — they aren't foreign toplevels). The .desktop
+# scan is one awk pass, cached until an applications dir changes.
 # Requires: driftwm, fuzzel, jq
 
 XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
@@ -12,34 +13,67 @@ XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 FUZZEL_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/fuzzel"
 touch "$FUZZEL_CACHE"
 
-# Maps a window's app_id to .desktop Name/Icon.
-lookup_desktop() {
-    id="$1"
-    for dir in "$HOME/.local/share/applications" $(printf '%s' "$XDG_DATA_DIRS" | tr ':' '\n' | sed 's|$|/applications|'); do
-        for f in "$dir/$id.desktop" "$dir"/*"$id"*.desktop; do
-            [ -f "$f" ] || continue
-            name=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
-            icon=$(grep -m1 '^Icon=' "$f" | cut -d= -f2-)
-            [ -n "$name" ] && printf '%s\t%s' "$name" "${icon:-$id}" && return
-        done
-    done
-    for dir in "$HOME/.local/share/applications" $(printf '%s' "$XDG_DATA_DIRS" | tr ':' '\n' | sed 's|$|/applications|'); do
-        [ -d "$dir" ] || continue
-        f=$(grep -rl "^StartupWMClass=$id$" "$dir"/*.desktop 2>/dev/null | head -1)
-        if [ -n "$f" ]; then
-            name=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
-            icon=$(grep -m1 '^Icon=' "$f" | cut -d= -f2-)
-            [ -n "$name" ] && printf '%s\t%s' "$name" "${icon:-$id}" && return
-        fi
-    done
-    printf '%s\t%s' "$id" "$id"
-}
+# App table: `name \t icon \t exec \t desktop-file \t wmclass` per entry.
+APPS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/driftwm-spotlight-apps.tsv"
+
+# ~/.local first so it wins the first-seen dedup below.
+app_dirs=$(printf '%s' "$HOME/.local/share:$XDG_DATA_DIRS" | tr ':' '\n' | sed 's|$|/applications|')
 
 display=$(mktemp)
 lookup=$(mktemp)
-apps_tmp=$(mktemp)
 tmp=""
-trap 'rm -f "$display" "$lookup" "$apps_tmp" "$tmp"' EXIT
+trap 'rm -f "$display" "$lookup" "$tmp"' EXIT
+
+# --- App table (rebuilt only when a .desktop file or applications dir changed) ---
+rebuild=0
+[ -f "$APPS_CACHE" ] || rebuild=1
+if [ "$rebuild" = 0 ]; then
+    # Dir mtime catches installs/removals, file mtime catches edits.
+    stale=$(find $app_dirs -maxdepth 1 \( -type d -o -name '*.desktop' \) \
+        -newer "$APPS_CACHE" 2>/dev/null | head -1)
+    [ -n "$stale" ] && rebuild=1
+fi
+if [ "$rebuild" = 1 ]; then
+    set --
+    for dir in $app_dirs; do
+        [ -d "$dir" ] || continue
+        for f in "$dir"/*.desktop; do
+            [ -f "$f" ] && set -- "$@" "$f"
+        done
+    done
+    tmp=$(mktemp)
+    if [ "$#" -gt 0 ]; then
+        # Single pass over every file; [Desktop Entry] section only.
+        awk -F= '
+            function emit() {
+                if (did == "") return
+                if (nodisp || (type != "" && type != "Application")) return
+                if (name == "" || exec_line == "") return
+                print name "\t" icon "\t" exec_line "\t" did "\t" wmclass
+            }
+            FNR == 1 {
+                emit()
+                main = 0; nodisp = 0
+                type = ""; name = ""; icon = ""; exec_line = ""; wmclass = ""
+                did = FILENAME; sub(/.*\//, "", did)
+            }
+            /^\[Desktop Entry\]/ { main = 1; next }
+            /^\[/                { main = 0; next }
+            !main                { next }
+            /^Name=/           && name == ""      { sub(/^Name=/, "");           name = $0 }
+            /^Icon=/           && icon == ""      { sub(/^Icon=/, "");           icon = $0 }
+            /^Exec=/           && exec_line == "" { sub(/^Exec=/, "");           exec_line = $0 }
+            /^Type=/           && type == ""      { sub(/^Type=/, "");           type = $0 }
+            /^StartupWMClass=/ && wmclass == ""   { sub(/^StartupWMClass=/, ""); wmclass = $0 }
+            /^NoDisplay=true/ { nodisp = 1 }
+            /^Hidden=true/    { nodisp = 1 }
+            END { emit() }
+        ' "$@" > "$tmp"
+    else
+        : > "$tmp"
+    fi
+    mv "$tmp" "$APPS_CACHE"
+fi
 
 # --- Windows (canvas windows focused-first, then fullscreen/pinned, suspended last) ---
 driftwm msg state --json 2>/dev/null \
@@ -50,10 +84,26 @@ driftwm msg state --json 2>/dev/null \
           + [$s.windows[] | select(.suspended)] )
         | .[] | [(if .suspended then "s" else "w" end), .id, .app_id, .title] | @tsv' \
     | while IFS='	' read -r kind wid app_id title; do
-        display_title=$(printf '%s' "$title" | sed -e 's/—/-/g' -e 's/–/-/g' -e 's/‎//g' -e 's/‏//g' -e 's/⁨//g' -e 's/⁩//g')
-        desktop=$(lookup_desktop "$app_id")
-        app_name="${desktop%%	*}"
-        icon="${desktop#*	}"
+        # Resolve app_id -> Name/Icon against the table: exact filename, then
+        # filename substring, then StartupWMClass. Also tidies the title.
+        row=$(TITLE="$title" awk -F'\t' -v id="$app_id" '
+            $4 == id ".desktop" && exact == "" { exact = $1 "\t" $2 }
+            index($4, id) && subm == ""        { subm = $1 "\t" $2 }
+            $5 == id && wm == ""               { wm = $1 "\t" $2 }
+            END {
+                best = exact != "" ? exact : subm != "" ? subm : wm
+                if (best == "") best = id "\t" id
+                split(best, b, "\t")
+                if (b[2] == "") b[2] = id
+                t = ENVIRON["TITLE"]
+                gsub(/—|–/, "-", t)
+                gsub(/‎|‏|⁨|⁩/, "", t)
+                print b[1] "\t" b[2] "\t" t
+            }' "$APPS_CACHE")
+        app_name=${row%%	*}
+        rest=${row#*	}
+        icon=${rest%%	*}
+        display_title=${rest#*	}
         [ "$kind" = "s" ] && mark="ᶻ" || mark="›"
         if [ -n "$display_title" ]; then
             printf '%s %s  %s\0icon\037%s\n' "$mark" "$display_title" "$app_name" "$icon" >> "$display"
@@ -63,37 +113,8 @@ driftwm msg state --json 2>/dev/null \
         printf '%s\t%s\n' "$kind" "$wid" >> "$lookup"
 done
 
-# --- Apps (parse .desktop in [Desktop Entry] section only) ---
-for dir in "$HOME/.local/share/applications" $(printf '%s' "$XDG_DATA_DIRS" | tr ':' '\n' | sed 's|$|/applications|'); do
-    [ -d "$dir" ] || continue
-    for f in "$dir"/*.desktop; do
-        [ -f "$f" ] || continue
-        did="${f##*/}"
-        awk -F= -v did="$did" '
-            BEGIN { main=0; nodisp=0; hidden=0; type=""; name=""; icon=""; exec_line="" }
-            /^\[Desktop Entry\]/ { main=1; next }
-            /^\[/                { main=0; next }
-            !main                { next }
-            /^Name=/      && name==""      { sub(/^Name=/, "");      name=$0 }
-            /^Icon=/      && icon==""      { sub(/^Icon=/, "");      icon=$0 }
-            /^Exec=/      && exec_line=="" { sub(/^Exec=/, "");      exec_line=$0 }
-            /^Type=/      && type==""      { sub(/^Type=/, "");      type=$0 }
-            /^NoDisplay=true/              { nodisp=1 }
-            /^Hidden=true/                 { hidden=1 }
-            END {
-                if (nodisp || hidden)               exit 1
-                if (type != "" && type != "Application") exit 1
-                if (name == "" || exec_line == "")  exit 1
-                print name "\t" icon "\t" exec_line "\t" did
-            }
-        ' "$f" >> "$apps_tmp"
-    done
-done
-
-# Dedup by Name (first-seen wins, so ~/.local overrides /usr/share since we listed it first),
-# annotate with usage count from fuzzel's cache (keyed by .desktop filename),
-# then sort by count desc then name asc (case-insensitive).
-awk -F'\t' '!seen[$1]++' "$apps_tmp" \
+# --- Apps: dedup by Name (first-seen wins), rank by fuzzel usage count, then name ---
+awk -F'\t' '!seen[$1]++' "$APPS_CACHE" \
   | awk -F'\t' -v cache="$FUZZEL_CACHE" '
         BEGIN {
             while ((getline line < cache) > 0) {
