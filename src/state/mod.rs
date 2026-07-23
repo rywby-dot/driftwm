@@ -1426,7 +1426,12 @@ impl DriftWm {
             for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
                 for (surface, _) in self.layers_on_sorted(output, layer) {
                     let s = surface.wl_surface();
-                    if s.alive()
+                    // Role aliveness, not just the wl_surface: a launcher destroys the
+                    // role first, and smithay resets the cached interactivity only
+                    // after `layer_destroyed` returns — so the recompute that call
+                    // makes would otherwise hand focus back to the dying launcher.
+                    if surface.alive()
+                        && s.alive()
                         && surface.cached_state().keyboard_interactivity
                             == KeyboardInteractivity::Exclusive
                     {

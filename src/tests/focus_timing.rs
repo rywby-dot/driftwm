@@ -1,7 +1,9 @@
 //! Keyboard-focus delivery timing: focus must never reach a surface before
-//! its first buffer, and closing a window hands focus down the MRU chain.
+//! its first buffer, closing a window hands focus down the MRU chain, and a
+//! launcher layer hands focus back to the window when it tears down.
 
 use driftwm::config::Config;
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use super::{Fixture, keyboard_focus, server_surface, window_by_app_id};
 
@@ -78,6 +80,60 @@ fn focus_after_close_walks_the_mru() {
     f.client(id).window(&b).destroy();
     f.double_roundtrip(id);
     assert_eq!(keyboard_focus(&mut f), Some(server_surface(&win_a)));
+}
+
+/// A dismissed launcher destroys its layer-shell role while the `wl_surface` is
+/// still alive and mapped; the focus recompute must not re-pick it.
+#[test]
+fn exclusive_layer_teardown_returns_focus_to_the_window() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    map_window(&mut f, id, "a");
+    let win_a = window_by_app_id(&mut f, "a").unwrap();
+    assert_eq!(keyboard_focus(&mut f), Some(server_surface(&win_a)));
+
+    let layer = f
+        .client(id)
+        .create_layer(None, zwlr_layer_shell_v1::Layer::Overlay, "launcher");
+    let ls = layer.surface.clone();
+    layer.set_configure_props(super::client::LayerConfigureProps {
+        size: Some((400, 300)),
+        kb_interactivity: Some(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive),
+        ..Default::default()
+    });
+    layer.commit();
+    f.roundtrip(id);
+
+    let layer = f.client(id).layer(&ls);
+    layer.set_size(400, 300);
+    layer.attach_new_buffer();
+    layer.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    assert_ne!(
+        keyboard_focus(&mut f),
+        Some(server_surface(&win_a)),
+        "an exclusive layer must own focus while it is mapped"
+    );
+
+    // Teardown order a real launcher uses: layer-shell role first, wl_surface after.
+    f.client(id).layer(&ls).layer_surface.destroy();
+    f.double_roundtrip(id);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(server_surface(&win_a)),
+        "focus must return to the window the launcher was opened over"
+    );
+
+    f.client(id).layer(&ls).surface.destroy();
+    f.double_roundtrip(id);
+    assert_eq!(
+        keyboard_focus(&mut f),
+        Some(server_surface(&win_a)),
+        "focus must stay on the window once the launcher's surface is gone too"
+    );
 }
 
 #[test]
