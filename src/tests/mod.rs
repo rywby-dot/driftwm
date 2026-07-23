@@ -38,6 +38,7 @@ mod suspend_flows;
 mod suspended;
 mod window_opening;
 mod window_rules;
+mod zoom_to_fit;
 
 use fixture::Fixture;
 

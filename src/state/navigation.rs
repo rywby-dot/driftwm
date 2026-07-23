@@ -34,8 +34,7 @@ const ACTIVATION_ONSCREEN_THRESHOLD: f64 = f64::EPSILON;
 impl DriftWm {
     /// Navigate the active output's viewport to center on a window: raise,
     /// focus, animate camera. When `reset_zoom` is true, zoom animates to 1.0
-    /// (intentional navigation). Otherwise preserves current zoom, or restores
-    /// saved zoom if leaving overview.
+    /// (intentional navigation); otherwise the current zoom is preserved.
     pub fn navigate_to_window(&mut self, window: &Window, reset_zoom: bool) {
         if let Some(output) = self.active_output() {
             self.navigate_to_window_on(window, &output, reset_zoom);
@@ -91,6 +90,9 @@ impl DriftWm {
             ))
         });
         let mut os = output_state(output);
+        // Disarms a pending zoom-to-fit return, same as a pan: the fit view is
+        // a camera position, not a mode that navigation exits.
+        os.overview_return = None;
         os.momentum.stop();
         os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
             canvas: window_center,
@@ -100,15 +102,13 @@ impl DriftWm {
         os.zoom_target = Some(target_zoom);
     }
 
-    /// The zoom a navigation animates to on `output`, consuming any pending
-    /// overview return. `reset_zoom` goes to 1.0; otherwise the pre-overview
-    /// zoom comes back when leaving overview, else the current zoom is kept.
-    pub(crate) fn navigation_target_zoom(&mut self, output: &Output, reset_zoom: bool) -> f64 {
-        let overview_return = output_state(output).overview_return.take();
+    /// The zoom a navigation animates to on `output`: 1.0 when `reset_zoom`
+    /// (intentional navigation), else the zoom already in effect.
+    pub(crate) fn navigation_target_zoom(&self, output: &Output, reset_zoom: bool) -> f64 {
         if reset_zoom {
             1.0
         } else {
-            overview_return.map_or_else(|| output_state(output).zoom, |(_, saved_zoom)| saved_zoom)
+            output_state(output).zoom
         }
     }
 

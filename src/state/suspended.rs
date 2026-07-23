@@ -170,6 +170,7 @@ impl DriftWm {
         let target = driftwm::canvas::camera_to_center_window(loc, size, vc, target_zoom, bar);
         let center = self.nav_center(&element);
         let mut os = crate::state::output_state(output);
+        os.overview_return = None;
         os.momentum.stop();
         os.zoom_animation_anchor = Some(crate::state::ZoomAnimationAnchor {
             canvas: center,
