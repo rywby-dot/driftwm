@@ -42,10 +42,8 @@ pub struct SessionStore {
     /// Per-output cameras read at startup, to seed outputs the runtime state
     /// file hasn't recorded yet (fresh boot).
     pub(crate) durable_cameras: HashMap<String, (Point<f64, Logical>, f64)>,
-    /// The bookmark registry read from the file at startup, stashed unconditionally.
-    /// With `restore_bookmarks` off it is written back verbatim so a flag-off
-    /// session never destroys the saved registry (mirrors `durable_cameras`);
-    /// with the flag on it is overlaid onto the live registry at load instead.
+    /// The bookmark registry read from the file at startup, stashed
+    /// unconditionally (mirrors `durable_cameras`).
     pub(crate) durable_bookmarks: BTreeMap<String, [f64; 2]>,
     /// A change is waiting for the debounce timer to write it.
     dirty: bool,

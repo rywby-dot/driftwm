@@ -935,7 +935,7 @@ fn adopt_of_unfocused_window_keeps_focus_history() {
     inject_cache(&mut f, &tmp, &["myapp"]);
     origin_view(&mut f);
 
-    // A of the app opens (focused on map); then B opens and takes focus, so A is
+    // A window of the app opens (focused on map); then B opens and takes focus, so A is
     // unfocused and sits behind B in the MRU: order is [B, A].
     let cid = f.add_client();
     let a = map_window(&mut f, cid, "myapp", (300, 200));
