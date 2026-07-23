@@ -657,7 +657,6 @@ mod tests {
                 desktop_id: "app.desktop".into(),
                 display_name: "App".into(),
             },
-            String::new(),
             Origin::Explicit,
             false,
         )))

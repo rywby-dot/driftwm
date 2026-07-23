@@ -125,7 +125,6 @@ impl DriftWm {
             sid,
             size,
             identity,
-            entry.title,
             entry.origin,
             entry.csd,
         ));
@@ -285,7 +284,6 @@ impl DriftWm {
         }
         let app_id = window.app_id_or_class().unwrap_or_default();
         let identity = self.resolve_identity(&app_id)?;
-        let title = window.window_title().unwrap_or_default();
         // A CSD window restores to a stand-in whose body is shrunk under the
         // bar, so persist that shrunken body — the same rect a live suspend
         // leaves, so restore + adopt reproduce the original footprint.
@@ -300,7 +298,6 @@ impl DriftWm {
             app_id: identity.app_id,
             desktop_id: identity.desktop_id,
             display_name: identity.display_name,
-            title,
             position: [x, y],
             size: [body.size.w, body.size.h],
             origin: Origin::Quit,
@@ -369,7 +366,6 @@ fn suspended_entry(s: &SuspendedWindow, loc: Point<i32, Logical>) -> SessionEntr
         app_id: s.identity.app_id.clone(),
         desktop_id: s.identity.desktop_id.clone(),
         display_name: s.identity.display_name.clone(),
-        title: s.last_title.clone(),
         position: [x, y],
         size: [size.w, size.h],
         origin: s.origin,
@@ -439,7 +435,6 @@ mod tests {
             app_id: "app".into(),
             desktop_id: "app.desktop".into(),
             display_name: "App".into(),
-            title: "t".into(),
             position,
             size,
             origin: Origin::Explicit,

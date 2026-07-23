@@ -56,8 +56,6 @@ pub struct SuspendedWindow {
     pub id: SuspendedId,
     pub size: Cell<Size<i32, Logical>>,
     pub identity: AppIdentity,
-    /// Kept for IPC inventories only.
-    pub last_title: String,
     /// A live suspend is `Explicit`; one restored from a `Quit` record keeps
     /// `Quit` across rematerialize→quit cycles. Immutable once set.
     pub origin: Origin,
@@ -84,7 +82,6 @@ impl SuspendedWindow {
         id: SuspendedId,
         size: Size<i32, Logical>,
         identity: AppIdentity,
-        last_title: String,
         origin: Origin,
         csd: bool,
     ) -> Self {
@@ -92,7 +89,6 @@ impl SuspendedWindow {
             id,
             size: Cell::new(size),
             identity,
-            last_title,
             origin,
             csd,
             chrome: RefCell::new(SuspendedChrome::default()),
@@ -224,7 +220,9 @@ impl WindowExt for StageWindow {
     fn window_title(&self) -> Option<String> {
         match self {
             Self::Client(w) => w.window_title(),
-            Self::Suspended(s) => Some(s.last_title.clone()),
+            // No live client, and relaunch starts the app fresh — nothing to
+            // truthfully report as the current title.
+            Self::Suspended(_) => None,
         }
     }
 

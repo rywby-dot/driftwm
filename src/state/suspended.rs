@@ -34,7 +34,6 @@ pub struct SuspendMark {
     pub identity: AppIdentity,
     /// Trigger-time body rect: content top-left (stage position) + geometry size.
     pub rect: Rectangle<i32, Logical>,
-    pub title: String,
     pub deadline: Instant,
 }
 
@@ -581,13 +580,11 @@ impl DriftWm {
             let loc = self.stage.position_of(&window).unwrap_or_default();
             Rectangle::new(loc, window.geometry().size)
         });
-        let title = window.window_title().unwrap_or_default();
         self.suspend_marks.insert(
             surface.id(),
             SuspendMark {
                 identity,
                 rect,
-                title,
                 deadline: Instant::now() + MARK_TTL,
             },
         );
@@ -720,7 +717,7 @@ impl DriftWm {
     }
 
     /// Decide whether a destroying `window` converts into a suspended window,
-    /// returning the stand-in's identity + geometry + title if so. Marks decide
+    /// returning the stand-in's identity + geometry if so. Marks decide
     /// first: with both a suspend and a real-close mark live (two conflicting
     /// commands on a close-refusing window), the later one wins — deadlines are
     /// set-time plus a shared TTL, so comparing them compares set order. With
@@ -774,7 +771,6 @@ impl DriftWm {
             return Some(SuspendConversion {
                 identity: mark.identity,
                 rect: mark.rect,
-                title: mark.title,
                 csd,
             });
         }
@@ -815,7 +811,6 @@ impl DriftWm {
         Some(SuspendConversion {
             identity,
             rect,
-            title,
             csd,
         })
     }
@@ -914,7 +909,6 @@ impl DriftWm {
             sid,
             body.size,
             conv.identity,
-            conv.title,
             driftwm::session::Origin::Explicit,
             conv.csd,
         ));
@@ -998,11 +992,10 @@ impl DriftWm {
     }
 }
 
-/// The identity + geometry + title a conversion hands to the new stand-in.
+/// The identity + geometry a conversion hands to the new stand-in.
 pub struct SuspendConversion {
     pub identity: AppIdentity,
     pub rect: Rectangle<i32, Logical>,
-    pub title: String,
     /// Whether the closing window was client-decorated. Every stand-in is
     /// barred, but a CSD origin shrinks the body under the bar (preserving the
     /// footprint) and reassembles the full geometry on adopt.
@@ -1078,7 +1071,6 @@ impl DriftWm {
             sid,
             size,
             identity,
-            display_name.to_string(),
             driftwm::session::Origin::Explicit,
             false,
         ));
@@ -1107,7 +1099,6 @@ impl DriftWm {
             sid,
             size,
             identity,
-            display_name.to_string(),
             driftwm::session::Origin::Explicit,
             true,
         ));

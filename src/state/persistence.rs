@@ -115,7 +115,10 @@ impl DriftWm {
                         .expect("window from stage.windows() has an id")
                         .0,
                     app_id: s.identity.app_id.clone(),
-                    title: s.last_title.clone(),
+                    // A stand-in is an app-level placeholder, not the window it
+                    // replaced — relaunch starts the app fresh, so there's no
+                    // title left to report.
+                    title: String::new(),
                     position: [rx, ry],
                     size: [size.w, size.h],
                     is_focused: focused_suspended == Some(s.id),

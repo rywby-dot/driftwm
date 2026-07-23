@@ -73,7 +73,6 @@ fn entry(id: u64, app: &str, origin: Origin) -> SessionEntry {
         app_id: app.to_string(),
         desktop_id: format!("{app}.desktop"),
         display_name: app.to_uppercase(),
-        title: format!("{app}-title"),
         position: [100, 200],
         size: [400, 300],
         origin,
