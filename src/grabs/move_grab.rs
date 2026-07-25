@@ -201,6 +201,24 @@ impl MoveGrab {
         pan_min: f64,
         pan_max: f64,
     ) -> Option<Point<f64, Logical>> {
+        // A disabled/malformed zone must never reach the divisions below.
+        // Config parsing filters non-finite values, but this function is shared
+        // by protocol and compositor grabs and should preserve that boundary
+        // itself.
+        if !edge_zone.is_finite()
+            || edge_zone <= 0.0
+            || !output_w.is_finite()
+            || output_w <= 0.0
+            || !output_h.is_finite()
+            || output_h <= 0.0
+            || !screen_pos.x.is_finite()
+            || !screen_pos.y.is_finite()
+            || !pan_min.is_finite()
+            || !pan_max.is_finite()
+        {
+            return None;
+        }
+
         let dist_left = screen_pos.x;
         let dist_right = output_w - screen_pos.x;
         let dist_top = screen_pos.y;
@@ -773,5 +791,40 @@ impl TouchGrab<DriftWm> for MoveGrab {
             ClusterMember::Client(w) => data.disarm_interactive_move(w),
             ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MoveGrab;
+    use smithay::utils::Point;
+
+    fn magnitude(point: Point<f64, smithay::utils::Logical>) -> f64 {
+        point.x.hypot(point.y)
+    }
+
+    #[test]
+    fn edge_pan_disabled_zone_is_inert() {
+        assert_eq!(
+            MoveGrab::edge_pan_velocity((0.0, 0.0).into(), 1920.0, 1080.0, 0.0, 4.0, 10.0),
+            None
+        );
+    }
+
+    #[test]
+    fn edge_pan_rejects_non_finite_input() {
+        assert_eq!(
+            MoveGrab::edge_pan_velocity((f64::NAN, 0.0).into(), 1920.0, 1080.0, 80.0, 4.0, 10.0,),
+            None
+        );
+    }
+
+    #[test]
+    fn edge_pan_never_exceeds_maximum_outside_viewport() {
+        let velocity =
+            MoveGrab::edge_pan_velocity((-1000.0, -1000.0).into(), 1920.0, 1080.0, 80.0, 4.0, 10.0)
+                .expect("outside point remains an edge-pan request");
+
+        assert!(magnitude(velocity) <= 10.0);
     }
 }

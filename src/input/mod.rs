@@ -1019,6 +1019,7 @@ impl DriftWm {
             // Notice the released grab here so stale DnD state cannot turn a
             // later unrelated grab into edge-pan.
             self.pointer_dnd_active = false;
+            self.dnd_icon = None;
             for output in self.space.outputs().cloned().collect::<Vec<_>>() {
                 self.clear_edge_pan(&output);
             }
@@ -1122,7 +1123,7 @@ impl DriftWm {
             driftwm::canvas::canvas_to_screen(driftwm::canvas::CanvasPos(canvas_pos), camera, zoom)
                 .0;
         let size = crate::state::output_logical_size(&output);
-        let velocity = crate::grabs::MoveSurfaceGrab::edge_pan_velocity(
+        let velocity = crate::grabs::MoveGrab::edge_pan_velocity(
             screen_pos,
             size.w as f64,
             size.h as f64,

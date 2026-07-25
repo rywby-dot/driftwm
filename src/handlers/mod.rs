@@ -165,15 +165,34 @@ impl WaylandDndGrabHandler for DriftWm {
         });
         match type_ {
             dnd::GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    self.dnd_icon = None;
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    self.dnd_icon = None;
+                    source.cancel();
+                    return;
+                };
+                // Set this only after the protocol grab has been validated. A
+                // stale true value would make an unrelated pointer grab drive
+                // data-device edge-pan.
                 self.pointer_dnd_active = true;
-                let pointer = seat.get_pointer().unwrap();
-                let start_data = pointer.grab_start_data().unwrap();
                 let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
                 pointer.set_grab(self, grab, serial, Focus::Keep);
             }
             dnd::GrabType::Touch => {
-                let touch = seat.get_touch().unwrap();
-                let start_data = touch.grab_start_data().unwrap();
+                let Some(touch) = seat.get_touch() else {
+                    self.dnd_icon = None;
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = touch.grab_start_data() else {
+                    self.dnd_icon = None;
+                    source.cancel();
+                    return;
+                };
                 let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
                 touch.set_grab(self, grab, serial);
             }
