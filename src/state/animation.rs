@@ -11,6 +11,15 @@ use smithay::output::Output;
 use super::{DriftWm, FocusTarget, output_state};
 
 impl DriftWm {
+    /// Preserve the legacy edge-pan tuning, which advanced at roughly 240
+    /// render ticks per second, while making it independent of the actual tick
+    /// rate. Extra render-loop iterations (for example a DnD target committing
+    /// on enter/motion) therefore cannot make the camera move faster.
+    fn edge_pan_frame_scale(dt: Duration) -> f64 {
+        const LEGACY_EDGE_PAN_TICKS_PER_SECOND: f64 = 240.0;
+        dt.as_secs_f64() * LEGACY_EDGE_PAN_TICKS_PER_SECOND
+    }
+
     /// Frame-rate independent lerp factor for smooth animations.
     /// Returns how much of the remaining distance to cover this frame.
     fn animation_factor(&self, dt: Duration) -> f64 {
@@ -238,7 +247,7 @@ impl DriftWm {
     /// Apply edge auto-pan each frame during a window drag near viewport edges.
     /// Synthetic pointer motion keeps cursor at the same screen position and
     /// lets the active MoveGrab reposition the window automatically.
-    pub fn apply_edge_pan(&mut self) {
+    pub fn apply_edge_pan(&mut self, dt: Duration) {
         let Some(output) = self.active_output() else {
             return;
         };
@@ -247,7 +256,11 @@ impl DriftWm {
         };
         // velocity is screen-space speed; convert to canvas delta
         let zoom = self.zoom();
-        let canvas_delta = Point::from((velocity.x / zoom, velocity.y / zoom));
+        let frame_scale = Self::edge_pan_frame_scale(dt);
+        let canvas_delta = Point::from((
+            velocity.x * frame_scale / zoom,
+            velocity.y * frame_scale / zoom,
+        ));
         self.set_camera(self.camera() + canvas_delta);
         self.update_output_from_camera();
 
@@ -512,7 +525,7 @@ impl DriftWm {
             }
 
             self.tick_scroll_momentum_on(output, is_active, dt);
-            self.tick_edge_pan_on(output, is_active);
+            self.tick_edge_pan_on(output, is_active, dt);
             // A fullscreen output's camera is locked (set_camera_on refuses to
             // move it). Drop any pending pan/zoom target so it can't fire the
             // moment fullscreen exits; the ticks then no-op on the None targets.
@@ -553,13 +566,17 @@ impl DriftWm {
         }
     }
 
-    fn tick_edge_pan_on(&mut self, output: &Output, is_active: bool) {
+    fn tick_edge_pan_on(&mut self, output: &Output, is_active: bool, dt: Duration) {
         let Some(velocity) = self.effective_edge_pan_velocity(output, Instant::now()) else {
             return;
         };
         let canvas_delta = {
             let os = output_state(output);
-            Point::from((velocity.x / os.zoom, velocity.y / os.zoom))
+            let frame_scale = Self::edge_pan_frame_scale(dt);
+            Point::from((
+                velocity.x * frame_scale / os.zoom,
+                velocity.y * frame_scale / os.zoom,
+            ))
         };
 
         let cam = output_state(output).camera;
@@ -695,6 +712,27 @@ impl DriftWm {
                 ));
                 self.warp_pointer(new_pos);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DriftWm;
+    use std::time::Duration;
+
+    #[test]
+    fn edge_pan_scale_preserves_legacy_240_hz_speed() {
+        let dt = Duration::from_secs_f64(1.0 / 240.0);
+        assert!((DriftWm::edge_pan_frame_scale(dt) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn edge_pan_distance_is_independent_of_tick_rate() {
+        for hz in [30.0, 60.0, 144.0, 240.0, 360.0] {
+            let per_tick = DriftWm::edge_pan_frame_scale(Duration::from_secs_f64(1.0 / hz));
+            let distance_per_second = per_tick * hz;
+            assert!((distance_per_second - 240.0).abs() < 1e-4);
         }
     }
 }

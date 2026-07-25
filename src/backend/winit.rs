@@ -165,7 +165,7 @@ pub fn init_winit(
             data.refresh_cursor_edge_pan();
 
             // --- Edge auto-pan (window drag near viewport edges) ---
-            data.apply_edge_pan();
+            data.apply_edge_pan(dt);
 
             // --- Zoom animation (before camera so recomputed target is used) ---
             data.apply_zoom_animation(dt);

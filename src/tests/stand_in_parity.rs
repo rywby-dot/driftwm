@@ -203,7 +203,8 @@ fn suspended_drag_edge_pan_drives_the_camera() {
         "precondition: edge-pan armed"
     );
 
-    f.state().apply_edge_pan();
+    f.state()
+        .apply_edge_pan(std::time::Duration::from_secs_f64(1.0 / 60.0));
 
     assert!(
         f.state().camera().x < 0.0,
