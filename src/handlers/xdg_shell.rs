@@ -1,8 +1,9 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
 
-use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab};
-use crate::state::{DriftWm, FocusTarget, PopupGrabState, output_state};
+use crate::grabs::{MoveGrab, ResizeGrab, ResizeState};
+use crate::state::{
+    ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_state,
+};
 use crate::surface_tree::focus_belongs_to_toplevel;
 use driftwm::window_ext::WindowExt;
 use smithay::{
@@ -56,18 +57,11 @@ impl XdgShellHandler for DriftWm {
             })
             .unwrap_or((0, 0));
 
-        // Snapshot the last focused *window* so `auto_placement_pos` can anchor
-        // against whatever the user was working with — `window_focus` survives
-        // even when a launcher (an exclusive layer surface) currently holds the
-        // live keyboard focus. `None` here means the user explicitly had no
-        // focused window (e.g. clicked empty canvas), so auto placement falls
-        // back to center.
-        let prev_focus_window = self
-            .window_focus
-            .as_ref()
-            .and_then(|t| self.window_for_surface(&t.0));
+        // Snapshot the focus anchor so `auto_placement_pos` can anchor a new
+        // window beside it once mapping steals focus; see `focused_anchor_element`.
+        let prev_focus = self.focused_anchor_element();
         self.auto_anchor_snapshot
-            .insert(wl_surface.clone(), prev_focus_window);
+            .insert(wl_surface.clone(), prev_focus);
 
         // Initial configure is deferred to ensure_initial_configure in
         // compositor.rs first-commit handler so rule-resolved state (size,
@@ -75,13 +69,15 @@ impl XdgShellHandler for DriftWm {
         // Sending one here would produce a configure with unresolved state,
         // and a second on first commit — SDL2/SCTK clients have historically
         // desynced on back-to-back initial configures.
-        self.map_window(window.clone(), pos.into(), true);
-        self.raise_window(&window, true);
+        self.map_window(window.clone(), pos.into(), false);
+        self.raise_window(&window, false);
         self.enforce_below_windows();
         // Don't focus here: a pre-buffer wl_keyboard.enter is unusable, and
         // set_focus is a no-op when the target is unchanged, so focusing now
         // would trap the client unfocused (the on-commit re-focus does nothing).
-        // Focus is delivered once mapped, on first commit.
+        // Focus is delivered once mapped, on first commit; activation is
+        // likewise deferred to that commit so it can ride the placement
+        // configure instead of arriving as a premature standalone one.
         self.pending_center.insert(wl_surface);
     }
 
@@ -217,8 +213,9 @@ impl XdgShellHandler for DriftWm {
     // driftwm has no minimize concept, but a client that minimizes itself
     // stalls: xdg-shell carries no "minimized" state, so the toolkit stops
     // drawing and only clears its internal minimized flag on a configure with
-    // `Activated` — which driftwm never sends on plain focus. Refuse the
-    // minimize and send an `Activated` configure to wake it back up.
+    // `Activated`. The exclusive-activation gate would suppress that configure
+    // when the window is already the activated one (idempotent, sends nothing),
+    // so force `Activated` unconditionally here to un-stick the client.
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
@@ -238,6 +235,15 @@ impl XdgShellHandler for DriftWm {
         // visibility against the home output's camera, which stays parked
         // until this runs.)
         let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
+        // Captured before the teardown drops the entry: a markless
+        // (suspend_on_close) conversion of a fullscreen self-close must seat
+        // the stand-in at the pre-fullscreen rect, not the fullscreen-sized
+        // buffer parked at the camera origin.
+        let fullscreen_restore_rect = fs_output.as_ref().and_then(|output| {
+            self.stage
+                .fullscreen_on(&output.name())
+                .map(|entry| Rectangle::new(entry.saved_location, entry.saved_size))
+        });
         if let Some(ref output) = fs_output {
             self.stage.take_fullscreen(&output.name());
             // Two statements, not one `if let`: the scrutinee's MutexGuard
@@ -250,6 +256,20 @@ impl XdgShellHandler for DriftWm {
         // Belt and suspenders: a dead window whose surface no longer resolves
         // can't match above; sweep any fullscreen entry it left behind.
         self.reap_dead_fullscreen();
+
+        // A live suspend mark, or an eligible client-initiated close under
+        // `suspend_on_close`, converts the window into a compositor-drawn
+        // stand-in in place instead of destroying it. Runs before the
+        // focus-follow / unmap path below and before `cleanup_surface_state`,
+        // which the conversion relies on to purge the surface-keyed state.
+        if let Some(window) = &window
+            && let Some(conv) =
+                self.resolve_suspend_conversion(&wl_surface, window, fullscreen_restore_rect)
+        {
+            self.convert_to_suspended(window, &wl_surface, conv);
+            self.cleanup_surface_state(&wl_surface);
+            return;
+        }
 
         if let Some(ref window) = window {
             // Pick a window to follow when the destroyed one was focused.
@@ -286,7 +306,17 @@ impl XdgShellHandler for DriftWm {
                 .focus_history()
                 .first()
                 .is_some_and(|last_focused| last_focused == window);
-            if focus_on_this_toplevel || was_last_focused || no_keyboard_focus {
+            // A focused suspended window holds no seat focus and isn't in
+            // history, so `no_keyboard_focus`/`was_last_focused` would otherwise
+            // fire and steal focus from it when any unrelated window is
+            // destroyed. The user is looking at the suspended window — leave it.
+            let focus_is_suspended = matches!(
+                self.window_focus,
+                Some(crate::state::FocusIntent::Suspended(_))
+            );
+            if !focus_is_suspended
+                && (focus_on_this_toplevel || was_last_focused || no_keyboard_focus)
+            {
                 if let Some(target) = follow {
                     // Pan only if the follow target isn't already fully on
                     // screen — set_focus alone is enough when the user can
@@ -317,7 +347,8 @@ impl XdgShellHandler for DriftWm {
                         .stage
                         .focus_history()
                         .iter()
-                        .find(|w| w != &window)
+                        .filter_map(|w| w.client())
+                        .find(|w| *w != window)
                         .cloned();
                     let target = match (home.as_ref(), mru) {
                         (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
@@ -391,13 +422,13 @@ impl XdgShellHandler for DriftWm {
             };
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
-            let grab = MoveSurfaceGrab::new(
+            self.arm_interactive_move(&window);
+            let grab = MoveGrab::new(
                 start_data,
                 window,
                 initial_window_location,
                 output,
                 Vec::new(),
-                HashSet::new(),
             );
             pointer.set_grab(self, grab, serial, Focus::Clear);
             return;
@@ -419,6 +450,7 @@ impl XdgShellHandler for DriftWm {
                 };
                 // Revoke the client's in-flight touch sequence (see the canvas branch below).
                 touch.cancel(self);
+                self.arm_interactive_move(&window);
                 touch.set_grab(self, grab, serial);
                 return;
             }
@@ -437,14 +469,14 @@ impl XdgShellHandler for DriftWm {
             touch.cancel(self);
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
-            let grab = MoveSurfaceGrab::new_touch(
+            self.arm_interactive_move(&window);
+            let grab = MoveGrab::new_touch(
                 touch_start,
                 window,
                 initial_window_location,
                 output,
                 1,
                 Vec::new(),
-                HashSet::new(),
             );
             touch.set_grab(self, grab, serial);
         }
@@ -503,6 +535,7 @@ impl XdgShellHandler for DriftWm {
                     initial_window_location,
                     initial_window_size,
                     initial_screen_pos: pinned_initial_screen_pos,
+                    last_committed_size: initial_window_size,
                 });
         });
 
@@ -519,14 +552,15 @@ impl XdgShellHandler for DriftWm {
         // edge-drag propagation behaves identically for SSD and CSD windows.
         let cluster_resize =
             if self.config.decoration_resize_snapped && pinned_initial_screen_pos.is_none() {
-                self.cluster_snapshot_for_resize(&window, edges)
+                self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
             } else {
                 crate::state::ClusterResizeSnapshot::empty()
             };
         let constraints = crate::grabs::SizeConstraints::for_window(&window);
-        let grab = ResizeSurfaceGrab {
+        let locked_ratio = crate::grabs::locked_ratio_for(&window, initial_window_size);
+        let grab = ResizeGrab {
             start_data,
-            window,
+            target: ClusterMember::Client(window),
             edges,
             initial_window_location,
             initial_window_size,
@@ -539,6 +573,7 @@ impl XdgShellHandler for DriftWm {
             pinned_initial_screen_pos,
             touch_start: None,
             touch_slots: 0,
+            locked_ratio,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }

@@ -39,6 +39,15 @@ use crate::state::DriftWm;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusTarget(pub WlSurface);
 
+/// Window-level keyboard-focus intent: either a real surface, or a suspended
+/// window (which holds no seat keyboard focus — the actual focus derives to
+/// `None` while a suspended window is the intended target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusIntent {
+    Surface(FocusTarget),
+    Suspended(crate::state::SuspendedId),
+}
+
 impl From<PopupKind> for FocusTarget {
     fn from(popup: PopupKind) -> Self {
         FocusTarget(popup.wl_surface().clone())

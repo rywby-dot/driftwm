@@ -10,6 +10,7 @@ mod lifecycle;
 mod screenshot;
 mod shader_chunks;
 mod shaders;
+mod suspended;
 mod tile_chunks;
 mod tile_chunks_tiff;
 mod tile_worker;
@@ -24,7 +25,7 @@ pub use elements::{
 };
 pub use error_bar::ErrorBarCache;
 pub use lifecycle::{
-    post_render, refresh_foreign_toplevels, send_frame_callbacks_fallback,
+    post_render, refresh_ext_workspaces, refresh_foreign_toplevels, send_frame_callbacks_fallback,
     take_presentation_feedback, update_primary_scanout_output,
 };
 pub use screenshot::capture_region_to_png;
@@ -34,6 +35,9 @@ pub use shaders::{
     compile_shadow_shader,
 };
 pub use tile_chunks::BgChunkCache;
+
+#[cfg(test)]
+pub(crate) use suspended::{ensure_body, ensure_label};
 
 use blur::{BlurLayer, BlurRequestData, process_blur_requests};
 use layers::{build_canvas_layer_elements, build_layer_elements};
@@ -55,6 +59,8 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
+use crate::decorations::DecorationKey;
+use crate::state::StageWindow;
 use driftwm::canvas;
 use driftwm::window_ext::WindowExt;
 
@@ -170,10 +176,11 @@ fn push_plain_elements(
 /// next live frame rebuilds those entries once — preferred over a second cache
 /// since captures are rare.
 ///
-/// When `isolate` is `Some(window)`, only that window (plus its popups + chrome)
-/// is composed, so overlapping neighbors never leak in. It renders at its stage
-/// position regardless of kind (see the render-loc note below), which is what
-/// lets a `window` capture cover pinned and fullscreen windows too.
+/// When `isolate` is `Some(element)`, only that element (a client window plus
+/// its popups + chrome, or a suspended stand-in's chrome) is composed, so
+/// overlapping neighbors never leak in. A client renders at its stage position
+/// regardless of kind (see the render-loc note below), which is what lets a
+/// `window` capture cover pinned and fullscreen windows too.
 pub(crate) fn compose_capture_elements(
     state: &mut crate::state::DriftWm,
     renderer: &mut GlesRenderer,
@@ -181,7 +188,7 @@ pub(crate) fn compose_capture_elements(
     dpi_scale: f64,
     viewport_logical: Size<i32, Logical>,
     capture_bg: &capture_background::CaptureBackground,
-    isolate: Option<&smithay::desktop::Window>,
+    isolate: Option<&crate::state::StageWindow>,
 ) -> Vec<OutputRenderElements> {
     use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 
@@ -200,12 +207,46 @@ pub(crate) fn compose_capture_elements(
     let mut widgets: Vec<OutputRenderElements> = Vec::new();
 
     // Collect first: the surface-tree calls borrow `state`, which would conflict
-    // with an in-flight `state.stage.windows()` iterator. Windows are Arc-backed.
-    let windows: Vec<smithay::desktop::Window> = state.stage.windows().rev().cloned().collect();
-    for window in &windows {
-        if isolate.is_some_and(|target| target != window) {
+    // with an in-flight `state.stage.windows()` iterator. Elements are ref-counted.
+    let elements: Vec<StageWindow> = state.stage.windows().rev().cloned().collect();
+    for element in &elements {
+        // Isolation (`msg screenshot window`) composes only its target — a
+        // client or a suspended stand-in. Whole-canvas / `all` captures pass
+        // `None` and render every element.
+        if isolate.is_some_and(|target| target != element) {
             continue;
         }
+        let window = match element {
+            StageWindow::Client(w) => w,
+            StageWindow::Suspended(s) => {
+                let Some(loc) = state.stage.position_of(element) else {
+                    continue;
+                };
+                let focused = state.gated_suspended_focus() == Some(s.id);
+                let launching = state.is_suspended_launching(s.id);
+                let border_shader = state.render.border_shader.clone();
+                let shadow_shader = state.render.shadow_shader.clone();
+                suspended::push_suspended_element(
+                    renderer,
+                    s,
+                    loc,
+                    focused,
+                    launching,
+                    &state.config.decorations,
+                    state.decoration_scale,
+                    &mut state.decorations,
+                    &mut state.render.border_cache,
+                    &mut state.render.shadow_cache,
+                    border_shader.as_ref(),
+                    shadow_shader.as_ref(),
+                    camera,
+                    zoom,
+                    scale,
+                    &mut normal,
+                );
+                continue;
+            }
+        };
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
@@ -215,7 +256,10 @@ pub(crate) fn compose_capture_elements(
             continue;
         };
         let is_fullscreen = state.stage.is_fullscreen(window);
-        let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+        let has_ssd = !is_fullscreen
+            && state
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()));
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
@@ -348,7 +392,10 @@ pub(crate) fn compose_capture_elements(
 
             // Reuse the buffer the live frame rasterized (no re-`update`): keeps
             // borrows simple, text is microseconds-stale at worst.
-            if let Some(deco) = state.decorations.get(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get(&DecorationKey::Surface(wl_surface.id()))
+            {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
@@ -413,7 +460,7 @@ pub(crate) fn compose_capture_elements(
                 push_border_element(
                     target,
                     &mut state.render.border_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     inner_logical,
                     effective_corner_radius as f32,
@@ -439,7 +486,7 @@ pub(crate) fn compose_capture_elements(
                 push_shadow_element(
                     target,
                     &mut state.render.shadow_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
@@ -477,7 +524,7 @@ pub(crate) fn compose_capture_elements(
                     push_border_element(
                         target,
                         &mut state.render.border_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &border_shader,
                         geometry,
                         radius,
@@ -503,7 +550,7 @@ pub(crate) fn compose_capture_elements(
                     push_shadow_element(
                         target,
                         &mut state.render.shadow_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,
@@ -631,7 +678,53 @@ pub fn compose_frame(
     let _windows_span = tracy_client::span!("compose::windows");
     #[cfg(feature = "profile-with-tracy")]
     let (mut visible_windows, mut shadow_elems) = (0u32, 0u32);
-    for window in state.stage.windows().rev() {
+    for element in state.stage.windows().rev() {
+        let window = match element {
+            StageWindow::Client(w) => w,
+            StageWindow::Suspended(s) => {
+                // A fullscreen output shows only its fullscreen window.
+                if output_fullscreen {
+                    continue;
+                }
+                let Some(loc) = state.stage.position_of(element) else {
+                    continue;
+                };
+                let bar = state.config.decorations.title_bar_height;
+                let bw = state.default_border_width();
+                let pad = driftwm::config::DecorationConfig::SHADOW_RADIUS.ceil() as i32 + bw;
+                let size = s.size.get();
+                let bbox = Rectangle::new(
+                    Point::<i32, Logical>::from((loc.x - pad, loc.y - bar - pad)),
+                    Size::<i32, Logical>::from((size.w + 2 * pad, size.h + bar + 2 * pad)),
+                );
+                if !visible_rect.overlaps(bbox) {
+                    continue;
+                }
+                let focused = state.gated_suspended_focus() == Some(s.id);
+                let launching = state.is_suspended_launching(s.id);
+                let border_shader = state.render.border_shader.clone();
+                let shadow_shader = state.render.shadow_shader.clone();
+                suspended::push_suspended_element(
+                    renderer,
+                    s,
+                    loc,
+                    focused,
+                    launching,
+                    &state.config.decorations,
+                    state.decoration_scale,
+                    &mut state.decorations,
+                    &mut state.render.border_cache,
+                    &mut state.render.shadow_cache,
+                    border_shader.as_ref(),
+                    shadow_shader.as_ref(),
+                    camera,
+                    zoom,
+                    scale,
+                    &mut zoomed_normal,
+                );
+                continue;
+            }
+        };
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
@@ -644,7 +737,10 @@ pub fn compose_frame(
             continue;
         };
         let is_fullscreen = state.stage.is_fullscreen(window);
-        let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+        let has_ssd = !is_fullscreen
+            && state
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()));
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
@@ -800,7 +896,10 @@ pub fn compose_frame(
                 .window_title()
                 .or_else(|| window.app_id_or_class())
                 .unwrap_or_default();
-            if let Some(deco) = state.decorations.get_mut(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get_mut(&DecorationKey::Surface(wl_surface.id()))
+            {
                 deco.update(
                     geom_size.w,
                     is_focused,
@@ -811,7 +910,10 @@ pub fn compose_frame(
                 );
             }
 
-            if let Some(deco) = state.decorations.get(&wl_surface.id()) {
+            if let Some(deco) = state
+                .decorations
+                .get(&DecorationKey::Surface(wl_surface.id()))
+            {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
                 let bar_alpha = if opacity < 1.0 {
@@ -878,7 +980,7 @@ pub fn compose_frame(
                 push_border_element(
                     target,
                     &mut state.render.border_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     inner_logical,
                     effective_corner_radius as f32,
@@ -908,7 +1010,7 @@ pub fn compose_frame(
                 push_shadow_element(
                     target,
                     &mut state.render.shadow_cache,
-                    wl_surface.id(),
+                    wl_surface.id().into(),
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
@@ -959,7 +1061,7 @@ pub fn compose_frame(
                     push_border_element(
                         target,
                         &mut state.render.border_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &border_shader,
                         geometry,
                         radius,
@@ -987,7 +1089,7 @@ pub fn compose_frame(
                     push_shadow_element(
                         target,
                         &mut state.render.shadow_cache,
-                        wl_surface.id(),
+                        wl_surface.id().into(),
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,

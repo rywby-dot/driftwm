@@ -4,7 +4,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::state::{DriftWm, HomeReturn};
+use crate::state::{DriftWm, HomeReturn, StageWindow};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch, Modifiers};
 use driftwm::window_ext::WindowExt;
@@ -42,6 +42,20 @@ impl DriftWm {
             .active_fullscreen_window()
             .or_else(|| self.pre_exited_fullscreen.take());
 
+        // A suspend of a fullscreen window must record the windowed rect, not
+        // the fullscreen buffer the client still reports until it acks the exit
+        // configure the prelude below sends. Capture it before the exit.
+        let suspend_restore_rect = matches!(action, Action::SuspendWindow)
+            .then(|| self.focused_fullscreen_restore_rect())
+            .flatten();
+
+        // move-to-bookmark centers on the windowed size; the client keeps
+        // reporting the fullscreen buffer until it acks the exit below, so
+        // snapshot the pre-exit windowed rect here (same reason as suspend).
+        let move_bookmark_restore_rect = matches!(action, Action::MoveToBookmark(_))
+            .then(|| self.focused_fullscreen_restore_rect())
+            .flatten();
+
         if self.is_fullscreen() && !action.runs_during_fullscreen() {
             self.exit_fullscreen();
         }
@@ -55,11 +69,28 @@ impl DriftWm {
                 tracing::info!("Spawning (no cursor): {cmd}");
                 crate::state::spawn_command(cmd, &self.config.child_env);
             }
-            Action::CloseWindow => {
-                if let Some(window) = self.focused_window().filter(|w| !w.is_widget()) {
+            Action::CloseWindow => match self.focused_element() {
+                // A focused stand-in has no client to close — the close binding
+                // dismisses it instead.
+                Some(StageWindow::Suspended(s)) => self.dismiss_suspended(s.id),
+                Some(StageWindow::Client(window)) if !window.is_widget() => {
+                    // Keep `suspend_on_close` from converting a user-initiated
+                    // close into a stand-in.
+                    self.mark_real_close(&window);
                     window.send_close();
                 }
-            }
+                _ => {}
+            },
+            Action::SuspendWindow => match self.focused_element() {
+                // Repeating the put-away gesture escalates: the second press
+                // dismisses the stand-in, mirroring a second click on its close
+                // button.
+                Some(StageWindow::Suspended(s)) => self.dismiss_suspended(s.id),
+                // `suspend_focused_window` self-resolves the client and applies
+                // stricter filters (widget / child / modal), so this stays a bare
+                // call rather than a guarded Client arm.
+                _ => self.suspend_focused_window(suspend_restore_rect),
+            },
             Action::NudgeWindow(dir) => {
                 if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w))
                     && let Some(loc) = self.stage.position_of(&window)
@@ -94,18 +125,28 @@ impl DriftWm {
                 let target = self.camera_target().unwrap_or_else(|| self.camera()) + delta;
                 self.set_camera_target(Some(target));
             }
-            Action::CenterWindow => {
-                if let Some(window) = self.focused_window().filter(|w| self.is_canvas_window(w)) {
-                    self.navigate_to_window(&window, true);
-                } else {
+            Action::CenterWindow => match self.focused_element() {
+                Some(StageWindow::Client(w)) if self.is_canvas_window(&w) => {
+                    self.navigate_to_element(&StageWindow::Client(w), true);
+                }
+                // A focused stand-in holds no seat focus, so `focused_window`
+                // never sees it — center it like any other focused element.
+                Some(StageWindow::Suspended(s)) => {
+                    self.navigate_to_element(&StageWindow::Suspended(s), true);
+                }
+                // Nothing focused, or a focused non-canvas (pinned/fullscreen)
+                // client: center the nearest canvas element to the viewport
+                // center — stand-ins included, so the user can land on one and
+                // press Enter to relaunch.
+                _ => {
                     let center = self.viewport_center_canvas();
                     let closest = self
                         .stage
                         .windows()
-                        .filter(|w| self.is_canvas_window(w))
+                        .filter(|w| self.is_canvas_window(*w))
                         .min_by(|a, b| {
-                            let dist = |w: &smithay::desktop::Window| {
-                                let c = self.window_visual_center(w).unwrap_or_default();
+                            let dist = |w: &StageWindow| {
+                                let c = self.nav_center(w);
                                 let dx = c.x - center.x;
                                 let dy = c.y - center.y;
                                 dx * dx + dy * dy
@@ -113,11 +154,11 @@ impl DriftWm {
                             dist(a).total_cmp(&dist(b))
                         })
                         .cloned();
-                    if let Some(window) = closest {
-                        self.navigate_to_window(&window, true);
+                    if let Some(elem) = closest {
+                        self.navigate_to_element(&elem, true);
                     }
                 }
-            }
+            },
             Action::FocusCenter => {
                 let pointer = self.seat.get_pointer().unwrap();
                 let pos = pointer.current_location();
@@ -126,58 +167,57 @@ impl DriftWm {
                 if let Some((window, _)) = self.element_under(pos) {
                     let window = window.clone();
                     if !self.is_pinned(&window) {
-                        self.navigate_to_window(&window, true);
+                        self.navigate_to_element(&StageWindow::Client(window), true);
                     }
+                } else if let Some((crate::input::DecoTarget::Suspended(s), _)) =
+                    self.decoration_under(pos)
+                {
+                    // A stand-in occludes any client beneath it — center the
+                    // stand-in by its visual frame, not the hidden client.
+                    self.navigate_to_element(&StageWindow::Suspended(s), true);
                 }
             }
             Action::CenterNearest(dir) => {
                 #[derive(Clone, PartialEq)]
                 enum NavTarget {
-                    Window(smithay::desktop::Window),
+                    Window(StageWindow),
                     Anchor(Point<f64, smithay::utils::Logical>),
                 }
 
-                let focused = self.focused_window().filter(|w| !self.is_pinned(w));
+                // Focus intent, not seat focus: a focused stand-in holds no
+                // keyboard focus but anchors the search like any other element.
+                let focused = self.focused_anchor_element().filter(|e| !self.is_pinned(e));
 
                 // Anchor the directional search to the just-exited fullscreen
                 // window (wherever the restored view placed it) — otherwise the
                 // anchor falls back to a corner/offscreen spot and the swipe
                 // finds nothing.
-                let anchor = was_fullscreen.clone().or_else(|| {
-                    focused.filter(|w| {
-                        self.window_visible_at_least(w, CENTER_NEAREST_ANCHOR_THRESHOLD)
+                let anchor = was_fullscreen.clone().map(StageWindow::Client).or_else(|| {
+                    focused.filter(|e| {
+                        self.window_visible_at_least(e, CENTER_NEAREST_ANCHOR_THRESHOLD)
                     })
                 });
 
-                let (origin, skip) = if let Some(ref w) = anchor {
-                    let center = self.window_visual_center(w).unwrap_or_else(|| {
-                        let loc = self.stage.position_of(w).unwrap_or_default();
-                        let size = w.geometry().size;
-                        Point::from((
-                            loc.x as f64 + size.w as f64 / 2.0,
-                            loc.y as f64 + size.h as f64 / 2.0,
-                        ))
-                    });
-                    (center, Some(NavTarget::Window(w.clone())))
+                let (origin, skip) = if let Some(ref elem) = anchor {
+                    (self.nav_center(elem), Some(NavTarget::Window(elem.clone())))
                 } else {
                     (self.viewport_center_canvas(), None)
                 };
 
+                // Candidates are every canvas element, stand-ins included, so a
+                // directional swipe can land on one and Enter relaunches it.
                 let windows = self
                     .stage
                     .windows()
-                    .filter(|w| self.is_canvas_window(w))
+                    .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
+                        // Bare content size (client geometry, stand-in body) so
+                        // an SSD bar strip doesn't skew either's proximity metric.
                         let loc = self.stage.position_of(w).unwrap_or_default();
                         let size = w.geometry().size;
                         let closest = canvas::closest_point_on_rect(origin, loc, size);
                         let point = if closest == origin {
-                            self.window_visual_center(w).unwrap_or_else(|| {
-                                Point::from((
-                                    loc.x as f64 + size.w as f64 / 2.0,
-                                    loc.y as f64 + size.h as f64 / 2.0,
-                                ))
-                            })
+                            self.nav_center(w)
                         } else {
                             closest
                         };
@@ -193,14 +233,17 @@ impl DriftWm {
                 let nearest =
                     canvas::find_nearest(origin, dir, windows.chain(anchors), skip.as_ref());
                 match nearest {
-                    Some(NavTarget::Window(w)) => {
-                        self.navigate_to_window(&w, false);
+                    Some(NavTarget::Window(elem)) => {
+                        self.navigate_to_element(&elem, false);
                     }
                     Some(NavTarget::Anchor(p)) => {
                         // Unfocus so next CenterNearest searches from viewport center (= this anchor)
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                         self.set_window_focus(None, serial);
-                        self.with_output_state(|os| os.momentum.stop());
+                        self.with_output_state(|os| {
+                            os.overview_return = None;
+                            os.momentum.stop();
+                        });
                         let vc = self.usable_center_screen();
                         let zoom = self.zoom();
                         self.set_camera_target(Some(Point::from((
@@ -217,7 +260,13 @@ impl DriftWm {
                 // another output — shown only on its own monitor, never a
                 // target here.
                 let anchor = self.cycle_anchor();
-                let Some(window) = self.stage.cycle_step(*backward, anchor.as_ref()) else {
+                let Some(window) = self
+                    .stage
+                    .cycle_step(*backward, anchor.as_ref())
+                    .as_ref()
+                    .and_then(|w| w.client())
+                    .cloned()
+                else {
                     return;
                 };
                 // Mark the focus change this navigate causes as cycle-initiated so
@@ -299,12 +348,62 @@ impl DriftWm {
                     }
                 }
             }
-            Action::GoToPosition(x, y) => {
+            Action::GoToBookmark(name) => match self.bookmarks.get(name) {
+                Some(&[x, y]) => self.go_to_canvas_point(x, y),
+                None => {
+                    tracing::info!("no bookmark named '{name}' — set it with set-bookmark")
+                }
+            },
+            Action::SetBookmark(name) => {
                 let vc = self.usable_center_screen();
                 let zoom = self.zoom();
-                let target_camera = Point::from((x - vc.x / zoom, -y - vc.y / zoom));
-                self.set_overview_return(None);
-                self.set_camera_target(Some(target_camera));
+                // Capture the destination of an in-flight animation, not a
+                // mid-flight frame, so set → go-to-bookmark round-trips exactly.
+                // This is the exact inverse of `go_to_canvas_point`'s camera math.
+                let cam = self.camera_target().unwrap_or_else(|| self.camera());
+                let x = cam.x + vc.x / zoom;
+                let y = -(cam.y + vc.y / zoom);
+                self.bookmarks.insert(name.clone(), [x, y]);
+                self.session_store_mark_dirty();
+            }
+            Action::MoveToBookmark(name) => {
+                let Some(&[x, y]) = self.bookmarks.get(name) else {
+                    tracing::info!("no bookmark named '{name}' — set it with set-bookmark");
+                    return;
+                };
+                let (rx, ry) = (x.round() as i32, y.round() as i32);
+                match self.focused_element().filter(|e| !e.is_widget()) {
+                    Some(StageWindow::Client(window)) => {
+                        // Pinned/fullscreen windows live in screen space — no
+                        // canvas position to move (same rule as `msg move`).
+                        // Early return here (not a match guard), so the log
+                        // still fires before bailing.
+                        if !self.is_canvas_window(&window) {
+                            tracing::info!(
+                                "cannot move a pinned or fullscreen window to a bookmark"
+                            );
+                            return;
+                        }
+                        // The prelude may have just exited fullscreen on this
+                        // window; its buffer still reads fullscreen-sized until it
+                        // acks, so center on the captured pre-exit windowed size.
+                        let size = move_bookmark_restore_rect
+                            .map(|r| r.size)
+                            .unwrap_or_else(|| window.geometry().size);
+                        let loc = canvas::rule_to_internal(rx, ry, size);
+                        self.stage.clear_fill(&window);
+                        self.map_window(window.clone(), loc, true);
+                    }
+                    Some(StageWindow::Suspended(s)) => {
+                        // No live client — move the focused suspended stand-in in
+                        // place, the durable path `msg move` uses for a stand-in.
+                        let element = StageWindow::Suspended(s.clone());
+                        let loc = canvas::rule_to_internal(rx, ry, s.size.get());
+                        self.stage.set_position(&element, loc);
+                        self.session_store_mark_dirty();
+                    }
+                    None => {}
+                }
             }
             Action::ZoomIn => {
                 let new_zoom = (self.zoom() * self.config.zoom_step).min(canvas::MAX_ZOOM);
@@ -326,7 +425,7 @@ impl DriftWm {
                     let windows = self
                         .stage
                         .windows()
-                        .filter(|w| self.is_canvas_window(w))
+                        .filter(|w| self.is_canvas_window(*w))
                         .map(|w| {
                             let loc = self.stage.position_of(w).unwrap_or_default();
                             let size = w.geometry().size;
@@ -349,18 +448,20 @@ impl DriftWm {
                     self.focused_window().filter(|w| self.is_canvas_window(w))
                 {
                     let rects = self.all_windows_with_snap_rects();
-                    // Window's Hash/Eq are Arc pointer identity — stable despite
+                    // StageWindow's Hash/Eq are pointer identity — stable despite
                     // interior mutability. Same allow as cluster_snapshot.rs.
                     #[allow(clippy::mutable_key_type)]
                     let cluster = driftwm::layout::cluster::cluster_of(
-                        &focused,
+                        &StageWindow::Client(focused.clone()),
                         &rects,
                         self.config.snap_gap,
                     );
+                    // Suspended stand-ins in the cluster are fit alongside the
+                    // live members.
                     let members = self
                         .stage
                         .windows()
-                        .filter(|w| cluster.contains(w))
+                        .filter(|w| cluster.contains(*w))
                         .map(|w| {
                             let loc = self.stage.position_of(w).unwrap_or_default();
                             let size = w.geometry().size;
@@ -414,58 +515,80 @@ impl DriftWm {
                 }
             }
             Action::SendToOutput(dir) => {
-                let Some(window) = self.focused_window().filter(|w| !w.is_widget()) else {
+                let Some(element) = self.focused_element().filter(|e| !e.is_widget()) else {
                     return;
                 };
-                let fullscreen = self.is_window_fullscreen(&window);
-                // A fullscreen window is parked at its output's camera origin, so
-                // the geometric output_for_window can mis-resolve it to another
-                // monitor whose independent camera shows the same canvas region —
-                // resolve it from the fullscreen entry instead. output_for_window
-                // already short-circuits to the pin site's output for a pin.
-                let from_output = if fullscreen {
-                    window
-                        .wl_surface()
-                        .and_then(|s| self.find_fullscreen_output_for_surface(&s))
-                } else {
-                    self.output_for_window(&window)
-                };
-                let Some(from_output) = from_output else {
+
+                // Fullscreen and pinned are structurally client-only concepts,
+                // resolved and dispatched in screen space; the plain-canvas tail
+                // below serves a plain client and a suspended stand-in alike.
+                if let StageWindow::Client(window) = &element {
+                    if self.is_window_fullscreen(window) {
+                        // A fullscreen window is parked at its output's camera
+                        // origin, so the geometric output_for_window can
+                        // mis-resolve it to another monitor whose independent
+                        // camera shows the same canvas region — resolve it from
+                        // the fullscreen entry instead.
+                        let Some(from_output) = window
+                            .wl_surface()
+                            .and_then(|s| self.find_fullscreen_output_for_surface(&s))
+                        else {
+                            return;
+                        };
+                        let Some(target_output) = self.output_in_direction(&from_output, dir)
+                        else {
+                            return;
+                        };
+                        // enter_fullscreen tears down the old output's fullscreen
+                        // (restoring its camera/zoom and any suspended pin) and
+                        // sets focus itself.
+                        self.enter_fullscreen(window, Some(target_output));
+                        return;
+                    }
+                    if self.is_pinned(window) {
+                        let Some(from_output) = self.output_for_window(&element) else {
+                            return;
+                        };
+                        let Some(target_output) = self.output_in_direction(&from_output, dir)
+                        else {
+                            return;
+                        };
+                        // Pinned windows live outside the MRU history and are
+                        // already focused.
+                        self.send_pinned_to_output(window, &target_output);
+                        return;
+                    }
+                }
+
+                let Some(from_output) = self.output_for_window(&element) else {
                     return;
                 };
                 let Some(target_output) = self.output_in_direction(&from_output, dir) else {
                     return;
                 };
-
-                if fullscreen {
-                    // enter_fullscreen tears down the old output's fullscreen
-                    // (restoring its camera/zoom and any suspended pin) and
-                    // sets focus itself.
-                    self.enter_fullscreen(&window, Some(target_output));
-                } else if self.is_pinned(&window) {
-                    // Pinned windows live outside the MRU history and are
-                    // already focused.
-                    self.send_pinned_to_output(&window, &target_output);
-                } else {
-                    // Compute target output's usable area center in canvas coords
-                    let (target_cam, target_zoom) = {
-                        let os = crate::state::output_state(&target_output);
-                        (os.camera, os.zoom)
-                    };
-                    let target_vc = crate::state::usable_center_for_output(&target_output);
-                    let center_x = target_cam.x + target_vc.x / target_zoom;
-                    let center_y = target_cam.y + target_vc.y / target_zoom;
-                    let geo = window.geometry();
-                    let new_loc = Point::from((
-                        (center_x - geo.size.w as f64 / 2.0) as i32,
-                        (center_y - geo.size.h as f64 / 2.0) as i32,
-                    ));
-                    // Relocating to another output re-anchors the window,
-                    // invalidating any fill restore point.
-                    self.stage.clear_fill(&window);
-                    self.map_window(window.clone(), new_loc, true);
-                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-                    self.raise_and_focus(&window, serial);
+                // Compute target output's usable area center in canvas coords
+                let (target_cam, target_zoom) = {
+                    let os = crate::state::output_state(&target_output);
+                    (os.camera, os.zoom)
+                };
+                let target_vc = crate::state::usable_center_for_output(&target_output);
+                let center_x = target_cam.x + target_vc.x / target_zoom;
+                let center_y = target_cam.y + target_vc.y / target_zoom;
+                let geo = element.geometry();
+                let new_loc = Point::from((
+                    (center_x - geo.size.w as f64 / 2.0) as i32,
+                    (center_y - geo.size.h as f64 / 2.0) as i32,
+                ));
+                // Relocating to another output re-anchors the element,
+                // invalidating any fill restore point.
+                self.stage.clear_fill(&element);
+                self.map_window(element.clone(), new_loc, true);
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.raise_and_focus_element(&element, serial);
+                // A stand-in's canvas position is durable — persist the move on
+                // the session-store debounce (the client arm stays unmarked).
+                if matches!(element, StageWindow::Suspended(_)) {
+                    self.session_store_mark_dirty();
                 }
             }
             Action::SendCursorToOutput(dir) => {
@@ -543,6 +666,17 @@ impl DriftWm {
                 self.loop_signal.stop();
             }
         }
+    }
+
+    /// Jump the camera so the viewport centers on canvas point `(x, y)` (Y-up),
+    /// panel-aware (`usable_center_screen`). `SetBookmark` captures the exact
+    /// inverse, so set → go-to-bookmark round-trips. Zoom is untouched.
+    fn go_to_canvas_point(&mut self, x: f64, y: f64) {
+        let vc = self.usable_center_screen();
+        let zoom = self.zoom();
+        let target_camera = Point::from((x - vc.x / zoom, -y - vc.y / zoom));
+        self.set_overview_return(None);
+        self.set_camera_target(Some(target_camera));
     }
 
     /// Toggle screen-pinning of the focused window. Pin/unpin keeps the window

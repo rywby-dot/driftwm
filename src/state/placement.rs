@@ -4,7 +4,7 @@ use smithay::desktop::Window;
 use smithay::utils::{Logical, Size};
 use smithay::wayland::seat::WaylandFocus;
 
-use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm};
+use super::{AUTO_PLACE_CLUSTER_THRESHOLD, DriftWm, StageWindow};
 
 impl DriftWm {
     /// Spawn pos for `placement = "cursor"`: center the visual frame
@@ -86,12 +86,13 @@ impl DriftWm {
     }
 
     /// Geometry-only placement of `placing` (content sized `new_size`, SSD
-    /// bar `bar`) adjacent to `anchor`'s snap cluster, treating every other
-    /// mapped window as an obstacle. Returns the content top-left in canvas
-    /// coords, or `None` when `anchor` is ineligible or no slot fits.
+    /// bar `bar`) adjacent to `anchor`'s snap cluster — a live window or a
+    /// focused suspended stand-in — treating every other mapped window as an
+    /// obstacle. Returns the content top-left in canvas coords, or `None` when
+    /// `anchor` is ineligible or no slot fits.
     pub fn place_adjacent_to(
         &self,
-        anchor: &Window,
+        anchor: &StageWindow,
         placing: &Window,
         new_size: Size<i32, Logical>,
         bar: i32,
@@ -120,7 +121,7 @@ impl DriftWm {
             };
             let size = w.geometry().size;
             let b = self.window_ssd_bar(w);
-            let bw = w.wl_surface().map_or(0, |s| self.window_border_width(&s)) as f64;
+            let bw = self.element_border_width(w) as f64;
             let idx = rects.len();
             rects.push(driftwm::layout::auto_placement::Rect {
                 x: loc.x as f64 - bw,
@@ -234,7 +235,7 @@ impl DriftWm {
             };
             let size = w.geometry().size;
             let b = self.window_ssd_bar(w);
-            let bw = w.wl_surface().map_or(0, |s| self.window_border_width(&s)) as f64;
+            let bw = self.element_border_width(w) as f64;
             let idx = rects.len();
             rects.push(driftwm::layout::auto_placement::Rect {
                 x: loc.x as f64 - bw,

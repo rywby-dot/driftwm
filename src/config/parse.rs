@@ -9,11 +9,13 @@ fn parse_modifiers(parts: &[&str], mod_key: ModKey) -> Result<Modifiers, String>
             "mod" => match mod_key {
                 ModKey::Alt => mods.alt = true,
                 ModKey::Super => mods.logo = true,
+                ModKey::Mod3 => mods.mod3 = true,
             },
             "alt" => mods.alt = true,
             "super" | "logo" => mods.logo = true,
             "ctrl" | "control" => mods.ctrl = true,
             "shift" => mods.shift = true,
+            "mod3" => mods.mod3 = true,
             other => return Err(format!("unknown modifier: {other}")),
         }
     }
@@ -23,22 +25,16 @@ fn parse_modifiers(parts: &[&str], mod_key: ModKey) -> Result<Modifiers, String>
 /// True if every `+`-separated token names a modifier — a combo with no keysym,
 /// so it's a tap-modifier binding rather than a `parse_key_combo`. Modifier names
 /// are never valid keysym names, so this never shadows a real key binding.
-fn is_modifier_only(s: &str) -> bool {
-    let mut parts = s.split('+').map(str::trim).peekable();
-    parts.peek().is_some()
-        && parts.all(|p| {
-            matches!(
-                p.to_lowercase().as_str(),
-                "mod" | "alt" | "super" | "logo" | "ctrl" | "control" | "shift"
-            )
-        })
+fn is_modifier_only(s: &str, mod_key: ModKey) -> bool {
+    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
+    parse_modifiers(&parts, mod_key).is_ok()
 }
 
 /// Parse a modifier-only combo like "alt+shift" into a `Modifiers` set for a
 /// tap-modifier binding. Returns `None` when `s` is not modifier-only, so the
 /// caller falls back to `parse_key_combo`.
 pub fn parse_tap_combo(s: &str, mod_key: ModKey) -> Option<Result<Modifiers, String>> {
-    if !is_modifier_only(s) {
+    if !is_modifier_only(s, mod_key) {
         return None;
     }
     let parts: Vec<&str> = s.split('+').map(str::trim).collect();
@@ -113,6 +109,7 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "exec-terminal" => Ok(Action::ExecTerminal),
         "exec-launcher" => Ok(Action::ExecLauncher),
         "close-window" => Ok(Action::CloseWindow),
+        "suspend-window" => Ok(Action::SuspendWindow),
         "nudge-window" => {
             let dir = parse_direction(arg.ok_or("nudge-window requires a direction")?)?;
             Ok(Action::NudgeWindow(dir))
@@ -138,19 +135,27 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
             }
         }
         "home-toggle" => Ok(Action::HomeToggle),
-        "go-to" => {
-            let arg = arg.ok_or("go-to requires <x> <y> coordinates")?;
-            let parts: Vec<&str> = arg.split_whitespace().collect();
-            if parts.len() != 2 {
-                return Err("go-to requires exactly two coordinates: go-to <x> <y>".to_string());
-            }
-            let x: f64 = parts[0]
-                .parse()
-                .map_err(|_| format!("invalid x coordinate: {}", parts[0]))?;
-            let y: f64 = parts[1]
-                .parse()
-                .map_err(|_| format!("invalid y coordinate: {}", parts[1]))?;
-            Ok(Action::GoToPosition(x, y))
+        "go-to" => Err(
+            "go-to was removed — save the point as a bookmark and use go-to-bookmark <name>"
+                .to_string(),
+        ),
+        "go-to-bookmark" => {
+            let name = arg
+                .filter(|a| !a.is_empty())
+                .ok_or("go-to-bookmark requires a bookmark name")?;
+            Ok(Action::GoToBookmark(name.to_string()))
+        }
+        "set-bookmark" => {
+            let name = arg
+                .filter(|a| !a.is_empty())
+                .ok_or("set-bookmark requires a bookmark name")?;
+            Ok(Action::SetBookmark(name.to_string()))
+        }
+        "move-to-bookmark" => {
+            let name = arg
+                .filter(|a| !a.is_empty())
+                .ok_or("move-to-bookmark requires a bookmark name")?;
+            Ok(Action::MoveToBookmark(name.to_string()))
         }
         "zoom-in" => Ok(Action::ZoomIn),
         "zoom-out" => Ok(Action::ZoomOut),
@@ -206,15 +211,18 @@ pub const ACTION_NAMES: &[(&str, &str)] = &[
     ("fit-window", "fit-window"),
     ("fit-window-snapped", "fit-window-snapped"),
     ("focus-center", "focus-center"),
-    ("go-to", "go-to 0 0"),
+    ("go-to-bookmark", "go-to-bookmark 1"),
     ("home-toggle", "home-toggle"),
+    ("move-to-bookmark", "move-to-bookmark 1"),
     ("nudge-window", "nudge-window up"),
     ("pan-viewport", "pan-viewport up"),
     ("quit", "quit"),
     ("reload-config", "reload-config"),
     ("send-cursor-to-output", "send-cursor-to-output up"),
     ("send-to-output", "send-to-output up"),
+    ("set-bookmark", "set-bookmark 1"),
     ("spawn", "spawn foo"),
+    ("suspend-window", "suspend-window"),
     ("switch-layout", "switch-layout next"),
     ("toggle-cursor-pan", "toggle-cursor-pan"),
     ("toggle-fullscreen", "toggle-fullscreen"),
@@ -225,6 +233,12 @@ pub const ACTION_NAMES: &[(&str, &str)] = &[
     ("zoom-to-fit", "zoom-to-fit"),
     ("zoom-to-fit-snapped", "zoom-to-fit-snapped"),
 ];
+
+/// Actions `parse_action` rejects with a migration message. Not bindable, so
+/// excluded from `ACTION_NAMES`/the docs, but the gesture/touch fallback still
+/// needs to recognize them here or the message degrades to "unknown gesture
+/// action".
+const REMOVED_ACTIONS: &[&str] = &["go-to"];
 
 /// Parse a mouse action string like "move-window" or "zoom".
 /// Continuous/grab actions are matched first; anything else falls through
@@ -356,7 +370,9 @@ fn parse_threshold_action(s: &str) -> Result<Option<ThresholdAction>, String> {
         Ok(action) => Ok(Some(ThresholdAction::Fixed(action))),
         Err(e) => {
             let first = s.split_whitespace().next().unwrap_or("");
-            if ACTION_NAMES.iter().any(|(name, _)| *name == first) {
+            if ACTION_NAMES.iter().any(|(name, _)| *name == first)
+                || REMOVED_ACTIONS.contains(&first)
+            {
                 Err(e)
             } else {
                 Ok(None)
@@ -558,13 +574,16 @@ mod tests {
             Action::ExecLauncher => "exec-launcher",
             Action::Spawn(_) => "spawn",
             Action::CloseWindow => "close-window",
+            Action::SuspendWindow => "suspend-window",
             Action::NudgeWindow(_) => "nudge-window",
             Action::PanViewport(_) => "pan-viewport",
             Action::CenterWindow => "center-window",
             Action::CenterNearest(_) => "center-nearest",
             Action::CycleWindows { .. } => "cycle-windows",
             Action::HomeToggle => "home-toggle",
-            Action::GoToPosition(..) => "go-to",
+            Action::GoToBookmark(_) => "go-to-bookmark",
+            Action::SetBookmark(_) => "set-bookmark",
+            Action::MoveToBookmark(_) => "move-to-bookmark",
             Action::ZoomIn => "zoom-in",
             Action::ZoomOut => "zoom-out",
             Action::ZoomReset => "zoom-reset",
@@ -586,6 +605,32 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_actions_parse_with_name() {
+        assert_eq!(
+            parse_action("go-to-bookmark 1"),
+            Ok(Action::GoToBookmark("1".into()))
+        );
+        assert_eq!(
+            parse_action("set-bookmark home"),
+            Ok(Action::SetBookmark("home".into()))
+        );
+        // The whole trimmed remainder is the name, so spaces are allowed in it.
+        assert_eq!(
+            parse_action("move-to-bookmark my desk"),
+            Ok(Action::MoveToBookmark("my desk".into()))
+        );
+    }
+
+    #[test]
+    fn bookmark_actions_reject_missing_name() {
+        assert!(parse_action("go-to-bookmark").is_err());
+        assert!(parse_action("set-bookmark").is_err());
+        assert!(parse_action("move-to-bookmark").is_err());
+        // Whitespace-only argument is empty after trimming.
+        assert!(parse_action("go-to-bookmark   ").is_err());
+    }
+
+    #[test]
     fn action_names_round_trip_to_their_variant() {
         for (name, sample) in ACTION_NAMES {
             let parsed = parse_action(sample)
@@ -596,5 +641,63 @@ mod tests {
                 "sample {sample:?} parsed to a variant whose name is not {name:?}"
             );
         }
+    }
+
+    #[test]
+    fn removed_actions_keep_their_migration_message_everywhere() {
+        for name in REMOVED_ACTIONS {
+            let err = parse_action(name)
+                .expect_err("a removed action must be rejected, not silently parsed");
+            assert!(
+                !ACTION_NAMES.iter().any(|(n, _)| n == name),
+                "{name} is removed, so it must not stay in the documented catalog"
+            );
+            let trigger = GestureTrigger::Swipe { fingers: 4 };
+            assert_eq!(parse_gesture_config_entry(&trigger, name), Err(err));
+        }
+    }
+
+    #[test]
+    fn mod3_combines_with_other_modifiers_in_a_combo() {
+        let combo = parse_key_combo("mod3+shift+q", ModKey::Alt).unwrap();
+        assert_eq!(
+            combo.modifiers,
+            Modifiers {
+                mod3: true,
+                shift: true,
+                ..Modifiers::EMPTY
+            }
+        );
+    }
+
+    #[test]
+    fn bare_mod3_shift_combo_is_recognized_as_a_tap_binding() {
+        let mods = parse_tap_combo("mod3+shift", ModKey::Alt)
+            .expect("a modifier-only combo must be recognized as a tap binding")
+            .unwrap();
+        assert_eq!(
+            mods,
+            Modifiers {
+                mod3: true,
+                shift: true,
+                ..Modifiers::EMPTY
+            }
+        );
+    }
+
+    #[test]
+    fn mod_plus_iso_level5_shift_parses_as_a_key_binding_not_a_tap() {
+        // "iso_level5_shift" is a real keysym, not a modifier alias — must not
+        // be swallowed by is_modifier_only/parse_tap_combo.
+        assert!(parse_tap_combo("mod+iso_level5_shift", ModKey::Alt).is_none());
+        let combo = parse_key_combo("mod+iso_level5_shift", ModKey::Alt).unwrap();
+        assert_eq!(combo.sym.raw(), keysyms::KEY_ISO_Level5_Shift);
+        assert_eq!(
+            combo.modifiers,
+            Modifiers {
+                alt: true,
+                ..Modifiers::EMPTY
+            }
+        );
     }
 }

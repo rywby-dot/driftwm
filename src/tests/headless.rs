@@ -12,6 +12,20 @@ use crate::state::DriftWm;
 /// left-to-right by creation order. Returns the output plus its `GlobalId`, so
 /// the fixture can later disable/remove the global on disconnect.
 pub fn add_output(state: &mut DriftWm, n: u8, size: (u16, u16)) -> (Output, GlobalId) {
+    add_output_with_saved(state, n, size, &std::collections::HashMap::new())
+}
+
+/// Like [`add_output`] but hands `output_connected` a per-output camera seed,
+/// exercising the fresh-boot camera restore the durable session store drives.
+pub fn add_output_with_saved(
+    state: &mut DriftWm,
+    n: u8,
+    size: (u16, u16),
+    saved: &std::collections::HashMap<
+        String,
+        (smithay::utils::Point<f64, smithay::utils::Logical>, f64),
+    >,
+) -> (Output, GlobalId) {
     let output = Output::new(
         format!("HEADLESS-{n}"),
         PhysicalProperties {
@@ -31,7 +45,7 @@ pub fn add_output(state: &mut DriftWm, n: u8, size: (u16, u16)) -> (Output, Glob
     output.set_preferred(mode);
     let global = output.create_global::<DriftWm>(&state.display_handle);
 
-    state.output_connected(&output, &std::collections::HashMap::new());
+    state.output_connected(&output, saved);
 
     (output, global)
 }

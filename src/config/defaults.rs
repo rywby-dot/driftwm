@@ -122,28 +122,56 @@ pub(super) fn default_bindings(mod_key: ModKey) -> HashMap<KeyCombo, Action> {
                 modifiers: m.clone(),
                 sym: Keysym::from(keysyms::KEY_1),
             },
-            Action::GoToPosition(-1750.0, 1750.0),
+            Action::GoToBookmark("1".into()),
         ),
         (
             KeyCombo {
                 modifiers: m.clone(),
                 sym: Keysym::from(keysyms::KEY_2),
             },
-            Action::GoToPosition(1750.0, 1750.0),
+            Action::GoToBookmark("2".into()),
         ),
         (
             KeyCombo {
                 modifiers: m.clone(),
                 sym: Keysym::from(keysyms::KEY_3),
             },
-            Action::GoToPosition(1750.0, -1750.0),
+            Action::GoToBookmark("3".into()),
         ),
         (
             KeyCombo {
                 modifiers: m.clone(),
                 sym: Keysym::from(keysyms::KEY_4),
             },
-            Action::GoToPosition(-1750.0, -1750.0),
+            Action::GoToBookmark("4".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: m_shift.clone(),
+                sym: Keysym::from(keysyms::KEY_1),
+            },
+            Action::SetBookmark("1".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: m_shift.clone(),
+                sym: Keysym::from(keysyms::KEY_2),
+            },
+            Action::SetBookmark("2".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: m_shift.clone(),
+                sym: Keysym::from(keysyms::KEY_3),
+            },
+            Action::SetBookmark("3".into()),
+        ),
+        (
+            KeyCombo {
+                modifiers: m_shift.clone(),
+                sym: Keysym::from(keysyms::KEY_4),
+            },
+            Action::SetBookmark("4".into()),
         ),
         (
             KeyCombo {
@@ -381,9 +409,9 @@ pub(super) fn default_bindings(mod_key: ModKey) -> HashMap<KeyCombo, Action> {
         ),
     ]);
 
-    // Send-to-output bindings (Mod+Alt+Arrow) — only for Super mod_key
-    // to avoid conflict with Alt-based bindings
-    if mod_key == ModKey::Super {
+    // Send-to-output bindings (Mod+Alt+Arrow) — skipped when Alt *is* the mod
+    // key, where the combo would collapse into the plain Alt bindings.
+    if mod_key != ModKey::Alt {
         let m_alt = Modifiers {
             alt: true,
             ..m.clone()

@@ -13,11 +13,11 @@ the raw JSON reply instead of the human-readable form. A command that fails (bad
 value, no focused window, no match) prints an error to stderr and exits
 non-zero, so scripts can branch on it.
 
-The commands — `camera`, `zoom`, `focus`, `move`, `opacity`, `close`, `layout`,
-`action`, `screenshot`, `state`, `subscribe`, and `debug-counters` — with their
-arguments, flags, and JSON reply shapes are documented in the generated
-[CLI reference](cli.md); `driftwm msg <command> --help` prints the same for one
-command. The conventions they share follow below.
+The commands — `camera`, `zoom`, `focus`, `move`, `opacity`, `close`, `suspend`,
+`relaunch`, `layout`, `action`, `screenshot`, `state`, `subscribe`, and
+`debug-counters` — with their arguments, flags, and JSON reply shapes are
+documented in the generated [CLI reference](cli.md); `driftwm msg <command> --help`
+prints the same for one command. The conventions they share follow below.
 
 ### Coordinates
 
@@ -27,6 +27,41 @@ point, with **Y pointing up**. `move 0 0` centers the focused window on the
 origin, `camera 0 0` centers the viewport there, and positive `y` is above.
 Pinned and fullscreen windows live in screen space, not on the canvas, so `move`
 refuses to reposition them.
+
+### Suspended windows
+
+A [suspended window](session.md) — the compositor-drawn stand-in left behind
+by `suspend-window` or `suspend_on_close` — is a window like any other over
+IPC: it has an `id`, appears in the `windows` inventory (`state`, `subscribe`,
+and the state file all agree), and each entry carries `suspended: true` so a
+consumer can tell it apart from a live client. A focused stand-in follows the
+same convention as a focused client: it's `windows[0]` and `is_focused: true`.
+
+`focus` and `move` work on a suspended window's id exactly as they would on a
+live one (raising/panning to it, or reading/setting its canvas position);
+`close` dismisses it instead of asking a (nonexistent) client to close.
+`suspend`/`relaunch` are the two commands specific to them:
+
+- `suspend <selector>` suspends a window — the same as running the
+  `suspend-window` action against it, just addressable by id/app_id instead of
+  needing it focused first.
+- `relaunch <selector>` relaunches a suspended window — the same as pressing
+  `Enter` on it or clicking its centered name.
+
+A selector matches by app_id substring or `--id`, same as everywhere else.
+When a live client and a suspended stand-in share the same `app_id`, an
+app_id-substring selector resolves to the **live client** for commands that can
+act on either (`focus`, `move`, `close`, `suspend`) — target the stand-in by
+its `id` instead. `relaunch` is the exception: it only ever acts on a stand-in,
+so an app_id selector there resolves straight to the matching suspended window.
+
+> [!NOTE]
+> Between spawning a relaunch and its adoption (the relaunched app's first
+> *sized* commit, which is when it actually takes over its stand-in's slot), a
+> `state`/`subscribe` snapshot can show *two* entries for the app — the still-
+> suspended stand-in and the not-yet-adopted new window. Harmless — every
+> snapshot is complete state either way — but worth knowing if you're
+> counting windows by `app_id`.
 
 ### Screenshots
 
@@ -84,7 +119,8 @@ explicit path.
 
 > [!WARNING]
 > The IPC socket is a full control surface, not a read-only one: `action` can
-> run `exec`/`spawn` (launch programs), `quit`, and `reload-config`. It's safe
+> run `exec`/`spawn` (launch programs), `quit`, and `reload-config`; `relaunch`
+> launches a suspended window's app the same way. It's safe
 > only because the socket is `0600` (your user only) — anything that can open it
 > could already run programs as you. So don't loosen the permissions or bridge it
 > over a network for "just reading state": that hands arbitrary code execution to
@@ -115,8 +151,11 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 | get / set move    | `{"Move":{}}` / `{"Move":{"window":5,"to":[100,200]}}` (both optional)              |
 | get / set opacity | `{"Opacity":{}}` / `{"Opacity":{"window":5,"value":0.5}}` (both optional)           |
 | close             | `{"Close":null}` / `{"Close":5}` / `{"Close":"alacritty"}`                          |
+| suspend           | `{"Suspend":null}` / `{"Suspend":5}` / `{"Suspend":"alacritty"}`                    |
+| relaunch          | `{"Relaunch":null}` / `{"Relaunch":5}` / `{"Relaunch":"alacritty"}`                 |
 | layout            | `{"Layout":{"short":false}}`                                                        |
 | run action        | `{"Action":"switch-layout next"}`                                                   |
+| bookmark          | `{"Bookmark":{}}` (list) / `{"Bookmark":{"name":"home"}}` (get) / `{"Bookmark":{"name":"home","to":[0,0]}}` (set) / `{"Bookmark":{"name":"home","delete":true}}` (delete) |
 | screenshot        | `{"Screenshot":{"target":"Viewport","scale":1.0,"path":"/abs/shot.png"}}`           |
 | screenshot window | `{"Window":{}}` / `{"Window":{"window":5}}` (as the `target`)                       |
 | state             | `"State"`                                                                           |
@@ -132,19 +171,23 @@ A window can be targeted by a **selector**: a JSON number is its stable `id`
 {"Ok":{"Focused":{"id":5,"app_id":"alacritty"}}}   // or {"Ok":{"Focused":null}}
 {"Ok":{"Position":{"x":100,"y":200}}}
 {"Ok":{"Opacity":0.85}}
-{"Ok":"Ok"}                          // action / close
+{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}   // bookmark get / set (Y-up)
+{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}     // bookmark list (sorted by name)
+{"Ok":"Ok"}                          // action / close / suspend / relaunch / bookmark delete
 {"Ok":{"DebugCounters":{"decorations":2,"stage_entries":2}}}   // abridged
 {"Ok":{"State":{"camera":[-960.0,-600.0],"zoom":1.0,"layout":"English (US)",
   "layout_short":"us","windows":[
   {"id":3,"app_id":"foot","title":"~","position":[0,0],"size":[800,480],
-   "is_focused":true,"is_widget":false}
+   "is_focused":true,"is_widget":false,"suspended":false}
 ]}}}
 {"Err":"no focused window"}
 ```
 
 The `windows` array is the same shape driftwm writes to its [state file](#state-file),
 focused window first. Each entry's `id` is a stable per-session window handle —
-pass it back as a selector to `focus`, `move`, `close`, or `screenshot window`.
+pass it back as a selector to `focus`, `move`, `close`, `suspend`,
+`relaunch`, or `screenshot window`. `suspended` marks a compositor-drawn
+stand-in rather than a live client — see [Suspended windows](#suspended-windows).
 The reply also carries `layout` (full XKB name) and `layout_short` (the
 configured code for the active group); `fullscreen` and `pinned` (screen-space
 windows, each carrying an `id` too — a `pinned` entry's `position`/`size` are in
@@ -152,7 +195,15 @@ rule coordinates, output-relative, so they paste straight into a
 `pinned_to_screen` rule); `layers` (namespaces of screen-space layer-shell
 surfaces); `canvas_layers` (canvas-positioned layers with rule-coordinate
 position and size); and `outputs` (per-output `name`, viewport `camera` (center,
-Y-up), `zoom`, logical `size`, and `active` flag).
+Y-up), `zoom`, logical `size`, `active` flag, and `active_bookmark`).
+
+`active_bookmark` (top-level) is the focused output's active bookmark — the
+bookmark nearest the viewport's usable center among those currently visible, or
+`null` when none is in view. Each `outputs` entry carries its own
+`active_bookmark` for that output's viewport. This is the same value the
+`ext-workspace-v1` protocol marks `active`, so a bar can highlight the current
+bookmark. It follows the camera, so it belongs to `state`/`subscribe` rather
+than the registry-only `bookmark` verb.
 
 ### Events
 

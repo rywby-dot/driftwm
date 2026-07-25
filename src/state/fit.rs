@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter, ZoomAnimationAnchor};
+use super::{DriftWm, PendingRecenter, StageWindow, ZoomAnimationAnchor};
 use driftwm::config;
 use driftwm::window_ext::WindowExt;
 
@@ -130,14 +130,10 @@ impl DriftWm {
             return;
         };
 
-        // Resize in-place: keep visual center, compute new loc from saved size
+        // Resize in-place around the preserved visual center.
         let center = self.window_visual_center(window).unwrap_or_default();
         let bar = self.window_ssd_bar(window);
-        let total_h = saved_size.h + bar;
-        let new_loc = Point::from((
-            (center.x - saved_size.w as f64 / 2.0) as i32,
-            (center.y - total_h as f64 / 2.0) as i32 + bar,
-        ));
+        let new_loc = super::frame_loc_for_center(center, saved_size, bar);
 
         // Record the current (fit-era) geometry so the commit handler can
         // tell when the client has actually processed the exit configure,
@@ -190,6 +186,8 @@ impl DriftWm {
             return;
         }
 
+        let primary = StageWindow::Client(primary.clone());
+
         // `initial_size` here is a delta carrier for `apply_member_shifts`,
         // which uses it only to compute `width_delta = new_w - initial_size.w`.
         // Rect width/height (which include the SSD bar) are fine — bars cancel.
@@ -202,10 +200,10 @@ impl DriftWm {
         // BR pass: right members shift by +dx_right (= width_delta),
         // bottom members shift by +dy_bottom (= height_delta).
         let mut br =
-            self.cluster_snapshot_for_resize(primary, xdg_toplevel::ResizeEdge::BottomRight);
+            self.cluster_snapshot_for_resize(&primary, xdg_toplevel::ResizeEdge::BottomRight);
         br.apply_member_shifts(
             &mut self.stage,
-            primary,
+            &primary,
             old_size,
             old_size.w + dx_right,
             old_size.h + dy_bottom,
@@ -215,10 +213,10 @@ impl DriftWm {
         // TL pass: left members shift by `-width_delta`, so width_delta = -dx_left
         // (left edge moves left → dx_left is negative → width_delta positive →
         // left members shift by dx_left). Same reasoning for top.
-        let mut tl = self.cluster_snapshot_for_resize(primary, xdg_toplevel::ResizeEdge::TopLeft);
+        let mut tl = self.cluster_snapshot_for_resize(&primary, xdg_toplevel::ResizeEdge::TopLeft);
         tl.apply_member_shifts(
             &mut self.stage,
-            primary,
+            &primary,
             old_size,
             old_size.w - dx_left,
             old_size.h - dy_top,
@@ -248,12 +246,17 @@ impl DriftWm {
         // Capture the cluster before shifting — members' caches must follow
         // their new live positions, or close-time `cluster_of` sees stale
         // cache vs shifted live and can't reconstruct the cluster.
-        let cluster_members: Vec<Window> = {
+        #[allow(clippy::mutable_key_type)]
+        let cluster_members: Vec<StageWindow> = {
             let rects = self.all_windows_with_snap_rects();
-            driftwm::layout::cluster::cluster_of(window, &rects, self.config.snap_gap)
-                .into_iter()
-                .filter(|w| w != window)
-                .collect()
+            driftwm::layout::cluster::cluster_of(
+                &StageWindow::Client(window.clone()),
+                &rects,
+                self.config.snap_gap,
+            )
+            .into_iter()
+            .filter(|w| w != window)
+            .collect()
         };
         self.shift_cluster_around_primary(window, old_rect, new_rect);
         self.fit_window(window);
@@ -279,22 +282,23 @@ impl DriftWm {
         let old_size = window.geometry().size;
         let bar = self.window_ssd_bar(window);
         let bw = self.window_border_width(&wl_surface);
-        // Mirror unfit_window's new_loc computation so per-edge deltas match.
+        // Mirror unfit_window's new_loc so per-edge deltas match.
         let center = self.window_visual_center(window).unwrap_or_default();
-        let total_h = saved_size.h + bar;
-        let new_loc = Point::from((
-            (center.x - saved_size.w as f64 / 2.0) as i32,
-            (center.y - total_h as f64 / 2.0) as i32 + bar,
-        ));
+        let new_loc = super::frame_loc_for_center(center, saved_size, bar);
         let old_rect = snap_rect_at(old_loc, old_size, bar, bw);
         let new_rect = snap_rect_at(new_loc, saved_size, bar, bw);
         // See `fit_window_snapped` for why we refresh member caches here.
-        let cluster_members: Vec<Window> = {
+        #[allow(clippy::mutable_key_type)]
+        let cluster_members: Vec<StageWindow> = {
             let rects = self.all_windows_with_snap_rects();
-            driftwm::layout::cluster::cluster_of(window, &rects, self.config.snap_gap)
-                .into_iter()
-                .filter(|w| w != window)
-                .collect()
+            driftwm::layout::cluster::cluster_of(
+                &StageWindow::Client(window.clone()),
+                &rects,
+                self.config.snap_gap,
+            )
+            .into_iter()
+            .filter(|w| w != window)
+            .collect()
         };
         self.shift_cluster_around_primary(window, old_rect, new_rect);
         self.unfit_window(window);

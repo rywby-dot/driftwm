@@ -167,6 +167,37 @@ impl DriftWm {
             new_config.child_env.insert("DISPLAY".into(), display);
         }
 
+        // Reconcile the live bookmark registry with the config seed diff. Config
+        // is a seed, so a name added or changed in config re-asserts into the
+        // registry, a name removed from config drops from it, and names config
+        // didn't touch keep any runtime set-bookmark value. Comparing the two
+        // defaults-applied tables handles a whole section being added/removed.
+        let bookmark_ops: Vec<(String, Option<[f64; 2]>)> = {
+            let old = &self.config.navigation_bookmarks;
+            let new = &new_config.navigation_bookmarks;
+            let mut ops = Vec::new();
+            for (name, value) in new {
+                if old.get(name) != Some(value) {
+                    ops.push((name.clone(), Some(*value)));
+                }
+            }
+            for name in old.keys() {
+                if !new.contains_key(name) {
+                    ops.push((name.clone(), None));
+                }
+            }
+            ops
+        };
+        if !bookmark_ops.is_empty() {
+            for (name, value) in bookmark_ops {
+                match value {
+                    Some(v) => self.bookmarks.insert(name, v),
+                    None => self.bookmarks.remove(&name),
+                };
+            }
+            self.session_store_mark_dirty();
+        }
+
         self.config = new_config;
 
         // Invalidate every SSD title bar's cached width so `update()`
@@ -175,8 +206,28 @@ impl DriftWm {
             deco.width = -1;
         }
 
+        // A suspended stand-in's centered label and rounded body fill live on
+        // its `Rc`, outside the decoration map, and cache on size/scale — reset
+        // both keys so a font/size/weight/color edit (label) or a
+        // bg_color/corner_radius edit (body) re-rasters them like every other
+        // decoration.
+        for element in self.stage.windows() {
+            if let Some(s) = element.suspended() {
+                let mut chrome = s.chrome.borrow_mut();
+                chrome.label_key = None;
+                chrome.body_key = None;
+            }
+        }
+
         self.apply_output_rules_after_reload();
         self.recompute_decoration_scale();
+
+        // A `zoom.interact_min` edit can flip pick mode without any pointer
+        // motion, so the stale pointer focus wouldn't self-heal until the next
+        // move. Resync once here (polish, not correctness: the pick decision
+        // uses element_under, not pointer focus, so a click right after the edit
+        // already behaves correctly). Runs after the config swap above.
+        self.refresh_pointer_focus();
 
         if let Some(msg) = super::errors::summarize_config_errors(&config_errors) {
             self.set_error(ErrorSource::Config, msg);

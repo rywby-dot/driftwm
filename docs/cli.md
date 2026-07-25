@@ -20,6 +20,7 @@ With no subcommand, starts the compositor, auto-detecting the backend (udev on a
 - `--backend <udev|winit>` — Backend to use [default: udev on a TTY, winit if nested]
 - `--config <PATH>` — Use an alternate config file
 - `--check-config` — Validate the config and exit
+- `--session-file <PATH>` — Durable session file path. Overrides the default; lets a nested winit dev session opt into session restore (it skips it otherwise)
 
 ### `driftwm msg`
 
@@ -163,6 +164,34 @@ Reply: `{"Ok":"Ok"}`.
 
 - `--id <ID>` — Close the window with this stable id (from `state`)
 
+#### `driftwm msg suspend`
+
+```
+driftwm msg suspend [OPTIONS] [APP_ID]
+```
+
+Suspend the focused window, or a window by app_id substring or `--id`.
+
+The same conversion as the `suspend-window` action, but addressable: it leaves a compositor-drawn stand-in in the window's place (relaunch it with `relaunch`, `Enter`, or a click) instead of asking the client to close. Targets the focused window by default, or a window by `app_id` substring (case-insensitive) or `--id <n>` (from `state`). When a live client and a stand-in share an `app_id`, the substring resolves to the live client — target the stand-in by `--id`.
+
+Reply: `{"Ok":"Ok"}`.
+
+- `--id <ID>` — Suspend the window with this stable id (from `state`)
+
+#### `driftwm msg relaunch`
+
+```
+driftwm msg relaunch [OPTIONS] [APP_ID]
+```
+
+Relaunch a suspended window: the focused stand-in, or one by app_id substring or `--id`.
+
+Spawns the suspended window's app from its `.desktop` entry and adopts the new window into the stand-in's slot on its first sized commit. Acts only on suspended stand-ins, so an `app_id` substring resolves straight to the matching stand-in (never a live client). Errors when nothing matches.
+
+Reply: `{"Ok":"Ok"}`.
+
+- `--id <ID>` — Relaunch the suspended window with this stable id (from `state`)
+
 #### `driftwm msg action`
 
 ```
@@ -180,6 +209,23 @@ The socket is a full control surface: `action` can `exec`/`spawn`, `quit`, and `
 Reply: `{"Ok":"Ok"}`.
 
 - `<SPEC>...` — Action and arguments, exactly as written in config (e.g. `nudge-window up`)
+
+#### `driftwm msg bookmark`
+
+```
+driftwm msg bookmark [OPTIONS] [NAME] [X] [Y]
+```
+
+List bookmarks, get/set one by `<name>`, or delete with `--delete`.
+
+With no arguments, lists every bookmark (`name: [x, y]`, Y-up, sorted). Given a `<name>`, prints that bookmark's point; with `<name> <x> <y>`, creates or overwrites it at that canvas point (Y-up, window-center convention, same as `move`). `--delete <name>` removes one. Bookmarks store a position only, never zoom — jump to one with the `go-to-bookmark` action or a `mod+<n>` keybinding.
+
+Reply: `{"Ok":{"Bookmark":{"x":500.0,"y":300.0}}}` (get/set), or `{"Ok":{"Bookmarks":{"home":[0.0,0.0]}}}` (list), or `{"Ok":"Ok"}` (delete).
+
+- `[NAME]` — Bookmark name. Omit to list every bookmark
+- `[X]` — X coordinate (Y-up). Requires `<y>`
+- `[Y]` — Y coordinate (Y-up)
+- `--delete` — Delete the named bookmark
 
 #### `driftwm msg screenshot`
 

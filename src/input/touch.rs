@@ -1,11 +1,11 @@
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::decorations::DecorationHit;
-use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab, TouchGestureGrab};
-use crate::state::{DriftWm, FocusTarget, SessionLock, output_state};
+use crate::grabs::{MoveGrab, ResizeGrab, ResizeState, TouchGestureGrab};
+use crate::input::DecoTarget;
+use crate::state::{DriftWm, FocusTarget, SessionLock, StageWindow, output_state};
 use driftwm::canvas::{CanvasPos, ScreenPos, canvas_to_screen, screen_to_canvas};
 use driftwm::window_ext::WindowExt;
 use smithay::{
@@ -327,7 +327,7 @@ impl DriftWm {
         output: Output,
         slots: usize,
         snapped: bool,
-    ) -> Option<ResizeSurfaceGrab> {
+    ) -> Option<ResizeGrab> {
         let initial_window_location = self.stage.position_of(window)?;
         let initial_window_size = window.geometry().size;
         let wl_surface = window.wl_surface().map(|s| s.into_owned())?;
@@ -351,6 +351,7 @@ impl DriftWm {
                     initial_window_location,
                     initial_window_size,
                     initial_screen_pos: pinned_initial_screen_pos,
+                    last_committed_size: initial_window_size,
                 });
         });
 
@@ -363,12 +364,12 @@ impl DriftWm {
 
         // Pinned resize is screen-space and single-window — no snap or cluster.
         let cluster_resize = if snapped && pinned_site.is_none() {
-            self.cluster_snapshot_for_resize(window, edges)
+            self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
         } else {
             crate::state::ClusterResizeSnapshot::empty()
         };
         let constraints = crate::grabs::SizeConstraints::for_window(window);
-        Some(ResizeSurfaceGrab::new_touch(
+        Some(ResizeGrab::new_touch(
             touch_start,
             window.clone(),
             edges,
@@ -480,11 +481,11 @@ impl DriftWm {
 
         // Fresh interaction. The first finger hit-tests SSD decorations.
         match self.decoration_under(canvas_pos) {
-            Some((window, DecorationHit::TitleBar)) => {
+            Some((DecoTarget::Client(window), DecorationHit::TitleBar)) => {
                 self.start_touch_move(&window, slot, canvas_pos, serial, output);
                 return;
             }
-            Some((window, DecorationHit::CloseButton)) => {
+            Some((DecoTarget::Client(window), DecorationHit::CloseButton)) => {
                 self.touch_state.pending_close = Some(PendingClose {
                     slot,
                     window,
@@ -492,6 +493,27 @@ impl DriftWm {
                     last_screen: screen_pos,
                     pinned: false,
                 });
+                return;
+            }
+            // Suspended windows are opaque: a tap focuses + raises, the label
+            // relaunches, the close button dismisses. Touch move/resize of a
+            // suspended window is not wired in pass 1 — those taps focus + raise.
+            // But an Overlay/Top layer or pinned window renders above the
+            // stand-in; dispatch its tap only when the stand-in is the real
+            // cascade winner (`pointer_focus_under` returns None over it),
+            // matching the pointer path's layers > pinned > suspended ordering.
+            Some((DecoTarget::Suspended(s), hit))
+                if self.pointer_focus_under(screen_pos, canvas_pos).is_none() =>
+            {
+                let id = s.id;
+                match hit {
+                    DecorationHit::CloseButton => self.dismiss_suspended(id),
+                    DecorationHit::Label => {
+                        self.focus_and_raise_suspended(id);
+                        self.relaunch_suspended(id);
+                    }
+                    _ => self.focus_and_raise_suspended(id),
+                }
                 return;
             }
             // Resize borders aren't touch-draggable (8px ≪ a fingertip); fall
@@ -561,7 +583,7 @@ impl DriftWm {
         window: &Window,
         touch_start: TouchGrabStartData<DriftWm>,
         slots: usize,
-    ) -> Option<MoveSurfaceGrab> {
+    ) -> Option<MoveGrab> {
         let site = self.stage.pin_of(window).cloned()?;
         let output = self.output_by_name(&site.output)?;
         let (camera, zoom) = {
@@ -570,7 +592,7 @@ impl DriftWm {
         };
         let finger_screen = canvas_to_screen(CanvasPos(touch_start.location), camera, zoom).0;
         let grab_offset = site.screen_pos.to_f64() - finger_screen;
-        Some(MoveSurfaceGrab::new_pinned_touch(
+        Some(MoveGrab::new_pinned_touch(
             touch_start,
             window.clone(),
             output,
@@ -597,6 +619,7 @@ impl DriftWm {
             return;
         };
         self.raise_and_focus(window, serial);
+        self.arm_interactive_move(window);
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
     }
 
@@ -621,15 +644,8 @@ impl DriftWm {
         };
         // One finger down (the titlebar press); the grab intercepts its motion
         // and up directly, so no `down` forward is needed.
-        let grab = MoveSurfaceGrab::new_touch(
-            start,
-            window.clone(),
-            initial,
-            output,
-            1,
-            Vec::new(),
-            HashSet::new(),
-        );
+        self.arm_interactive_move(window);
+        let grab = MoveGrab::new_touch(start, window.clone(), initial, output, 1, Vec::new());
         self.seat.get_touch().unwrap().set_grab(self, grab, serial);
     }
 
@@ -719,7 +735,7 @@ impl DriftWm {
                 } else {
                     matches!(
                         self.decoration_under(pc.last_canvas),
-                        Some((ref w, DecorationHit::CloseButton)) if *w == pc.window
+                        Some((DecoTarget::Client(ref w), DecorationHit::CloseButton)) if *w == pc.window
                     )
                 };
                 if still_inside {

@@ -14,12 +14,15 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingClickNavigate, ZoomAnimationAnchor, output_state};
+use super::{
+    DriftWm, PendingClickNavigate, PendingPick, PickTarget, StageWindow, ZoomAnimationAnchor,
+    output_state,
+};
 
 /// Max pointer travel (screen px) between press and release for a click to
 /// still count as a click rather than a drag. Beyond it, no auto-navigate — a
 /// text selection or slow drag inside a client never slides the canvas.
-const CLICK_NAVIGATE_SLOP: f64 = 5.0;
+pub(crate) const CLICK_NAVIGATE_SLOP: f64 = 5.0;
 
 /// Skip the activation pan only when the window is already fully inside its
 /// home output's viewport. Any clipping → pan that output to bring it fully
@@ -34,11 +37,19 @@ const ACTIVATION_ONSCREEN_THRESHOLD: f64 = f64::EPSILON;
 impl DriftWm {
     /// Navigate the active output's viewport to center on a window: raise,
     /// focus, animate camera. When `reset_zoom` is true, zoom animates to 1.0
-    /// (intentional navigation). Otherwise preserves current zoom, or restores
-    /// saved zoom if leaving overview.
+    /// (intentional navigation); otherwise the current zoom is preserved.
     pub fn navigate_to_window(&mut self, window: &Window, reset_zoom: bool) {
         if let Some(output) = self.active_output() {
             self.navigate_to_window_on(window, &output, reset_zoom);
+        }
+    }
+
+    /// Navigate the active output's viewport to center on a stage element — the
+    /// element-generic form of `navigate_to_window` / `center_on_suspended`.
+    pub fn navigate_to_element(&mut self, element: &StageWindow, reset_zoom: bool) {
+        match element {
+            StageWindow::Client(w) => self.navigate_to_window(w, reset_zoom),
+            StageWindow::Suspended(s) => self.center_on_suspended(s.id, reset_zoom),
         }
     }
 
@@ -75,18 +86,7 @@ impl DriftWm {
 
         self.raise_and_focus(window, serial);
 
-        let target_zoom = if reset_zoom {
-            output_state(output).overview_return = None;
-            1.0
-        } else {
-            let overview_ret = output_state(output).overview_return;
-            output_state(output).overview_return = None;
-            if let Some((_, saved_zoom)) = overview_ret {
-                saved_zoom
-            } else {
-                output_state(output).zoom
-            }
-        };
+        let target_zoom = self.navigation_target_zoom(output, reset_zoom);
 
         let window_loc = self.stage.position_of(window).unwrap_or_default();
         let window_size = window.geometry().size;
@@ -102,6 +102,9 @@ impl DriftWm {
             ))
         });
         let mut os = output_state(output);
+        // Disarms a pending zoom-to-fit return, same as a pan: the fit view is
+        // a camera position, not a mode that navigation exits.
+        os.overview_return = None;
         os.momentum.stop();
         os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
             canvas: window_center,
@@ -109,6 +112,16 @@ impl DriftWm {
         });
         os.camera_target = Some(target);
         os.zoom_target = Some(target_zoom);
+    }
+
+    /// The zoom a navigation animates to on `output`: 1.0 when `reset_zoom`
+    /// (intentional navigation), else the zoom already in effect.
+    pub(crate) fn navigation_target_zoom(&self, output: &Output, reset_zoom: bool) -> f64 {
+        if reset_zoom {
+            1.0
+        } else {
+            output_state(output).zoom
+        }
     }
 
     /// Arm a completed-click auto-navigate for `window` at press time. No-op
@@ -230,6 +243,89 @@ impl DriftWm {
         }
     }
 
+    /// Whether canvas content is too small to interact with directly, so clicks
+    /// pick windows instead of reaching them. A pure function of the active
+    /// output's current zoom — no stored flag. Strict `<`, so the `0.0` sentinel
+    /// (feature off) is handled by the `t > 0.0` guard.
+    pub(crate) fn pick_mode(&self) -> bool {
+        let t = self.config.zoom_interact_min;
+        t > 0.0 && self.zoom() < t
+    }
+
+    /// Arm a pick-mode left click for `target` at press time (canvas coords).
+    /// Fired on release by `resolve_pick` if the pointer barely moved and we're
+    /// still below the threshold; cancelled by `maybe_promote_pick` on a drag.
+    pub(crate) fn arm_pick(
+        &mut self,
+        target: PickTarget,
+        press_pos: Point<f64, Logical>,
+        button: u32,
+    ) {
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let press_screen_pos = canvas_to_screen(CanvasPos(press_pos), self.camera(), self.zoom()).0;
+        self.pending_pick = Some(PendingPick {
+            target,
+            press_screen_pos,
+            button,
+            output,
+        });
+    }
+
+    /// Resolve a pick armed by `arm_pick` at button release: center the target
+    /// (with `reset_zoom`, carrying the viewport back above the threshold, so a
+    /// pick is a one-shot navigation, not a mode). A drag already cancelled the
+    /// pick via `maybe_promote_pick`, so a surviving pending means the click
+    /// stayed within slop.
+    ///
+    /// Must run *before* the release forwards at `on_pointer_button`'s tail: the
+    /// `is_grabbed()` guard catches a gesture/edge-pan grab installed between
+    /// press and release, and those grabs self-terminate inside `pointer.button`.
+    pub(crate) fn resolve_pick(&mut self, button: u32) {
+        let Some(pending) = self.pending_pick.take() else {
+            return;
+        };
+        // A different button lifted — keep waiting for the armed one (mirrors
+        // resolve_click_navigate's button-mismatch branch).
+        if pending.button != button {
+            self.pending_pick = Some(pending);
+            return;
+        }
+        // A grab installed between press and release (3-finger swipe, popup,
+        // edge-pan) owns the interaction; a stray center would reset zoom to 1.0.
+        if self.seat.get_pointer().is_some_and(|p| p.is_grabbed()) {
+            return;
+        }
+        // A release on a different output can't be compared to the press.
+        if self.active_output().as_ref() != Some(&pending.output) {
+            return;
+        }
+        // Zoomed above the threshold while holding — respect that deliberate
+        // zoom rather than stomping it back to 1.0.
+        if !self.pick_mode() {
+            return;
+        }
+        match pending.target {
+            PickTarget::Client(window) => {
+                if window.alive() {
+                    self.navigate_to_window(&window, true);
+                }
+            }
+            PickTarget::Suspended(id) => {
+                if self.find_suspended(id).is_some() {
+                    self.center_on_suspended(id, true);
+                }
+            }
+        }
+    }
+
+    /// Drop any armed pick — on a fresh press (a new interaction) or on
+    /// promotion to a move. Mirrors `cancel_click_navigate`.
+    pub(crate) fn cancel_pick(&mut self) {
+        self.pending_pick = None;
+    }
+
     /// Reveal and focus `window` on the output it already lives on, without
     /// dragging a different monitor's camera to it: fully visible on its home
     /// output → just focus; any clipping → pan that output into view. A window
@@ -284,12 +380,23 @@ impl DriftWm {
     /// grabs included), with a focused modal standing in for its parent,
     /// since neither ever enters the focus history. `None` if focus isn't on
     /// a window. Capped against circular parents, like `topmost_modal_child`.
-    pub fn cycle_anchor(&self) -> Option<Window> {
+    pub fn cycle_anchor(&self) -> Option<super::StageWindow> {
+        // A focused suspended window is the anchor even though it holds no seat
+        // keyboard focus and never enters history: it isn't the history head, so
+        // a fresh cycle returns to the head rather than stepping past it.
+        if let Some(id) = self.gated_suspended_focus() {
+            return self
+                .stage
+                .windows()
+                .find(|w| w.suspended().is_some_and(|s| s.id == id))
+                .cloned();
+        }
         let focus = self.seat.get_keyboard()?.current_focus()?;
         let mut window = self
             .stage
             .windows()
-            .find(|w| focus_belongs_to_window(&focus.0, w))
+            .find(|w| focus_belongs_to_window(&focus.0, *w))
+            .and_then(|w| w.client())
             .cloned()?;
         for _ in 0..10 {
             if !window.is_modal() {
@@ -303,7 +410,7 @@ impl DriftWm {
             };
             window = parent;
         }
-        Some(window)
+        Some(super::StageWindow::Client(window))
     }
 
     /// Dynamic minimum zoom based on the current window layout.
@@ -313,7 +420,7 @@ impl DriftWm {
         driftwm::canvas::dynamic_min_zoom(
             self.stage
                 .windows()
-                .filter(|w| self.is_canvas_window(w))
+                .filter(|w| self.is_canvas_window(*w))
                 .map(|w| {
                     let loc = self.stage.position_of(w).unwrap_or_default();
                     let size = w.geometry().size;
@@ -331,7 +438,7 @@ impl DriftWm {
         let window = self
             .stage
             .windows()
-            .find(|w| focus_belongs_to_window(surface, w))
+            .find(|w| focus_belongs_to_window(surface, *w))
             .cloned();
         if let Some(window) = window {
             // Widgets and pinned (PiP-style) windows stay out of the focus
@@ -357,8 +464,14 @@ impl DriftWm {
     /// output's usable area at the current camera and zoom? Returns `false`
     /// for widgets and unmapped windows — they have no meaningful viewport
     /// relation, so callers treat them as "needs movement" and skip them.
-    pub fn window_fully_in_viewport(&self, w: &Window) -> bool {
-        let Some(rect) = self.snap_rect_for(w) else {
+    pub fn window_fully_in_viewport<Q>(&self, w: &Q) -> bool
+    where
+        super::StageWindow: PartialEq<Q>,
+    {
+        let Some(elem) = self.stage.windows().find(|e| **e == *w) else {
+            return false;
+        };
+        let Some(rect) = self.visual_frame_rect(elem) else {
             return false;
         };
         let camera = self.camera();
@@ -384,8 +497,14 @@ impl DriftWm {
     /// Does the window's snap rect intersect `output`'s usable area at that
     /// output's camera and zoom? Partial overlap counts as visible. Returns
     /// `false` for unmapped windows and widgets (no snap rect).
-    pub fn window_intersects_viewport_on(&self, w: &Window, output: &Output) -> bool {
-        let Some(rect) = self.snap_rect_for(w) else {
+    pub fn window_intersects_viewport_on<Q>(&self, w: &Q, output: &Output) -> bool
+    where
+        super::StageWindow: PartialEq<Q>,
+    {
+        let Some(elem) = self.stage.windows().find(|e| **e == *w) else {
+            return false;
+        };
+        let Some(rect) = self.visual_frame_rect(elem) else {
             return false;
         };
         let (camera, zoom) = {
@@ -410,6 +529,17 @@ impl DriftWm {
             && u_y_low < screen_y_high
     }
 
+    /// Representative point for the directional / nearest navigation searches:
+    /// the visual-frame center (content plus the SSD bar strip above it). Works
+    /// for a live window or a stand-in; equals `window_visual_center` for a
+    /// client (both share `visual_frame_center`).
+    pub fn nav_center(&self, w: &super::StageWindow) -> Point<f64, Logical> {
+        let loc = self.stage.position_of(w).unwrap_or_default();
+        let size = w.geometry().size;
+        let bar = self.window_ssd_bar(w) as f64;
+        super::visual_frame_center(loc, size, bar)
+    }
+
     /// Nearest window (by canvas distance from `from_center`) that is at least
     /// partially visible on `output`. Excludes `exclude`; widgets, pinned, and
     /// fullscreen windows have no canvas snap rect, so `window_intersects_viewport_on`
@@ -422,7 +552,8 @@ impl DriftWm {
     ) -> Option<Window> {
         self.stage
             .windows()
-            .filter(|w| *w != exclude && self.window_intersects_viewport_on(w, output))
+            .filter_map(|w| w.client())
+            .filter(|w| *w != exclude && self.window_intersects_viewport_on(*w, output))
             .min_by(|a, b| {
                 let dist = |w: &Window| {
                     self.window_visual_center(w)
@@ -451,10 +582,12 @@ impl DriftWm {
     /// user last saw as the cluster.
     #[allow(clippy::mutable_key_type)]
     pub fn first_spatially_related_in_history(&self, destroyed: &Window) -> Option<Window> {
+        let destroyed_elem = StageWindow::Client(destroyed.clone());
         let cached_destroyed_rect = destroyed
             .wl_surface()
             .and_then(|s| self.stable_snap_rects.get(&s.id()).copied());
-        let destroyed_rect = cached_destroyed_rect.or_else(|| self.snap_rect_for(destroyed))?;
+        let destroyed_rect =
+            cached_destroyed_rect.or_else(|| self.snap_rect_for(&destroyed_elem))?;
 
         let mut rects = self.all_windows_with_snap_rects();
         if cached_destroyed_rect.is_some() {
@@ -464,16 +597,21 @@ impl DriftWm {
                 }
             }
         }
-        let cluster = driftwm::layout::cluster::cluster_of(destroyed, &rects, self.config.snap_gap);
+        // Members may traverse through a suspended stand-in, so a client on the
+        // far side of a stand-in it was snapped to still resolves as related.
+        let cluster =
+            driftwm::layout::cluster::cluster_of(&destroyed_elem, &rects, self.config.snap_gap);
 
         self.stage
             .focus_history()
             .iter()
+            .filter_map(|w| w.client())
             .filter(|w| *w != destroyed)
             .find(|w| {
-                cluster.contains(*w)
+                let elem = StageWindow::Client((*w).clone());
+                cluster.contains(&elem)
                     || self
-                        .snap_rect_for(w)
+                        .snap_rect_for(&elem)
                         .is_some_and(|r| destroyed_rect.overlaps(&r))
             })
             .cloned()

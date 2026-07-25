@@ -5,7 +5,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter, output_state};
+use super::{DriftWm, PendingRecenter, StageWindow, output_state};
 use crate::grabs::SizeConstraints;
 use driftwm::canvas::{ScreenPos, screen_to_canvas};
 use driftwm::config;
@@ -53,7 +53,8 @@ impl DriftWm {
             y_high: bottom_right.y,
         };
 
-        let current = self.snap_rect_for(window)?;
+        let current = self.snap_rect_for(&StageWindow::Client(window.clone()))?;
+        #[allow(clippy::mutable_key_type)]
         let obstacles: Vec<SnapRect> = self
             .all_windows_with_snap_rects()
             .into_iter()
@@ -167,13 +168,10 @@ impl DriftWm {
             return;
         };
 
-        // Visual center of the saved geometry, matching the convention unfit and
-        // the pending-recenter completion in `handlers/compositor.rs` use.
-        let bar = self.window_ssd_bar(window);
-        let target_center = Point::from((
-            saved_pos.x as f64 + saved_size.w as f64 / 2.0,
-            saved_pos.y as f64 - bar as f64 + (saved_size.h + bar) as f64 / 2.0,
-        ));
+        // Visual center of the saved geometry; the settle completion re-derives
+        // the loc from it via `frame_loc_for_center`.
+        let bar = self.window_ssd_bar(window) as f64;
+        let target_center = super::visual_frame_center(saved_pos, saved_size, bar);
 
         let pre_exit_size = window.geometry().size;
         self.send_size_configure(window, saved_size);
@@ -183,7 +181,7 @@ impl DriftWm {
             // commit with a changed size will arrive to trigger the recenter —
             // restore the position immediately instead.
             self.map_window(window.clone(), saved_pos, false);
-            self.refresh_stable_snap_rect(window);
+            self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
         } else {
             self.pending_recenter.insert(
                 wl_surface.id(),

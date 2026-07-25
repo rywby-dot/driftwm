@@ -24,11 +24,22 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::utils::Logical;
 use smithay::wayland::compositor::RegionAttributes;
 
-use crate::decorations::DecorationHit;
-use crate::state::{DriftWm, FocusTarget};
+use std::rc::Rc;
+
+use crate::decorations::{DecorationHit, DecorationKey};
+use crate::state::{DriftWm, FocusTarget, PickTarget, StageWindow, SuspendedWindow};
 use driftwm::canvas::{CanvasPos, ScreenPos, screen_space_focus_loc, screen_to_canvas};
 use driftwm::config::HotCorner;
 use driftwm::protocols::output_power::OutputPowerHandler;
+
+/// What a decoration hit-test landed on: a live client window, or a suspended
+/// window (routed through the same decoration channel — see the suspended hit
+/// contract).
+#[derive(Clone)]
+pub(crate) enum DecoTarget {
+    Client(Window),
+    Suspended(Rc<SuspendedWindow>),
+}
 
 /// Constant-speed edge-pan velocity for the bare cursor: a steady glide
 /// whenever the cursor sits within `zone` px of an edge of the *usable* area
@@ -337,16 +348,60 @@ impl DriftWm {
         }
     }
 
+    /// Whether any suspended stand-in is on the stage — gates the per-motion
+    /// `decoration_under` scans so a canvas with no stand-ins pays nothing.
+    fn any_suspended(&self) -> bool {
+        self.stage.windows().any(|w| w.suspended().is_some())
+    }
+
+    /// Whether an opaque suspended stand-in is the topmost element at `canvas_pos` —
+    /// a client beneath must not receive enter/hover. Shared by the real-motion
+    /// and deferred-resync paths so the two occlusion checks can't drift.
+    pub(crate) fn suspended_occludes(
+        &self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> bool {
+        self.any_suspended()
+            && matches!(
+                self.decoration_under(canvas_pos),
+                Some((DecoTarget::Suspended(_), _))
+            )
+    }
+
     /// Hit-test the pointer against all surface layers in z-order. Sets
     /// `self.pointer_over_layer` and `self.pointer_over_screen_space` as side
     /// effects. The caller is responsible for issuing `pointer.motion()` /
     /// `pointer.relative_motion()` / `pointer.frame()` and calling
     /// `update_decoration_cursor()` so that absolute and relative motion events
     /// agree on the same target surface.
-    fn pointer_focus_under(
+    pub(crate) fn pointer_focus_under(
         &mut self,
         screen_pos: Point<f64, smithay::utils::Logical>,
         canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
+        self.focus_cascade(screen_pos, canvas_pos, false)
+    }
+
+    /// As `pointer_focus_under`, but suppresses pointer focus on a canvas window
+    /// under the pointer while in pick mode: its clicks pick/move it rather than
+    /// reaching the client. Route every real-input pointer path through this so
+    /// a per-frame resync can't hand the client its enter back. Touch stays on
+    /// `pointer_focus_under` (out of scope).
+    pub(crate) fn pointer_focus_under_pick(
+        &mut self,
+        screen_pos: Point<f64, smithay::utils::Logical>,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
+        // Evaluated before the cascade so no output_state guard is live inside it.
+        let pick_guard = self.pick_mode();
+        self.focus_cascade(screen_pos, canvas_pos, pick_guard)
+    }
+
+    fn focus_cascade(
+        &mut self,
+        screen_pos: Point<f64, smithay::utils::Logical>,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+        pick_guard: bool,
     ) -> Option<(FocusTarget, Point<f64, smithay::utils::Logical>)> {
         // A fullscreen window occludes the Top/Bottom/Background layers on its
         // output — only Overlay renders above it (mirror compose_frame's layer
@@ -375,10 +430,29 @@ impl DriftWm {
             return Some(hit);
         }
 
+        // A suspended window is an opaque canvas element that sits with normal
+        // windows. When one is the topmost element here it terminates the
+        // cascade: it owns no surface (no pointer focus), and nothing beneath —
+        // wallpaper, canvas layer, widget, or window — is reachable. Its clicks
+        // are routed through the decoration channel, not surface focus.
+        if self.suspended_occludes(canvas_pos) {
+            self.pointer_over_layer = false;
+            self.pointer_over_screen_space = false;
+            return None;
+        }
+
         // Non-widget canvas windows (visually above canvas layers)
         if let Some(hit) = self.surface_under(canvas_pos, Some(false)) {
             self.pointer_over_layer = false;
             self.pointer_over_screen_space = false;
+            // Pick mode: this window receives no pointer input — clicks pick or
+            // move it. Return None rather than skipping the branch so the click
+            // can't fall through to the canvas layers / widgets / Bottom layers
+            // beneath, which must not receive it either. The side-effect flags
+            // are still set once, here. (Stand-ins are handled above.)
+            if pick_guard {
+                return None;
+            }
             return Some(hit);
         }
 
@@ -416,7 +490,7 @@ impl DriftWm {
 
     /// Sloppy focus: when enabled, focus the non-widget window under the pointer
     /// without raising it. Skips layers, widgets, and empty canvas.
-    fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
+    pub(crate) fn maybe_hover_focus(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
         if !self.config.focus_follows_mouse || self.pointer_over_layer {
             return;
         }
@@ -432,10 +506,13 @@ impl DriftWm {
             let focus_surface = window.wl_surface().map(|s| FocusTarget(s.into_owned()));
             let already_focused = focus_surface
                 .as_ref()
-                .is_some_and(|t| self.window_focus.as_ref().is_some_and(|f| f.0 == t.0));
+                .is_some_and(|t| self.window_focus_surface().is_some_and(|f| f.0 == t.0));
             if !already_focused {
                 let serial = SERIAL_COUNTER.next_serial();
                 self.set_window_focus(focus_surface, serial);
+                // Reclaim the Activated hint too: hover may have handed it to
+                // another output's window while pulling keyboard focus away.
+                self.set_activated_exclusive(&window);
             }
             return;
         }
@@ -448,11 +525,44 @@ impl DriftWm {
             self.zoom(),
         )
         .0;
-        let window = match self.pinned_window_under(screen_pos, canvas_pos) {
-            Some((focus, _)) => self.window_for_surface(&focus.0),
-            None => self.element_under(canvas_pos).map(|(w, _)| w.clone()),
+        if let Some((focus, _)) = self.pinned_window_under(screen_pos, canvas_pos) {
+            let Some(window) = self.window_for_surface(&focus.0) else {
+                return;
+            };
+            self.hover_focus_window(window);
+            return;
+        }
+
+        // A suspended window is above normal canvas windows: hovering one sets
+        // the focus intent (it holds no seat keyboard focus).
+        if self.any_suspended()
+            && let Some((DecoTarget::Suspended(s), _)) = self.decoration_under(canvas_pos)
+        {
+            let id = s.id;
+            let already = matches!(
+                self.window_focus,
+                Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
+            );
+            if !already {
+                let serial = SERIAL_COUNTER.next_serial();
+                self.set_suspended_focus(id, serial);
+                // The stand-in has no toplevel to activate, but this still
+                // clears the Activated hint off the previously-focused window.
+                self.set_activated_exclusive(&StageWindow::Suspended(s));
+            }
+            return;
+        }
+
+        let Some(window) = self.element_under(canvas_pos).map(|(w, _)| w.clone()) else {
+            return;
         };
-        let Some(window) = window else { return };
+        self.hover_focus_window(window);
+    }
+
+    /// Sloppy-focus a client window under the pointer (skipping widgets),
+    /// redirecting to its innermost modal child, without re-running when the
+    /// intent already points there.
+    fn hover_focus_window(&mut self, window: Window) {
         let is_widget = window
             .wl_surface()
             .and_then(|s| driftwm::config::applied_rule(&s))
@@ -461,23 +571,23 @@ impl DriftWm {
             return;
         }
 
-        let focus_surface = self
-            .topmost_modal_child(&window)
-            .or(Some(window))
-            .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())));
+        let target = self.topmost_modal_child(&window).unwrap_or(window);
+        let focus_surface = target.wl_surface().map(|s| FocusTarget(s.into_owned()));
 
         // Compare against the window-focus intent, not the live keyboard focus:
         // while a layer surface owns focus the latter never matches, which would
         // re-run the focus recompute on every motion event.
         let already_focused = focus_surface
             .as_ref()
-            .is_some_and(|target| self.window_focus.as_ref().is_some_and(|f| f.0 == target.0));
+            .is_some_and(|target| self.window_focus_surface().is_some_and(|f| f.0 == target.0));
         if already_focused {
             return;
         }
 
         let serial = SERIAL_COUNTER.next_serial();
         self.set_window_focus(focus_surface, serial);
+        // Keep the client's Activated hint in step with keyboard focus without raising it.
+        self.set_activated_exclusive(&target);
     }
 
     /// Deactivate the constraint on the previous focus if focus changed,
@@ -548,7 +658,7 @@ impl DriftWm {
         )
         .0;
         let old_focus = pointer.current_focus();
-        let under = self.pointer_focus_under(screen_pos, canvas_pos);
+        let under = self.pointer_focus_under_pick(screen_pos, canvas_pos);
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         pointer.motion(
@@ -613,7 +723,10 @@ impl DriftWm {
         let time = Event::time_msec(&event);
         let pointer = self.seat.get_pointer().unwrap();
         let old_focus = pointer.current_focus();
-        let under = self.pointer_focus_under(screen_pos, canvas_pos);
+        let under = self.pointer_focus_under_pick(screen_pos, canvas_pos);
+        // Promote an armed pick to a move once the drag clears the slop. Before
+        // pointer.motion so the freshly installed grab receives this event.
+        self.maybe_promote_pick(canvas_pos);
         pointer.motion(
             self,
             under,
@@ -808,7 +921,7 @@ impl DriftWm {
         // so zwp_relative_pointer clients agree with wl_pointer about the target
         // surface — otherwise relative motion lands on a window underneath a
         // layer surface while wl_pointer.motion lands on the layer.
-        let under = self.pointer_focus_under(screen_pos, canvas_pos);
+        let under = self.pointer_focus_under_pick(screen_pos, canvas_pos);
 
         // Reject a confined move that would leave the surface or its region:
         // forward only the relative delta (the app still tracks motion) and hold
@@ -843,6 +956,9 @@ impl DriftWm {
             }
         }
 
+        // Promote an armed pick to a move once the drag clears the slop. Before
+        // pointer.motion so the freshly installed grab receives this event.
+        self.maybe_promote_pick(canvas_pos);
         pointer.motion(
             self,
             under.clone(),
@@ -1031,25 +1147,43 @@ impl DriftWm {
     }
 
     /// Stage-side `Space::element_under` (bbox filter, render_location, input
-    /// region), minus the windows `skip` rejects.
+    /// region), minus the windows `skip` rejects. Occlusion-aware: an opaque
+    /// suspended stand-in above a client terminates the scan, so no client is
+    /// ever reached through a stand-in's frame. Callers that want the stand-in
+    /// itself (raise, center) consult `decoration_under` explicitly.
     fn element_under_skipping(
         &self,
         point: Point<f64, Logical>,
         mut skip: impl FnMut(&Window) -> bool,
     ) -> Option<(&Window, Point<i32, Logical>)> {
-        self.stage
-            .windows()
-            .rev()
-            .filter(|w| !skip(w))
-            .filter(|w| {
-                self.window_bbox_with_popups(w)
-                    .is_some_and(|bbox| bbox.to_f64().contains(point))
-            })
-            .find_map(|w| {
-                let render_location = self.stage.position_of(w)? - w.geometry().loc;
-                w.is_in_input_region(&(point - render_location.to_f64()))
-                    .then_some((w, render_location))
-            })
+        for element in self.stage.windows().rev() {
+            match element {
+                StageWindow::Suspended(s) => {
+                    if self.suspended_decoration_hit(s, point).is_some() {
+                        return None;
+                    }
+                }
+                StageWindow::Client(w) => {
+                    if skip(w) {
+                        continue;
+                    }
+                    if !self
+                        .window_bbox_with_popups(w)
+                        .is_some_and(|bbox| bbox.to_f64().contains(point))
+                    {
+                        continue;
+                    }
+                    let Some(pos) = self.stage.position_of(w) else {
+                        continue;
+                    };
+                    let render_location = pos - w.geometry().loc;
+                    if w.is_in_input_region(&(point - render_location.to_f64())) {
+                        return Some((w, render_location));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Isolation-aware hit-test: skips a window fullscreen on an output other
@@ -1077,6 +1211,37 @@ impl DriftWm {
         self.element_under_skipping(point, |_| false)
     }
 
+    /// The pick target under a canvas position: a suspended stand-in occluding
+    /// the point, or a non-widget canvas window taken as one uniform target —
+    /// its content, its SSD chrome (title bar, close button, resize borders) and
+    /// its CSD resize margin all count, because `surface_under` reports every one
+    /// of those bands. Shared by `try_pick_button`, the hover affordance, and the
+    /// scroll fallback so the three agree on exactly what a click below the
+    /// threshold hits and where the affordance appears. Pinned, fullscreen and
+    /// widget windows are excluded (`surface_under(_, Some(false))` skips widgets
+    /// and off-output fullscreen; `is_canvas_window` rejects the rest).
+    pub(crate) fn pick_target_under(
+        &self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<PickTarget> {
+        // A stand-in owns no surface, so `surface_under` can't see it. Check the
+        // decoration channel first: it is topmost-first, so a client's content or
+        // chrome above the stand-in wins and this arm won't match.
+        if let Some((DecoTarget::Suspended(s), _)) = self.decoration_under(canvas_pos) {
+            return Some(PickTarget::Suspended(s.id));
+        }
+        let (target, _) = self.surface_under(canvas_pos, Some(false))?;
+        // A content hit may be a subsurface; walk to the root toplevel before
+        // resolving to a window (chrome hits already return the toplevel).
+        let mut root = target.0;
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        let window = self.window_for_surface(&root)?;
+        self.is_canvas_window(&window)
+            .then_some(PickTarget::Client(window))
+    }
+
     /// The screen-pinned window under an output-relative screen position:
     /// `pinned_window_under` resolved from focus surface to window element.
     pub(crate) fn pinned_element_under(&self, screen_pos: Point<f64, Logical>) -> Option<Window> {
@@ -1102,7 +1267,7 @@ impl DriftWm {
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active_output = self.active_output();
 
-        for window in self.stage.windows().rev() {
+        for window in self.stage.windows().rev().filter_map(|w| w.client()) {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1146,7 +1311,10 @@ impl DriftWm {
 
             // Then check decoration areas for this window
             let size = window.geometry().size;
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height)
                     || crate::decorations::title_bar_contains(pos, loc, size.w, bar_height)
                     || crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
@@ -1197,7 +1365,7 @@ impl DriftWm {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
-        for window in self.stage.windows().rev() {
+        for window in self.stage.windows().rev().filter_map(|w| w.client()) {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1223,7 +1391,10 @@ impl DriftWm {
             }
 
             let size = window.geometry().size;
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(
                     screen_pos,
                     p.screen_pos,
@@ -1296,7 +1467,7 @@ impl DriftWm {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
 
-        for window in self.stage.windows().rev() {
+        for window in self.stage.windows().rev().filter_map(|w| w.client()) {
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1309,7 +1480,10 @@ impl DriftWm {
             let loc = p.screen_pos;
             let size = window.geometry().size;
 
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(screen_pos, loc, size.w, bar_height) {
                     return Some((window.clone(), DecorationHit::CloseButton));
                 }
@@ -1353,8 +1527,42 @@ impl DriftWm {
 
     /// Update cursor icon based on what decoration area the pointer is over.
     /// Called after pointer motion to set resize/pointer cursors for SSD areas.
-    fn update_decoration_cursor(&mut self, canvas_pos: Point<f64, smithay::utils::Logical>) {
-        if self.cursor.grab_cursor || self.pointer_over_layer {
+    /// `pub(crate)` so `flush_pointer_resync` can refresh the pick affordance on
+    /// zoom-driven frames that no pointer motion covers.
+    pub(crate) fn update_decoration_cursor(
+        &mut self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) {
+        use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+        // An active grab (incl. a promoted pick move showing Grabbing) owns the
+        // cursor icon.
+        if self.cursor.grab_cursor {
+            return;
+        }
+        // Pick mode: the whole body of a canvas window / stand-in is a click
+        // target, so advertise it with a Pointer cursor and suppress the
+        // chrome hit-test below, which would otherwise show a resize/close
+        // cursor over a target that only picks or moves — a visible lie. Placed
+        // before the pointer_over_layer return so the clear arm still runs over
+        // empty canvas backed by a Background layer, killing the affordance latch
+        // (the early return would skip the only code that clears it). Falls
+        // through — not returns — with no pick target, so layer-surface and
+        // pinned-window cursors served past the returns below keep working.
+        if self.pick_mode() {
+            let over_pick_target = self.pick_target_under(canvas_pos).is_some();
+            if over_pick_target {
+                self.cursor.decoration_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Pointer);
+                self.clear_all_close_hovered();
+                return;
+            }
+            if self.cursor.decoration_cursor {
+                self.cursor.decoration_cursor = false;
+                self.cursor.cursor_status = CursorImageStatus::default_named();
+                self.clear_all_close_hovered();
+            }
+        }
+        if self.pointer_over_layer {
             return;
         }
         // Pinned windows are screen-space; check them first (they're above
@@ -1365,47 +1573,59 @@ impl DriftWm {
             self.zoom(),
         )
         .0;
-        let hit = self
-            .pinned_decoration_under(screen_pos)
-            .or_else(|| self.decoration_under(canvas_pos));
+        // Resolve the decoration key + region from a pinned window (screen
+        // space, always a client) or the canvas hit-test (client or suspended).
+        let hit: Option<(DecorationKey, DecorationHit)> =
+            if let Some((window, h)) = self.pinned_decoration_under(screen_pos) {
+                window
+                    .wl_surface()
+                    .map(|s| (DecorationKey::Surface(s.id()), h))
+            } else {
+                self.decoration_under(canvas_pos)
+                    .and_then(|(target, h)| match target {
+                        DecoTarget::Client(w) => {
+                            w.wl_surface().map(|s| (DecorationKey::Surface(s.id()), h))
+                        }
+                        DecoTarget::Suspended(s) => Some((DecorationKey::Suspended(s.id), h)),
+                    })
+            };
         match hit {
-            Some((ref window, DecorationHit::CloseButton)) => {
+            Some((key, DecorationHit::CloseButton)) => {
                 self.cursor.decoration_cursor = true;
-                self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::Named(
-                    smithay::input::pointer::CursorIcon::Pointer,
-                );
-                self.set_close_hovered(window, true);
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Pointer);
+                self.set_close_hovered_key(&key, true);
             }
-            Some((ref window, DecorationHit::ResizeBorder(edge))) => {
-                self.cursor.decoration_cursor = true;
-                self.cursor.cursor_status = smithay::input::pointer::CursorImageStatus::Named(
-                    crate::input::pointer::resize_cursor(edge),
-                );
-                self.set_close_hovered(window, false);
-            }
-            Some((ref window, DecorationHit::TitleBar)) => {
+            Some((key, DecorationHit::ResizeBorder(edge))) => {
                 self.cursor.decoration_cursor = true;
                 self.cursor.cursor_status =
-                    smithay::input::pointer::CursorImageStatus::default_named();
-                self.set_close_hovered(window, false);
+                    CursorImageStatus::Named(crate::input::pointer::resize_cursor(edge));
+                self.set_close_hovered_key(&key, false);
+            }
+            // The label relaunches on click — a pointer cursor advertises it.
+            Some((key, DecorationHit::Label)) => {
+                self.cursor.decoration_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Pointer);
+                self.set_close_hovered_key(&key, false);
+            }
+            Some((key, DecorationHit::TitleBar | DecorationHit::Body)) => {
+                self.cursor.decoration_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::default_named();
+                self.set_close_hovered_key(&key, false);
             }
             None => {
                 if self.cursor.decoration_cursor {
                     self.cursor.decoration_cursor = false;
-                    self.cursor.cursor_status =
-                        smithay::input::pointer::CursorImageStatus::default_named();
+                    self.cursor.cursor_status = CursorImageStatus::default_named();
                     self.clear_all_close_hovered();
                 }
             }
         }
     }
 
-    /// Set the close button hover state for a specific window's decoration.
-    fn set_close_hovered(&mut self, window: &Window, hovered: bool) {
-        let Some(wl_surface) = window.wl_surface() else {
-            return;
-        };
-        if let Some(deco) = self.decorations.get_mut(&wl_surface.id())
+    /// Set the close button hover state for a decoration entry (client surface
+    /// or suspended window), re-rendering the title bar if it changed.
+    fn set_close_hovered_key(&mut self, key: &DecorationKey, hovered: bool) {
+        if let Some(deco) = self.decorations.get_mut(key)
             && deco.close_hovered != hovered
         {
             deco.close_hovered = hovered;
@@ -1439,18 +1659,31 @@ impl DriftWm {
         }
     }
 
-    /// Check if a canvas position hits a decoration area (SSD chrome, or the
-    /// compositor-side CSD resize margin).
-    pub fn decoration_under(
+    /// Check if a canvas position hits a decoration area (SSD chrome, the
+    /// compositor-side CSD resize margin, or a suspended window's whole frame).
+    /// Scans clients and suspended windows interleaved by z-order so a higher
+    /// element's opaque extent occludes a lower one's chrome.
+    pub(crate) fn decoration_under(
         &self,
         pos: Point<f64, smithay::utils::Logical>,
-    ) -> Option<(Window, DecorationHit)> {
+    ) -> Option<(DecoTarget, DecorationHit)> {
         let bar_height = self.config.decorations.title_bar_height;
         let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
         let active = self.active_output();
 
         // Iterate in z-order (topmost first, matching stage.windows().rev())
-        for window in self.stage.windows().rev() {
+        for element in self.stage.windows().rev() {
+            let window = match element {
+                StageWindow::Suspended(s) => {
+                    if let Some(hit) = self.suspended_decoration_hit(s, pos) {
+                        return Some((DecoTarget::Suspended(s.clone()), hit));
+                    }
+                    // Outside this suspended window's frame — a lower element
+                    // may still be hit.
+                    continue;
+                }
+                StageWindow::Client(w) => w,
+            };
             let Some(wl_surface) = window.wl_surface() else {
                 continue;
             };
@@ -1470,18 +1703,27 @@ impl DriftWm {
             };
             let size = window.geometry().size;
 
-            if self.decorations.contains_key(&wl_surface.id()) {
+            if self
+                .decorations
+                .contains_key(&DecorationKey::Surface(wl_surface.id()))
+            {
                 if crate::decorations::close_button_contains(pos, loc, size.w, bar_height) {
-                    return Some((window.clone(), DecorationHit::CloseButton));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::CloseButton,
+                    ));
                 }
                 if crate::decorations::title_bar_contains(pos, loc, size.w, bar_height) {
-                    return Some((window.clone(), DecorationHit::TitleBar));
+                    return Some((DecoTarget::Client(window.clone()), DecorationHit::TitleBar));
                 }
                 if self.config.resize_on_border
                     && let Some(edge) =
                         crate::decorations::resize_edge_at(pos, loc, size, bar_height, border_width)
                 {
-                    return Some((window.clone(), DecorationHit::ResizeBorder(edge)));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::ResizeBorder(edge),
+                    ));
                 }
             } else {
                 // CSD: only the outer resize margin (see surface_under).
@@ -1494,7 +1736,10 @@ impl DriftWm {
                     && let Some(edge) =
                         crate::decorations::resize_edge_at(pos, loc, size, 0, border_width)
                 {
-                    return Some((window.clone(), DecorationHit::ResizeBorder(edge)));
+                    return Some((
+                        DecoTarget::Client(window.clone()),
+                        DecorationHit::ResizeBorder(edge),
+                    ));
                 }
             }
 
@@ -1508,6 +1753,67 @@ impl DriftWm {
             {
                 return None;
             }
+        }
+        None
+    }
+
+    /// Which region of a suspended window's frame `pos` lands in, or `None` if
+    /// outside the frame entirely. The whole content+chrome is an opaque hit
+    /// target (Body / Label / TitleBar / CloseButton); the outer margin is a
+    /// resize border. Pure geometry — suspended windows are never pinned or
+    /// fullscreen.
+    fn suspended_decoration_hit(
+        &self,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<DecorationHit> {
+        let loc = self.stage.position_of(&StageWindow::Suspended(s.clone()))?;
+        let size = s.size.get();
+        // Every stand-in draws the same bar; a CSD-origin one shrank its body
+        // under it, so the bar band and close button sit at the same offsets as
+        // an SSD-origin stand-in's.
+        let bar = self.config.decorations.title_bar_height;
+        let border_width = driftwm::config::DecorationConfig::RESIZE_BORDER_WIDTH;
+
+        if crate::decorations::close_button_contains(pos, loc, size.w, bar) {
+            return Some(DecorationHit::CloseButton);
+        }
+        // The whole bar band, including the padding strip right of the close
+        // button, is a drag target — the stand-in draws chrome across its full
+        // width, so no sliver falls through to a window beneath.
+        if pos.y >= (loc.y - bar) as f64
+            && pos.y < loc.y as f64
+            && pos.x >= loc.x as f64
+            && pos.x < (loc.x + size.w) as f64
+        {
+            return Some(DecorationHit::TitleBar);
+        }
+        // Body: the content rect below the title bar. A centered label sub-rect
+        // relaunches; the rest focuses + raises.
+        let in_body = pos.x >= loc.x as f64
+            && pos.x < (loc.x + size.w) as f64
+            && pos.y >= loc.y as f64
+            && pos.y < (loc.y + size.h) as f64;
+        if in_body {
+            let label = s.chrome.borrow().label_rect;
+            if let Some(r) = label {
+                let lx = (loc.x + r.loc.x) as f64;
+                let ly = (loc.y + r.loc.y) as f64;
+                if pos.x >= lx
+                    && pos.x < lx + r.size.w as f64
+                    && pos.y >= ly
+                    && pos.y < ly + r.size.h as f64
+                {
+                    return Some(DecorationHit::Label);
+                }
+            }
+            return Some(DecorationHit::Body);
+        }
+        if self.config.resize_on_border
+            && let Some(edge) =
+                crate::decorations::resize_edge_at(pos, loc, size, bar, border_width)
+        {
+            return Some(DecorationHit::ResizeBorder(edge));
         }
         None
     }

@@ -58,7 +58,7 @@ decoration_fit_snapped = true
 [keybindings]
 "mod+return" = "exec ptyxis -s"
 "mod+d" = "exec fuzzel"
-"mod+shift+d" = "spawn ~/Documents/work/scripts/driftwm/extras/scripts/theme-toggle.sh"
+"mod+shift+d" = "exec ~/Documents/work/scripts/driftwm/extras/scripts/spotlight.sh"
 "mod+l" = "spawn ~/Documents/work/scripts/driftwm/extras/scripts/lock.sh"
 "mod+n" = "spawn swaync-client -t"
 # swayosd instead of default wpctl/brightnessctl
@@ -67,7 +67,7 @@ decoration_fit_snapped = true
 "XF86AudioMute" = "spawn swayosd-client --output-volume mute-toggle"
 "XF86MonBrightnessUp" = "spawn swayosd-client --brightness raise"
 "XF86MonBrightnessDown" = "spawn swayosd-client --brightness lower"
-"mod+s" = "exec ~/Documents/work/scripts/driftwm/extras/scripts/window-search.sh"
+"mod+s" = "suspend-window"
 "mod+m" = "fit-window-snapped"
 "mod+shift+m" = "fit-window"
 

@@ -211,9 +211,9 @@ pub fn corner_round_rect(
 /// Drop-in replacement for `smithay::backend::renderer::element::utils::RescaleRenderElement`
 /// that uses pixel-snapped corner rounding (see [`corner_round_rect`]).
 ///
-/// Used only for window surface elements — shadows and decorations keep smithay's
-/// default wrapper because their rasterized edges are either soft (shadow) or
-/// small bitmaps where the ±1 pixel isn't visible (title bars).
+/// Used wherever a hard edge must land on the same pixel as its neighbors
+/// (window surfaces, decorations, suspended chrome); shadows keep smithay's
+/// default wrapper because their rasterized edges are soft.
 #[derive(Debug)]
 pub struct PixelSnapRescaleElement<E> {
     element: E,

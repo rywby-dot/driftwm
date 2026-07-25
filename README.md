@@ -219,7 +219,20 @@ https://github.com/user-attachments/assets/31c235e6-baae-4843-bb43-aca749e41f04
 Layer shell surfaces (waybar, fuzzel, mako) work as expected. Foreign toplevel
 management means your dock/taskbar shows all windows — click one and the
 viewport pans to it and centers it. See [`extras/`](extras/) for a fuzzel
-window-search script that lets you search and jump to any open window.
+spotlight script that searches open windows, suspended windows, and installed
+apps in one list — jump to a window, relaunch a stand-in, or launch an app.
+
+### Window suspend & session restore
+
+Close a window and leave a placeholder behind instead of losing it:
+`suspend-window` swaps the window for a compositor-drawn stand-in at the same
+canvas spot — press `Enter` or click its name to bring the app right back, in
+the same place. `suspend_on_close` does this automatically for every
+client-initiated close. `[session].restore_windows` saves your whole canvas on quit/logout
+and restores it (dormant, nothing auto-launches) on the next start, with
+`restore_camera` bringing each output's view back too.
+
+See [docs/session.md](docs/session.md).
 
 ### Everything else
 
@@ -386,6 +399,10 @@ driftwm auto-detects whether it's running nested (inside an existing Wayland
 session) or on real hardware (from a TTY). Just run `driftwm`. For display
 manager integration, select "driftwm" from the session menu.
 
+A nested session skips [session restore](docs/session.md#nested--dev-sessions)
+by default (`--session-file <path>` opts it in), so a dev instance can never
+clobber your real session file.
+
 > [!TIP]
 > When launched by a display manager, driftwm runs as a systemd user service — view logs with `journalctl --user -u driftwm.service` (add `-f` to follow). Run directly and logs go to stderr.
 
@@ -446,7 +463,7 @@ Compositor-agnostic full Wayland shells like **noctalia**, **wayle**, and **dank
 
 The [`extras/`](extras/) directory contains a complete setup — driftwm config,
 GLSL shader wallpapers, Python widgets (clock, calendar, system stats, power
-menu), waybar with taskbar/tray, fuzzel window-search script, and window rules
+menu), waybar with taskbar/tray, fuzzel spotlight script, and window rules
 tying it all together. Use it as a starting point or steal pieces.
 
 ## Community

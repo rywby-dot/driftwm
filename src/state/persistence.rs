@@ -81,6 +81,7 @@ fn window_list_changed(a: &[WindowInfo], b: &[WindowInfo]) -> bool {
                 || x.size != y.size
                 || x.is_focused != y.is_focused
                 || x.is_widget != y.is_widget
+                || x.suspended != y.suspended
         })
 }
 
@@ -97,8 +98,35 @@ impl DriftWm {
     /// both the state file and the IPC `state` response, so the two can't drift.
     pub fn window_inventory(&self) -> Vec<WindowInfo> {
         let focused = self.focused_window();
+        let focused_suspended = self.gated_suspended_focus();
         let mut windows: Vec<WindowInfo> = Vec::new();
         for window in self.stage.windows() {
+            // Suspended stand-ins have no surface; report them explicitly (they
+            // live on the canvas like any window, are `msg`-selectable by id,
+            // and a focused one is reported like a focused client).
+            if let Some(s) = window.suspended() {
+                let loc = self.stage.position_of(window).unwrap_or_default();
+                let size = s.size.get();
+                let (rx, ry) = driftwm::canvas::internal_to_rule(loc, size);
+                windows.push(WindowInfo {
+                    id: self
+                        .stage
+                        .id_of(window)
+                        .expect("window from stage.windows() has an id")
+                        .0,
+                    app_id: s.identity.app_id.clone(),
+                    // A stand-in is an app-level placeholder, not the window it
+                    // replaced — relaunch starts the app fresh, so there's no
+                    // title left to report.
+                    title: String::new(),
+                    position: [rx, ry],
+                    size: [size.w, size.h],
+                    is_focused: focused_suspended == Some(s.id),
+                    is_widget: false,
+                    suspended: true,
+                });
+                continue;
+            }
             let Some(surface) = window.wl_surface() else {
                 continue;
             };
@@ -128,8 +156,9 @@ impl DriftWm {
                 title,
                 position: [rx, ry],
                 size: [size.w, size.h],
-                is_focused: focused.as_ref() == Some(window),
+                is_focused: focused.as_ref().is_some_and(|f| window == f),
                 is_widget: window.is_widget(),
+                suspended: false,
             });
         }
         // Focused window first, so consumers can read windows[0] as the focused one.
@@ -387,6 +416,8 @@ impl DriftWm {
         // camera moved.
         let active_name = self.active_output().map(|o| o.name());
         let active_dirty = active_name != self.state_file_active_output;
+        // Broadcast-only, like a title change (see `active_bookmark_dirty`).
+        let incumbent_dirty = std::mem::take(&mut self.active_bookmark_dirty);
 
         if !layout_dirty
             && !any_output_dirty
@@ -394,11 +425,13 @@ impl DriftWm {
             && !screen_space_dirty
             && !active_dirty
         {
-            if titles_dirty {
+            if titles_dirty || incumbent_dirty {
                 crate::ipc::broadcast_state_event(self);
                 // Cache the new titles or this re-fires every tick; the file
                 // itself deliberately stays stale on title-only changes.
-                self.state_file_windows = window_fps;
+                if titles_dirty {
+                    self.state_file_windows = window_fps;
+                }
             }
             return;
         }
@@ -570,6 +603,7 @@ mod tests {
             size: [100, 100],
             is_focused: false,
             is_widget: false,
+            suspended: false,
         }
     }
 
@@ -585,5 +619,16 @@ mod tests {
         let a = vec![win(1, "one"), win(2, "two")];
         let b = vec![win(1, "one"), win(2, "two")];
         assert!(!window_titles_changed(&a, &b));
+    }
+
+    #[test]
+    fn list_changed_detects_suspend_transition() {
+        // A suspend conversion is in-place: same id/app_id/rect/focus — only
+        // `suspended` flips. Without it in the closure, subscribers and the
+        // state file never see the transition.
+        let a = vec![win(1, "one")];
+        let mut b = a.clone();
+        b[0].suspended = true;
+        assert!(window_list_changed(&a, &b));
     }
 }

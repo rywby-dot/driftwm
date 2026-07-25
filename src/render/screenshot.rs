@@ -35,15 +35,15 @@ pub struct Capture {
 /// PNG to `path`. Windows are drawn with their full chrome (title bar, border,
 /// rounded corners, shadow); `include_background` adds the canvas background
 /// (off for an isolated `window` capture, which stays transparent). When
-/// `isolate` is `Some`, only that window is composed — see
-/// [`compose_capture_elements`].
+/// `isolate` is `Some`, only that element (client or suspended stand-in) is
+/// composed — see [`compose_capture_elements`].
 pub fn capture_region_to_png(
     state: &mut crate::state::DriftWm,
     renderer: &mut GlesRenderer,
     region: Rectangle<i32, Logical>,
     dpi_scale: f64,
     include_background: bool,
-    isolate: Option<&smithay::desktop::Window>,
+    isolate: Option<&crate::state::StageWindow>,
     path: &Path,
 ) -> Result<Capture, String> {
     if !(dpi_scale.is_finite() && dpi_scale > 0.0) {

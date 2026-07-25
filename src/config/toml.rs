@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub(super) struct ConfigFile {
     pub mod_key: Option<String>,
     pub focus_follows_mouse: Option<bool>,
+    pub session: SessionFileConfig,
     pub input: InputConfig,
     pub cursor: CursorConfig,
     pub navigation: NavigationConfig,
@@ -131,6 +132,10 @@ pub(super) struct NavigationConfig {
     /// instead of failing the whole parse via `deny_unknown_fields`.
     pub friction: Option<f64>,
     pub anchors: Option<Vec<[f64; 2]>>,
+    /// Named canvas points (Y-up, window-center convention) that seed the
+    /// runtime bookmark registry. Absent → the compiled corner defaults;
+    /// present-but-empty → no seeds (explicit-empty escape hatch).
+    pub bookmarks: Option<HashMap<String, [f64; 2]>>,
     pub edge_pan: EdgePanConfig,
 }
 
@@ -153,6 +158,25 @@ pub(super) struct EdgePanConfig {
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
+pub(super) struct SessionFileConfig {
+    /// Convert client-initiated closes into suspended windows instead of
+    /// destroying them. Per-window overridable via a `suspend_on_close` rule.
+    pub suspend_on_close: Option<bool>,
+    /// Save eligible windows on graceful shutdown and bring them back as
+    /// suspended windows on the next launch.
+    pub restore_windows: Option<bool>,
+    /// Seed each output's camera and zoom from the durable session on the next
+    /// launch. Off by default, so the default config starts every output at its
+    /// centered camera.
+    pub restore_camera: Option<bool>,
+    /// Restore the bookmark registry from the durable session on the next
+    /// launch, overlaying saved bookmarks on top of the config seeds. Off by
+    /// default, so runtime bookmark edits don't persist across restarts.
+    pub restore_bookmarks: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct ZoomConfig {
     pub step: Option<f64>,
     pub fit_padding: Option<f64>,
@@ -161,6 +185,7 @@ pub(super) struct ZoomConfig {
     pub touch_speed: Option<f64>,
     pub trackpad_speed: Option<f64>,
     pub mouse_speed: Option<f64>,
+    pub interact_min: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -250,6 +275,9 @@ pub(super) struct WindowRuleFile {
     pub position: Option<[i32; 2]>,
     pub size: Option<[i32; 2]>,
     pub fullscreen: Option<bool>,
+    /// `false` — don't focus or navigate the camera to this window when it
+    /// first maps. Omit to keep the default focus-on-map behavior.
+    pub focus_on_open: Option<bool>,
     #[serde(default)]
     pub widget: bool,
     /// Pin the window to one output's screen space: it ignores pan/zoom and
@@ -257,6 +285,14 @@ pub(super) struct WindowRuleFile {
     /// (center, Y-up), not a canvas coordinate.
     #[serde(default)]
     pub pinned_to_screen: bool,
+    /// Override the global `suspend_on_close` for matched windows. Escape hatch
+    /// for terminals / scratchpads that should always really close (or always
+    /// suspend). `None` inherits the global setting.
+    pub suspend_on_close: Option<bool>,
+    /// Keep the window's aspect ratio during interactive resizes; the ratio is
+    /// taken at the start of each resize.
+    #[serde(default)]
+    pub preserve_aspect_ratio: bool,
     pub decoration: Option<String>,
     pub blur: Option<bool>,
     pub opacity: Option<f64>,

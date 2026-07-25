@@ -15,7 +15,7 @@ config with `driftwm --check-config`.
 
 Default: `"super"`
 
-Window manager modifier key: "super" (default) or "alt"
+Window manager modifier key: "super" (default), "alt", or "mod3". Nothing occupies mod3 by default — remap a key onto it in your keymap first.
 
 ### `focus_follows_mouse`
 
@@ -50,6 +50,34 @@ systemctl --user mask xdg-desktop-autostart.target
 ```toml
 autostart = ["waybar", "swaync"]
 ```
+
+## `[session]`
+
+Persist your canvas across restarts. Suspended windows are always saved to ~/.local/state/driftwm/session.json; these flags control the rest.
+
+### `suspend_on_close`
+
+Default: `false`
+
+Suspend instead of close when a window is closed by the client (titlebar X, in-app quit). close-window bindings, `msg close`, and taskbar closes still close for real. Per-window overridable via a `suspend_on_close` window rule. See docs/session.md.
+
+### `restore_windows`
+
+Default: `false`
+
+Restore still-open windows after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). See docs/session.md.
+
+### `restore_camera`
+
+Default: `false`
+
+Restore each output's camera position and zoom from the saved session on the next launch. Off by default, so a fresh start centers every output. Read at launch: a mid-session change applies on the next launch.
+
+### `restore_bookmarks`
+
+Default: `false`
+
+Restore the bookmark registry from the saved session on the next launch, overlaying saved bookmarks on the [navigation.bookmarks] config seeds. Off by default, so runtime set-bookmark / `msg bookmark` edits don't survive a restart. Read at launch: a mid-session change applies on the next launch.
 
 ## `[env]`
 
@@ -292,15 +320,26 @@ px per pan-viewport action (mod-ctrl-arrow by default)
 
 ### `anchors`
 
-Default: `[[0, 0]]`
+Default: `[]`
 
-Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow) even when no window is there. Uses Y-up coordinate system.
+Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow) even when no window is there. Uses Y-up coordinate system. Empty by default.
 
-**Example: 4 corners**
+**Example: origin + 4 corners**
 
 ```toml
 anchors = [[0, 0], [-1750, 1750], [1750, 1750], [1750, -1750], [-1750, -1750]]
 ```
+
+## `[navigation.bookmarks]`
+
+Named canvas points for the go-to-bookmark / set-bookmark / move-to-bookmark actions and `driftwm msg bookmark`. Uses Y-up coordinates (same convention as window rules). This table only SEEDS the runtime registry at startup — set-bookmark and the IPC verb update it live. An explicitly empty table (just the header, no keys) disables the default seeds. Runtime edits persist across restarts only with the [session] restore_bookmarks flag. Bookmarks store a position only, never zoom.
+
+| Name | Position |
+| --- | --- |
+| `1` | `[-1750, 1750]` |
+| `2` | `[1750, 1750]` |
+| `3` | `[1750, -1750]` |
+| `4` | `[-1750, -1750]` |
 
 ## `[navigation.edge_pan]`
 
@@ -383,6 +422,12 @@ animate zoom to 1.0 when a new window is mapped (false = keep current zoom, pan 
 Default: `true`
 
 animate zoom to 1.0 when an off-screen window requests focus (false = keep current zoom, pan only)
+
+### `interact_min`
+
+Default: `0.0`
+
+zoom (1.0 = 100%) below which a window is too small to touch: left click centers it, drag anywhere moves it, pointer input is suppressed. 0 disables. Note the reachable minimum zoom is dynamic (fit * 0.5), so with few windows a low threshold can be unreachable and thus inert.
 
 ## `[snap]`
 
@@ -619,7 +664,7 @@ disable_defaults = ["keys"]
 
 ## `[keybindings]`
 
-Keyboard bindings: "Modifier+...+Keysym" = "action [arg]" Merges with defaults. Use "none" to unbind a default binding. "mod" expands to mod_key. Literal modifiers: alt, super, ctrl, shift. Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc. A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
+Keyboard bindings: "Modifier+...+Keysym" = "action [arg]" Merges with defaults. Use "none" to unbind a default binding. "mod" expands to mod_key. Literal modifiers: alt, super (alias logo), ctrl (alias control), shift, mod3. Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc. A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
 
 Actions:
 
@@ -628,6 +673,7 @@ Actions:
 - `exec-launcher` — launch the auto-detected app launcher (see [keybindings] below; override with $LAUNCHER)
 - `spawn <cmd>` — run a command without loading cursor and exiting fullscreen (toggles, OSD, screenshots)
 - `close-window` — close the focused window
+- `suspend-window` — close the focused window but leave a suspended window in its place (Enter/click relaunches; needs a .desktop entry); on an already-suspended window, dismisses it
 - `nudge-window <dir>` — move focused window by nudge_step px
 - `pan-viewport <dir>` — pan camera by pan_step px
 - `center-window` — center viewport on focused window + reset zoom
@@ -639,7 +685,9 @@ Actions:
 - `zoom-in` — step zoom in
 - `zoom-out` — step zoom out
 - `zoom-reset` — zoom to 1.0
-- `go-to <x> <y>` — jump camera to canvas position (bookmarks, Y-up)
+- `go-to-bookmark <name>` — jump the camera to a saved bookmark (position only, zoom untouched)
+- `set-bookmark <name>` — save the current camera center as a bookmark (create or overwrite)
+- `move-to-bookmark <name>` — move the focused window's center to a bookmark point
 - `zoom-to-fit` — fit all windows in viewport
 - `zoom-to-fit-snapped` — fit only the focused window's snap cluster
 - `toggle-fullscreen` — toggle focused window fullscreen
@@ -690,10 +738,14 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 | `"mod+z"` | `zoom-reset` |  |
 | `"mod+w"` | `zoom-to-fit` |  |
 | `"mod+shift+w"` | `zoom-to-fit-snapped` |  |
-| `"mod+1"` | `go-to -1750 1750` | top-left bookmark |
-| `"mod+2"` | `go-to 1750 1750` | top-right bookmark |
-| `"mod+3"` | `go-to 1750 -1750` | bottom-right bookmark |
-| `"mod+4"` | `go-to -1750 -1750` | bottom-left bookmark |
+| `"mod+1"` | `go-to-bookmark 1` | jump to bookmark 1 (top-left corner by default) |
+| `"mod+2"` | `go-to-bookmark 2` | jump to bookmark 2 (top-right corner) |
+| `"mod+3"` | `go-to-bookmark 3` | jump to bookmark 3 (bottom-right corner) |
+| `"mod+4"` | `go-to-bookmark 4` | jump to bookmark 4 (bottom-left corner) |
+| `"mod+shift+1"` | `set-bookmark 1` | overwrite bookmark 1 at the current view |
+| `"mod+shift+2"` | `set-bookmark 2` |  |
+| `"mod+shift+3"` | `set-bookmark 3` |  |
+| `"mod+shift+4"` | `set-bookmark 4` |  |
 | `"mod+alt+up"` | `send-to-output up` | move window to output above |
 | `"mod+alt+down"` | `send-to-output down` |  |
 | `"mod+alt+left"` | `send-to-output left` |  |
@@ -729,6 +781,12 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 
 ```toml
 "mod+g" = "fill-window"
+```
+
+**Example: suspend-window (unbound by default)**
+
+```toml
+"mod+s" = "suspend-window"
 ```
 
 ## `[mouse]`
@@ -1068,8 +1126,11 @@ Supported fields:
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
 - `size` — [width, height] initial window dimensions (one-shot; user/app can resize afterwards, so pair with widget = true to lock it)
 - `fullscreen` — true: force this window to open in fullscreen mode
+- `focus_on_open` — false: map the window without focusing it or moving the camera to it. Omit to keep the default focus-on-map behavior. Pairs well with pinned_to_screen for unobtrusive overlays; the window still takes focus later through normal interaction (hover or click). (default: true)
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
+- `suspend_on_close` — override [session].suspend_on_close for matched windows (true / false). Escape hatch for terminals and scratchpads that should always really close (or always suspend). (default: inherit)
+- `preserve_aspect_ratio` — true: keep the window's aspect ratio during interactive resizes; the ratio is taken at the start of each resize. (default: false)
 - `decoration` — overrides [decorations] default_mode for matched windows. Omit to inherit default_mode. Values:
   - "client":  CSD — client's own titlebar
   - "server":  SSD — driftwm's titlebar

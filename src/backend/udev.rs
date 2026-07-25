@@ -310,6 +310,7 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
 
     // 4. Foreign toplevel refresh (once per frame, not per-output)
     crate::render::refresh_foreign_toplevels(data);
+    crate::render::refresh_ext_workspaces(data);
 
     // 4a. Drain queued mode changes before re-notifying clients so the
     // re-broadcast reflects the new mode state. Mode changes either come from
@@ -580,7 +581,7 @@ pub fn init_udev(
     let mut drm_scanner = DrmScanner::new();
     let scan_result = drm_scanner.scan_connectors(&drm)?;
     let mut device_surfaces: HashMap<crtc::Handle, SurfaceData> = HashMap::new();
-    let saved_output_state = crate::state::read_all_per_output_state();
+    let saved_output_state = data.saved_camera_state();
 
     for event in scan_result {
         match event {
@@ -796,7 +797,7 @@ pub fn init_udev(
                                     // after create_surface — the sequence is synchronous
                                     // within this handler, so active_output() never
                                     // observes a gap.
-                                    let saved = crate::state::read_all_per_output_state();
+                                    let saved = data.saved_camera_state();
                                     let dh = data.display_handle.clone();
                                     if let Some(sd) = create_surface(
                                         drm,
@@ -1708,6 +1709,8 @@ fn connector_type_name(connector: &connector::Info) -> &'static str {
         connector::Interface::HDMIA => "HDMI-A",
         connector::Interface::HDMIB => "HDMI-B",
         connector::Interface::EmbeddedDisplayPort => "eDP",
+        connector::Interface::LVDS => "LVDS",
+        connector::Interface::DSI => "DSI",
         connector::Interface::VGA => "VGA",
         _ => "Unknown",
     }
