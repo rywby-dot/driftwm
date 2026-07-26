@@ -52,13 +52,16 @@ pub enum Action {
     ExecLauncher,
     Spawn(String),
     CloseWindow,
+    SuspendWindow,
     NudgeWindow(Direction),
     PanViewport(Direction),
     CenterWindow,
     CenterNearest(Direction),
     CycleWindows { backward: bool },
     HomeToggle,
-    GoToPosition(f64, f64),
+    GoToBookmark(String),
+    SetBookmark(String),
+    MoveToBookmark(String),
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -119,6 +122,9 @@ pub struct Modifiers {
     pub alt: bool,
     pub shift: bool,
     pub logo: bool,
+    /// xkb's Mod3 slot. smithay surfaces it under the (misnamed)
+    /// `iso_level5_shift` field of `ModifiersState`.
+    pub mod3: bool,
 }
 
 impl Modifiers {
@@ -127,6 +133,7 @@ impl Modifiers {
         alt: false,
         shift: false,
         logo: false,
+        mod3: false,
     };
 
     pub fn from_state(state: &ModifiersState) -> Self {
@@ -135,6 +142,7 @@ impl Modifiers {
             alt: state.alt,
             shift: state.shift,
             logo: state.logo,
+            mod3: state.iso_level5_shift,
         }
     }
 
@@ -149,6 +157,7 @@ impl Modifiers {
             alt: self.alt || other.alt,
             shift: self.shift || other.shift,
             logo: self.logo || other.logo,
+            mod3: self.mod3 || other.mod3,
         }
     }
 
@@ -159,6 +168,7 @@ impl Modifiers {
             && (!self.alt || state.alt)
             && (!self.shift || state.shift)
             && (!self.logo || state.logo)
+            && (!self.mod3 || state.iso_level5_shift)
     }
 }
 
@@ -167,6 +177,7 @@ impl Modifiers {
 pub enum ModKey {
     Alt,
     Super,
+    Mod3,
 }
 
 /// How a new window is placed on the canvas when no window rule positions it.
@@ -196,6 +207,10 @@ impl ModKey {
                 logo: true,
                 ..Modifiers::EMPTY
             },
+            ModKey::Mod3 => Modifiers {
+                mod3: true,
+                ..Modifiers::EMPTY
+            },
         }
     }
 
@@ -204,6 +219,7 @@ impl ModKey {
         match self {
             ModKey::Alt => state.alt,
             ModKey::Super => state.logo,
+            ModKey::Mod3 => state.iso_level5_shift,
         }
     }
 }
@@ -469,6 +485,51 @@ impl Default for GestureThresholds {
     }
 }
 
+/// Every threshold the touch recognizer arbitrates on. The first three are the
+/// touch equivalents of [`GestureThresholds`], kept separate because a
+/// touchscreen is a display: swipe travel is measured in millimetres and scaled
+/// by the panel's `px_per_mm`, so a command gesture feels the same on a phone
+/// panel and a 15" tablet. A trackpad has no such physical anchor and measures
+/// its swipe in px, so the two knobs cannot share a value. The rest are the
+/// tap/hold timings, which a trackpad has no counterpart for at all — a
+/// touchscreen tap is a whole finger landing on glass, not a pad click.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchThresholds {
+    pub swipe_distance_mm: f64,
+    pub pinch_in_scale: f64,
+    pub pinch_out_scale: f64,
+    /// Max duration of a tap (center / fit trigger). A lift later than this is a
+    /// slow press, not a tap, and fires nothing.
+    pub tap_max_ms: u32,
+    /// Window for a second tap to count as a double-tap. Also how long a single
+    /// tap's action is *deferred*, since the recognizer can't know a second tap
+    /// isn't coming until the window closes.
+    pub double_tap_ms: u32,
+    /// Dwell before a drag commits that turns it into a hold gesture: hold-swipe
+    /// (no prior tap) or doubletap-hold-swipe (after a double-tap). Long enough
+    /// that a normal pan, which drags promptly, never trips it.
+    pub hold_ms: u32,
+    /// Finger travel before a pan/zoom gesture leaves the dead zone and starts to
+    /// pan, in millimetres (converted to px per panel via `px_per_mm` so the feel
+    /// is the same on any touchscreen). Below this — and below the zoom slop — a
+    /// contact stays a candidate tap.
+    pub dead_zone_mm: f64,
+}
+
+impl Default for TouchThresholds {
+    fn default() -> Self {
+        Self {
+            swipe_distance_mm: 15.0,
+            pinch_in_scale: 0.85,
+            pinch_out_scale: 1.15,
+            tap_max_ms: 250,
+            double_tap_ms: 300,
+            hold_ms: 350,
+            dead_zone_mm: 2.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyboardLayout {
     pub layout: String,
@@ -648,6 +709,9 @@ pub struct WindowRule {
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
     pub fullscreen: Option<bool>,
+    /// `Some(false)` maps the window without focusing it or moving the camera
+    /// to it. `None` keeps the default focus-on-map behavior.
+    pub focus_on_open: Option<bool>,
     /// Widget windows are pinned (immovable), excluded from navigation/alt-tab,
     /// and always stacked below normal windows.
     pub widget: bool,
@@ -655,6 +719,16 @@ pub struct WindowRule {
     /// above normal windows). When set, `position` is output-relative
     /// (center, Y-up). Combine with `widget = true` to make it immovable.
     pub pinned_to_screen: bool,
+    /// Override the global `suspend_on_close` for matched windows. `None`
+    /// inherits the global setting.
+    pub suspend_on_close: Option<bool>,
+    /// Override the global `restore_windows` for matched windows. `None`
+    /// inherits the global setting. Independent of `suspend_on_close`; an
+    /// explicitly suspended stand-in always comes back regardless of this.
+    pub restore_windows: Option<bool>,
+    /// Preserve the window's aspect ratio during interactive resizes. The
+    /// locked ratio is snapshotted from the window's size at each resize start.
+    pub preserve_aspect_ratio: bool,
     /// `None` means "inherit `[decorations] default_mode`". Explicit
     /// `decoration = "client"` resolves to `Some(Client)` and overrides default.
     pub decoration: Option<DecorationMode>,
@@ -706,8 +780,12 @@ impl WindowRule {
 #[derive(Clone, Debug, Default)]
 pub struct AppliedWindowRule {
     pub fullscreen: Option<bool>,
+    pub focus_on_open: Option<bool>,
     pub widget: bool,
     pub pinned_to_screen: bool,
+    pub suspend_on_close: Option<bool>,
+    pub restore_windows: Option<bool>,
+    pub preserve_aspect_ratio: bool,
     pub decoration: Option<DecorationMode>,
     pub blur: bool,
     pub opacity: Option<f64>,
@@ -736,6 +814,18 @@ impl AppliedWindowRule {
         }
         if rule.pinned_to_screen {
             self.pinned_to_screen = true;
+        }
+        if let Some(soc) = rule.suspend_on_close {
+            self.suspend_on_close = Some(soc);
+        }
+        if let Some(rw) = rule.restore_windows {
+            self.restore_windows = Some(rw);
+        }
+        if rule.preserve_aspect_ratio {
+            self.preserve_aspect_ratio = true;
+        }
+        if let Some(f) = rule.focus_on_open {
+            self.focus_on_open = Some(f);
         }
         if rule.blur {
             self.blur = true;
@@ -783,8 +873,12 @@ impl AppliedWindowRule {
 impl From<&WindowRule> for AppliedWindowRule {
     fn from(rule: &WindowRule) -> Self {
         Self {
+            focus_on_open: rule.focus_on_open,
             widget: rule.widget,
             pinned_to_screen: rule.pinned_to_screen,
+            suspend_on_close: rule.suspend_on_close,
+            restore_windows: rule.restore_windows,
+            preserve_aspect_ratio: rule.preserve_aspect_ratio,
             decoration: rule.decoration.clone(),
             blur: rule.blur,
             opacity: rule.opacity,
@@ -835,6 +929,9 @@ pub struct EffectsConfig {
     /// wallpapers evolve slowly; re-blurring at a fraction of the output
     /// rate looks continuous through frosted glass at a fraction of the cost.
     pub animate_blur_fps: u32,
+    /// Open/close scale amplitude: windows grow in from this scale and shrink
+    /// out to it, in (0, 1]. 1 = pure fade, no scaling.
+    pub animation_scale: f64,
 }
 
 impl Default for EffectsConfig {
@@ -843,6 +940,7 @@ impl Default for EffectsConfig {
             blur_radius: 2,
             blur_strength: 1.1,
             animate_blur_fps: 20,
+            animation_scale: 0.95,
         }
     }
 }
@@ -1168,5 +1266,38 @@ mod tests {
         assert!(ThresholdAction::CenterNearest.ends_fullscreen());
         assert!(!ThresholdAction::Fixed(Action::Spawn("foo".into())).ends_fullscreen());
         assert!(ThresholdAction::Fixed(Action::CloseWindow).ends_fullscreen());
+    }
+
+    #[test]
+    fn all_held_requires_mod3_bit_too() {
+        let mod3 = Modifiers {
+            mod3: true,
+            ..Modifiers::EMPTY
+        };
+        assert!(!mod3.all_held(&ModifiersState::default()));
+        assert!(mod3.all_held(&ModifiersState {
+            iso_level5_shift: true,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn union_combines_mod3_bit() {
+        let a = Modifiers {
+            mod3: true,
+            ..Modifiers::EMPTY
+        };
+        let b = Modifiers {
+            shift: true,
+            ..Modifiers::EMPTY
+        };
+        assert_eq!(
+            a.union(&b),
+            Modifiers {
+                mod3: true,
+                shift: true,
+                ..Modifiers::EMPTY
+            }
+        );
     }
 }

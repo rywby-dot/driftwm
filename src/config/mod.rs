@@ -13,7 +13,7 @@ pub use parse::{
 pub use toml::config_path;
 pub use types::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 
 use smithay::backend::input::AxisSource;
@@ -28,7 +28,7 @@ use defaults::{
 use parse_helpers::{
     Warnings, clamp_warn, collect_warn, non_negative, parse_backend_config,
     parse_decoration_config, parse_effects_config, parse_output_outline, parse_output_rule,
-    parse_window_rule,
+    parse_window_rule, positive_or_default,
 };
 use toml::{ConfigFile, expand_tilde};
 
@@ -40,6 +40,15 @@ const TOOLKIT_DEFAULTS: &[(&str, &str)] = &[
     ("SDL_VIDEODRIVER", "wayland,x11"),
     ("GDK_BACKEND", "wayland,x11"),
     ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
+];
+
+/// Seed bookmarks when `[navigation.bookmarks]` is absent: the four canvas
+/// corners, matching the default `go-to-bookmark 1..4` keybindings. Y-up.
+const DEFAULT_BOOKMARKS: &[(&str, [f64; 2])] = &[
+    ("1", [-1750.0, 1750.0]),
+    ("2", [1750.0, 1750.0]),
+    ("3", [1750.0, -1750.0]),
+    ("4", [-1750.0, -1750.0]),
 ];
 
 /// The finger count of a per-direction swipe trigger
@@ -121,10 +130,33 @@ fn context_table(context: BindingContext) -> &'static str {
     }
 }
 
+/// Session-persistence settings (`[session]`).
+#[derive(Debug, PartialEq)]
+pub struct SessionConfig {
+    /// When true, a client-initiated close (titlebar X, in-app quit, shell exit)
+    /// leaves a suspended window behind instead of destroying the window.
+    /// Overridable per window rule. Read at close time, so hot-reload applies.
+    pub suspend_on_close: bool,
+    /// When true, eligible windows are serialized on graceful shutdown (keybind
+    /// quit or SIGTERM/SIGHUP) and materialized as suspended windows on the next
+    /// launch. Read at use, so hot-reload applies.
+    pub restore_windows: bool,
+    /// When true, each output's camera and zoom are seeded from the durable
+    /// session on the next launch. Read at load time, so a mid-session flip
+    /// takes effect on the next launch, not immediately.
+    pub restore_camera: bool,
+    /// When true, the saved bookmark registry is overlaid on top of the config
+    /// seeds at launch, so runtime bookmark edits survive across restarts.
+    /// Read at load time.
+    pub restore_bookmarks: bool,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Config {
     pub mod_key: ModKey,
     pub focus_follows_mouse: bool,
+    /// Session persistence: close-to-suspend, window restore, and camera restore.
+    pub session: SessionConfig,
     /// Multiplier for trackpad scroll and gesture pan deltas. 1.0 = raw trackpad.
     pub trackpad_speed: f64,
     /// Multiplier for mouse drag pan (Mod+LMB or LMB on canvas). 1.0 = direct.
@@ -154,8 +186,11 @@ pub struct Config {
     /// brief grace period for crossing monitors without changing the feel of
     /// outer edges. Applies to window-drag and bare-cursor edge-pan.
     pub edge_pan_latency_ms: u64,
-    /// Base lerp factor for camera and window animations (frame-rate
-    /// independent), in (0, 1]. Lower = smoother; 1 = instant.
+    /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
+    /// Lower = smoother; 1 = instant; 0 would freeze the camera.
+    pub camera_speed: f64,
+    /// Base lerp factor for window animations (frame-rate independent), in (0, 1].
+    /// This does not affect camera pan or zoom animation.
     pub animation_speed: f64,
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
@@ -183,6 +218,11 @@ pub struct Config {
     /// Animate zoom back to 1.0 when an off-screen window requests activation
     /// (xdg-activation or foreign-toplevel click) (true) or just pan to it at current zoom (false).
     pub zoom_reset_on_activation: bool,
+    /// Zoom threshold (1.0 = 100%) below which canvas windows stop receiving
+    /// pointer input: a left click centers the window under the cursor, a drag
+    /// anywhere on it moves it. `0.0` disables the feature (strict `<`
+    /// comparison, so the sentinel needs no special case).
+    pub zoom_interact_min: f64,
     pub snap_enabled: bool,
     pub snap_gap: f64,
     pub snap_distance: f64,
@@ -194,6 +234,7 @@ pub struct Config {
     pub mouse_device: MouseDeviceSettings,
     pub touch: TouchSettings,
     pub gesture_thresholds: GestureThresholds,
+    pub touch_thresholds: TouchThresholds,
     pub layout_independent: bool,
     pub keyboard_layout: KeyboardLayout,
     /// Restore each window's last-used keyboard layout when it regains focus.
@@ -206,6 +247,10 @@ pub struct Config {
     pub decorations: DecorationConfig,
     pub output_outline: OutputOutlineSettings,
     pub nav_anchors: Vec<Point<f64, Logical>>,
+    /// The bookmark registry seed: named canvas points (Y-up, window-center
+    /// convention) that populate `DriftWm::bookmarks` at startup. This is a
+    /// seed only — the live registry is the source of truth once running.
+    pub navigation_bookmarks: BTreeMap<String, [f64; 2]>,
     pub backend: BackendConfig,
     pub effects: EffectsConfig,
     pub window_rules: Vec<WindowRule>,
@@ -430,6 +475,7 @@ impl Config {
         let mod_key = match raw.mod_key.as_deref() {
             Some("alt") => ModKey::Alt,
             Some("super") | None => ModKey::Super,
+            Some("mod3") => ModKey::Mod3,
             Some(other) => {
                 warn_and_collect!("config: unknown mod_key '{other}', using super");
                 ModKey::Super
@@ -449,14 +495,16 @@ impl Config {
         let mut disable_keys = false;
         let mut disable_mouse = false;
         let mut disable_gestures = false;
+        let mut disable_touch = false;
         for cat in raw.bindings.disable_defaults.into_iter().flatten() {
             match cat.as_str() {
                 "keys" => disable_keys = true,
                 "mouse" => disable_mouse = true,
                 "gestures" => disable_gestures = true,
+                "touch" => disable_touch = true,
                 other => warn_and_collect!(
                     "config: unknown bindings.disable_defaults category '{other}' \
-                     (expected \"keys\", \"mouse\", or \"gestures\")"
+                     (expected \"keys\", \"mouse\", \"gestures\", or \"touch\")"
                 ),
             }
         }
@@ -619,7 +667,11 @@ impl Config {
             }
         }
 
-        let mut touch_bindings = default_touch_bindings();
+        let mut touch_bindings = if disable_touch {
+            ContextBindings::empty()
+        } else {
+            default_touch_bindings()
+        };
         let mut touch_dir_candidates: Vec<(BindingContext, GestureTrigger, String)> = Vec::new();
         for (ctx, section) in [
             (BindingContext::OnWindow, raw.touch.on_window),
@@ -773,6 +825,57 @@ impl Config {
             ),
         };
 
+        // Read the defaults back off the `Default` impl so the seven literals live
+        // in exactly one place; two copies would drift with nothing guarding them.
+        let fallback = TouchThresholds::default();
+        let touch_thresholds = TouchThresholds {
+            // The 4+ finger tier rates swipe travel as a fraction of this and
+            // compares it against the pinch scales, so a zero budget isn't a hair
+            // trigger — it makes swipe progress infinite and the pinch unreachable.
+            swipe_distance_mm: positive_or_default(
+                raw.touch.swipe_threshold,
+                "touch.swipe_threshold",
+                fallback.swipe_distance_mm,
+                &mut errors,
+            ),
+            pinch_in_scale: non_negative(
+                raw.touch
+                    .pinch_in_threshold
+                    .unwrap_or(fallback.pinch_in_scale),
+                "touch.pinch_in_threshold",
+                &mut errors,
+            ),
+            pinch_out_scale: non_negative(
+                raw.touch
+                    .pinch_out_threshold
+                    .unwrap_or(fallback.pinch_out_scale),
+                "touch.pinch_out_threshold",
+                &mut errors,
+            ),
+            tap_max_ms: non_negative(
+                raw.touch.tap_time.unwrap_or(fallback.tap_max_ms as i32),
+                "touch.tap_time",
+                &mut errors,
+            ) as u32,
+            double_tap_ms: non_negative(
+                raw.touch
+                    .double_tap_time
+                    .unwrap_or(fallback.double_tap_ms as i32),
+                "touch.double_tap_time",
+                &mut errors,
+            ) as u32,
+            hold_ms: non_negative(
+                raw.touch.hold_time.unwrap_or(fallback.hold_ms as i32),
+                "touch.hold_time",
+                &mut errors,
+            ) as u32,
+            dead_zone_mm: non_negative(
+                raw.touch.tap_travel.unwrap_or(fallback.dead_zone_mm),
+                "touch.tap_travel",
+                &mut errors,
+            ),
+        };
+
         let keyboard_layout = {
             let k = &raw.input.keyboard;
             KeyboardLayout {
@@ -853,12 +956,28 @@ impl Config {
             "navigation.drift",
             &mut errors,
         );
-        // Valid range is (0, 1]: at 0 the lerp factor stays 0 and animations
-        // never reach their targets. Above 1 just clamps to instant.
+        // Valid range is (0, 1]: at 0 the lerp factor stays 0 and the camera
+        // never reaches its target, so reject it (and negatives/NaN) back to the
+        // default rather than freezing. Above 1 just clamps to instant.
+        let camera_speed = match raw.navigation.camera_speed {
+            Some(v) if v <= 0.0 || v.is_nan() => {
+                warn_and_collect!(
+                    "config: navigation.camera_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
+                );
+                0.3
+            }
+            other => clamp_warn(
+                other.unwrap_or(0.3),
+                0.0,
+                1.0,
+                "navigation.camera_speed",
+                &mut errors,
+            ),
+        };
         let animation_speed = match raw.navigation.animation_speed {
             Some(v) if v <= 0.0 || v.is_nan() => {
                 warn_and_collect!(
-                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes animations), using 0.3"
+                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes window animations), using 0.3"
                 );
                 0.3
             }
@@ -902,9 +1021,39 @@ impl Config {
             child_env.insert(k.clone(), v.clone());
         }
 
+        // Y-up values kept as-is (unlike anchors); conversion happens at use
+        // sites. Absent section → corner defaults; explicit-empty → no seeds. A
+        // non-finite coordinate (TOML accepts nan/inf) would serialize to JSON
+        // null and quarantine the whole session file, so drop it here.
+        let navigation_bookmarks: BTreeMap<String, [f64; 2]> = match raw.navigation.bookmarks {
+            Some(map) => map
+                .into_iter()
+                .filter(|(name, [x, y])| {
+                    let ok = x.is_finite() && y.is_finite();
+                    if !ok {
+                        warn_and_collect!(
+                            "config: [navigation.bookmarks] \"{name}\" has a non-finite \
+                             coordinate, ignoring"
+                        );
+                    }
+                    ok
+                })
+                .collect(),
+            None => DEFAULT_BOOKMARKS
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+        };
+
         let config = Self {
             mod_key,
             focus_follows_mouse: raw.focus_follows_mouse.unwrap_or(false),
+            session: SessionConfig {
+                suspend_on_close: raw.session.suspend_on_close.unwrap_or(false),
+                restore_windows: raw.session.restore_windows.unwrap_or(false),
+                restore_camera: raw.session.restore_camera.unwrap_or(false),
+                restore_bookmarks: raw.session.restore_bookmarks.unwrap_or(false),
+            },
             trackpad_speed,
             mouse_speed,
             touch_speed,
@@ -951,6 +1100,7 @@ impl Config {
                 &mut errors,
             ),
             edge_pan_latency_ms: raw.navigation.edge_pan.latency_ms.unwrap_or(120),
+            camera_speed,
             animation_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
             auto_navigate_on_click: raw.navigation.auto_navigate_on_click.unwrap_or(false),
@@ -978,6 +1128,16 @@ impl Config {
             ),
             zoom_reset_on_new_window: raw.zoom.reset_on_new_window.unwrap_or(true),
             zoom_reset_on_activation: raw.zoom.reset_on_activation.unwrap_or(true),
+            // clamp_warn (not non_negative): folds NaN into the below-min branch
+            // → 0.0 → off, and rejects values above MAX_ZOOM rather than
+            // silently accepting a threshold no zoom can ever fall below.
+            zoom_interact_min: clamp_warn(
+                raw.zoom.interact_min.unwrap_or(0.0),
+                0.0,
+                crate::canvas::MAX_ZOOM,
+                "zoom.interact_min",
+                &mut errors,
+            ),
             snap_enabled: raw.snap.enabled.unwrap_or(true),
             snap_gap: non_negative(raw.snap.gap.unwrap_or(12.0), "snap.gap", &mut errors),
             snap_distance: non_negative(
@@ -1000,6 +1160,7 @@ impl Config {
             mouse_device,
             touch,
             gesture_thresholds,
+            touch_thresholds,
             layout_independent: raw.input.keyboard.layout_independent.unwrap_or(true),
             keyboard_layout,
             remember_layout_per_window: raw
@@ -1023,10 +1184,11 @@ impl Config {
             nav_anchors: raw
                 .navigation
                 .anchors
-                .unwrap_or_else(|| vec![[0.0, 0.0]])
+                .unwrap_or_default()
                 .into_iter()
                 .map(|[x, y]| Point::from((x, -y)))
                 .collect(),
+            navigation_bookmarks,
             autostart: raw.autostart.unwrap_or_default(),
             env: raw.env,
             child_env,
@@ -1149,6 +1311,9 @@ fn tap_combo_label(m: &Modifiers) -> String {
     }
     if m.logo {
         parts.push("super");
+    }
+    if m.mod3 {
+        parts.push("mod3");
     }
     parts.join("+")
 }
@@ -1361,14 +1526,211 @@ mod tests {
     }
 
     #[test]
-    fn animation_speed_zero_falls_back_to_default() {
+    fn camera_speed_zero_falls_back_to_default() {
         let toml_str = r#"
             [navigation]
-            animation_speed = 0.0
+            camera_speed = 0.0
         "#;
         let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert_eq!(config.animation_speed, 0.3);
-        assert!(warnings.iter().any(|w| w.contains("animation_speed")));
+        assert_eq!(config.camera_speed, 0.3);
+        assert!(warnings.iter().any(|w| w.contains("camera_speed")));
+    }
+
+    #[test]
+    fn animation_speed_is_independent_from_camera_speed() {
+        let (config, warnings) = Config::from_toml_collect(
+            r#"
+            [navigation]
+            camera_speed = 0.8
+            animation_speed = 0.2
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.camera_speed, 0.8);
+        assert_eq!(config.animation_speed, 0.2);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn animation_speed_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [navigation]
+            animation_speed = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.animation_speed, 0.3);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("navigation.animation_speed"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [navigation]
+            animation_speed = 5.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.animation_speed, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("navigation.animation_speed"))
+        );
+    }
+
+    #[test]
+    fn effects_animation_scale_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.effects.animation_scale, 0.95);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 2.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.effects.animation_scale, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
+    }
+
+    #[test]
+    fn bookmarks_table_parses_y_up_and_spaces_in_names() {
+        let toml_str = r#"
+            [navigation.bookmarks]
+            "home" = [0, 0]
+            "my desk" = [100, -200]
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        // Y-up values are kept verbatim (not negated like anchors).
+        assert_eq!(config.navigation_bookmarks["home"], [0.0, 0.0]);
+        assert_eq!(config.navigation_bookmarks["my desk"], [100.0, -200.0]);
+    }
+
+    #[test]
+    fn bookmarks_absent_section_seeds_four_corners() {
+        let config = Config::from_toml("").unwrap();
+        assert_eq!(config.navigation_bookmarks.len(), 4);
+        assert_eq!(config.navigation_bookmarks["1"], [-1750.0, 1750.0]);
+        assert_eq!(config.navigation_bookmarks["2"], [1750.0, 1750.0]);
+        assert_eq!(config.navigation_bookmarks["3"], [1750.0, -1750.0]);
+        assert_eq!(config.navigation_bookmarks["4"], [-1750.0, -1750.0]);
+    }
+
+    #[test]
+    fn bookmarks_empty_section_disables_seeds() {
+        // A present-but-empty table is the explicit-empty escape hatch.
+        let config = Config::from_toml("[navigation.bookmarks]\n").unwrap();
+        assert!(config.navigation_bookmarks.is_empty());
+    }
+
+    #[test]
+    fn anchors_default_is_empty() {
+        let config = Config::from_toml("").unwrap();
+        assert!(config.nav_anchors.is_empty());
+    }
+
+    /// Each binding table wraps errors differently, so check the migration
+    /// message survives all of them, not just one.
+    #[test]
+    fn removed_go_to_errors_in_every_binding_table() {
+        let removal = parse_action("go-to 100 200").unwrap_err();
+        for toml_str in [
+            "[keybindings]\n\"mod+5\" = \"go-to 100 200\"\n",
+            "[gestures.anywhere]\n\"4-finger-swipe-up\" = \"go-to 0 0\"\n",
+            "[mouse.on-canvas]\n\"middle\" = \"go-to 50 50\"\n",
+            "[[outputs]]\nname = \"eDP-1\"\n[outputs.hot_corners]\ntop_left = \"go-to 0 0\"\n",
+        ] {
+            let (_config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+            assert!(
+                warnings.iter().any(|w| w.contains(&removal)),
+                "got: {warnings:?} for {toml_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_go_to_binding_is_dropped_and_bookmarks_still_bind() {
+        let (config, _) = Config::from_toml_collect(
+            "[keybindings]\n\"mod+5\" = \"go-to 100 200\"\n\"mod+9\" = \"go-to-bookmark home\"\n",
+        )
+        .unwrap();
+        let combo = |s| {
+            let mut c = parse::parse_key_combo(s, ModKey::Super).unwrap();
+            c.normalize();
+            c
+        };
+        assert!(!config.bindings.contains_key(&combo("mod+5")));
+        assert_eq!(
+            config.bindings.get(&combo("mod+9")),
+            Some(&Action::GoToBookmark("home".into()))
+        );
+    }
+
+    #[test]
+    fn a_bad_hot_corner_action_drops_only_that_corner() {
+        let toml_str = r#"
+            [[outputs]]
+            name = "eDP-1"
+            scale = 2.0
+            [outputs.hot_corners]
+            top_left = "go-to 0 0"
+            top_right = "center-window"
+        "#;
+        let (config, _) = Config::from_toml_collect(toml_str).unwrap();
+        let output = &config.output_configs[0];
+        // The monitor keeps its scale/mode/position and its working corners.
+        assert_eq!(output.scale, Some(2.0));
+        assert_eq!(
+            output.hot_corners.bindings.get(&HotCorner::TopRight),
+            Some(&Action::CenterWindow)
+        );
+        assert!(
+            !output
+                .hot_corners
+                .bindings
+                .contains_key(&HotCorner::TopLeft)
+        );
+    }
+
+    #[test]
+    fn non_finite_bookmark_seed_is_dropped_with_warning() {
+        let toml_str = r#"
+            [navigation.bookmarks]
+            "good" = [1.0, 2.0]
+            "bad" = [nan, 0.0]
+        "#;
+        let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
+        assert!(config.navigation_bookmarks.contains_key("good"));
+        assert!(
+            !config.navigation_bookmarks.contains_key("bad"),
+            "a non-finite seed must be dropped, not stored"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("non-finite") && w.contains("bad")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1563,6 +1925,147 @@ mod tests {
         "#;
         let config = Config::from_toml(toml_str).unwrap();
         assert!(config.tap_bindings.is_empty());
+    }
+
+    #[test]
+    fn bare_mod3_shift_keybinding_parses_as_tap() {
+        let toml_str = r#"
+            [keybindings]
+            "mod3+shift" = "switch-layout next"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        let mods = Modifiers {
+            mod3: true,
+            shift: true,
+            ..Modifiers::EMPTY
+        };
+        assert!(matches!(
+            config.tap_lookup(&mods),
+            Some(Action::SwitchLayout(LayoutSwitch::Next))
+        ));
+    }
+
+    #[test]
+    fn mod_key_mod3_resolves_mod_bindings_without_setting_logo_or_alt() {
+        let toml_str = r#"
+            mod_key = "mod3"
+            [keybindings]
+            "mod+q" = "close-window"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        let sym = parse::parse_key_combo("q", ModKey::Super).unwrap().sym;
+
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    iso_level5_shift: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            Some(&Action::CloseWindow)
+        );
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    logo: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            None,
+            "mod_key = mod3 must not also satisfy super/logo bindings"
+        );
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    alt: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            None,
+            "mod_key = mod3 must not also satisfy alt bindings"
+        );
+    }
+
+    #[test]
+    fn send_to_output_defaults_present_for_mod3_and_super_but_not_alt() {
+        for (mod_key_str, mod_key) in [("mod3", ModKey::Mod3), ("super", ModKey::Super)] {
+            let toml_str = format!("mod_key = \"{mod_key_str}\"");
+            let config = Config::from_toml(&toml_str).unwrap();
+            let mut combo = parse::parse_key_combo("mod+alt+up", mod_key).unwrap();
+            combo.normalize();
+            assert!(
+                config.bindings.contains_key(&combo),
+                "mod_key = {mod_key_str} should keep the send-to-output defaults"
+            );
+        }
+
+        let config = Config::from_toml("mod_key = \"alt\"").unwrap();
+        assert!(
+            !config
+                .bindings
+                .values()
+                .any(|a| matches!(a, Action::SendToOutput(_))),
+            "mod_key = alt should drop the send-to-output defaults, \
+             which would collapse into the plain alt bindings"
+        );
+    }
+
+    #[test]
+    fn mod3_keybinding_does_not_fire_when_mod3_is_not_held() {
+        let toml_str = r#"
+            [keybindings]
+            "mod3+q" = "close-window"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        let sym = parse::parse_key_combo("q", ModKey::Super).unwrap().sym;
+
+        assert_eq!(config.lookup(&ModifiersState::default(), sym), None);
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    iso_level5_shift: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            Some(&Action::CloseWindow)
+        );
+    }
+
+    #[test]
+    fn plain_keybinding_does_not_fire_when_mod3_is_also_held() {
+        let toml_str = r#"
+            [keybindings]
+            "shift+q" = "close-window"
+        "#;
+        let config = Config::from_toml(toml_str).unwrap();
+        let sym = parse::parse_key_combo("q", ModKey::Super).unwrap().sym;
+
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    shift: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            Some(&Action::CloseWindow)
+        );
+        assert_eq!(
+            config.lookup(
+                &ModifiersState {
+                    shift: true,
+                    iso_level5_shift: true,
+                    ..Default::default()
+                },
+                sym
+            ),
+            None,
+            "an extra held modifier (mod3) must break the exact-match lookup"
+        );
     }
 
     #[test]

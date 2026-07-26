@@ -54,6 +54,49 @@ fn soft_warnings_surface_without_rejecting() {
 }
 
 #[test]
+fn reload_invalidates_suspended_label_cache() {
+    use smithay::utils::{Point, Size};
+    let mut f = Fixture::with_config(config("[decorations]\ndefault_mode = \"server\"\n"));
+    f.add_output(1, (1920, 1080));
+    let sid = f.state().insert_suspended_for_test(
+        1,
+        Point::from((100, 100)),
+        Size::from((300, 200)),
+        "s",
+        "S",
+    );
+    // Simulate a prior render having cached a label and body raster for this
+    // size/scale — both bake decorations config (colors/radius) into pixels.
+    {
+        let s = f.state().find_suspended(sid).unwrap();
+        let mut chrome = s.chrome.borrow_mut();
+        chrome.label_key = Some((300, 200, 1, false, true));
+        chrome.body_key = Some((300, 200, 1));
+    }
+
+    // A decorations-affecting reload resets both cached keys so the centered
+    // label and the rounded body fill re-raster, like every other decoration.
+    f.state()
+        .reload_config_from_contents("[decorations]\ndefault_mode = \"server\"\nfont_size = 16\n");
+    {
+        let s = f.state().find_suspended(sid).unwrap();
+        let chrome = s.chrome.borrow();
+        assert!(
+            chrome.label_key.is_none(),
+            "reload reset the suspended label cache"
+        );
+        assert!(
+            chrome.body_key.is_none(),
+            "reload reset the suspended body cache"
+        );
+    }
+
+    // The headless fixture has no backend to drain a queued mode intent.
+    f.state().pending_mode_changes.clear();
+    f.state().dismiss_suspended(sid);
+}
+
+#[test]
 fn reload_to_preferred_mode_queues_intent() {
     let mut f = Fixture::with_config(config(""));
     f.add_output(1, (1920, 1080));
@@ -121,6 +164,80 @@ mode = "1920x1080"
     );
 
     assert!(f.state().pending_mode_changes.is_empty());
+}
+
+/// Carried on an exact-name entry rather than a wildcard because a wildcard
+/// can't hold a fixed position (it falls back to "auto"), and a fixed position
+/// is what makes the position leg observable.
+const OUTPUT_RULE_ALL_FIELDS: &str = r#"
+[[outputs]]
+name = "HEADLESS-1"
+transform = "180"
+scale = 2.0
+mode = "1280x720"
+position = [500, 300]
+"#;
+
+#[test]
+fn reload_applies_mode_scale_and_transform_when_the_config_owns_them() {
+    use smithay::utils::{Point, Transform};
+    let mut f = Fixture::with_config(config(""));
+    let output = f.add_output(1, (1920, 1080));
+
+    f.state()
+        .reload_config_from_contents(OUTPUT_RULE_ALL_FIELDS);
+
+    assert_eq!(output.current_transform(), Transform::_180);
+    assert_eq!(output.current_scale().fractional_scale(), 2.0);
+    assert_eq!(
+        f.state().pending_mode_changes.get("HEADLESS-1"),
+        Some(&ModeIntent::Custom {
+            w: 1280,
+            h: 720,
+            refresh_mhz: 60_000,
+        })
+    );
+    assert_eq!(
+        crate::state::output_state(&output).layout_position,
+        Point::from((500, 300))
+    );
+
+    // Only the udev render loop drains this queue; the headless fixture has no
+    // backend, so drain it by hand to leave teardown at the leak baseline.
+    f.state().pending_mode_changes.clear();
+}
+
+#[test]
+fn reload_leaves_mode_scale_and_transform_alone_when_the_backend_owns_them() {
+    use smithay::utils::{Point, Transform};
+    let mut f = Fixture::with_config(config(""));
+    let output = f.add_output(1, (1920, 1080));
+    // What the nested output carries from init: mode and scale from the host
+    // window, transform from the renderer's Y-flip compensation.
+    crate::state::output_state(&output).backend_owned_mode = true;
+
+    f.state()
+        .reload_config_from_contents(OUTPUT_RULE_ALL_FIELDS);
+
+    assert_eq!(
+        output.current_transform(),
+        Transform::Normal,
+        "a config transform must not override the backend's"
+    );
+    assert_eq!(
+        output.current_scale().fractional_scale(),
+        1.0,
+        "a config scale must not override the host window's"
+    );
+    assert!(
+        f.state().pending_mode_changes.is_empty(),
+        "a mode intent nothing drains must not be queued"
+    );
+    assert_eq!(
+        crate::state::output_state(&output).layout_position,
+        Point::from((500, 300)),
+        "position still applies on a backend-owned output"
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use smithay::output::Output;
@@ -18,11 +19,65 @@ use super::headless;
 use super::server::Server;
 use crate::state::DriftWm;
 
+/// The in-process Wayland harness uses nested epoll loops and process-wide
+/// backend state. Running several fixtures concurrently can lose readiness and
+/// strand every roundtrip. Pure/unit tests remain parallel; protocol fixtures
+/// are isolated for their lifetime.
+static FIXTURE_LOCK: (Mutex<FixtureLockState>, Condvar) = (
+    Mutex::new(FixtureLockState {
+        owner: None,
+        depth: 0,
+    }),
+    Condvar::new(),
+);
+
+struct FixtureLockState {
+    owner: Option<std::thread::ThreadId>,
+    depth: usize,
+}
+
+struct FixtureGuard;
+
+impl FixtureGuard {
+    fn acquire() -> Self {
+        let current = std::thread::current().id();
+        let (lock, ready) = &FIXTURE_LOCK;
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.owner.as_ref().is_some_and(|owner| *owner != current) {
+            state = ready
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.owner = Some(current);
+        state.depth += 1;
+        Self
+    }
+}
+
+impl Drop for FixtureGuard {
+    fn drop(&mut self) {
+        let current = std::thread::current().id();
+        let (lock, ready) = &FIXTURE_LOCK;
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert_eq!(state.owner, Some(current));
+        state.depth -= 1;
+        if state.depth == 0 {
+            state.owner = None;
+            ready.notify_one();
+        }
+    }
+}
+
 /// Drives the whole graph: an outer calloop loop that nests the server's loop
 /// and every client's loop by their epoll fds. Reading a nested loop's fd means
 /// "it has work", so its callback pumps it once — a single [`Fixture::dispatch`]
 /// therefore fans out to whichever side has pending events.
 pub struct Fixture {
+    _fixture_lock: FixtureGuard,
     pub event_loop: EventLoop<'static, FixtureState>,
     pub handle: LoopHandle<'static, FixtureState>,
     pub state: FixtureState,
@@ -52,6 +107,7 @@ impl Fixture {
     }
 
     pub fn with_config(config: Config) -> Self {
+        let fixture_lock = FixtureGuard::acquire();
         let event_loop = EventLoop::try_new().unwrap();
         let handle = event_loop.handle();
 
@@ -75,6 +131,7 @@ impl Fixture {
         let baseline = state.server.state.debug_counters();
 
         Self {
+            _fixture_lock: fixture_lock,
             event_loop,
             handle,
             state,
@@ -204,12 +261,12 @@ impl Fixture {
         let client = self.state.client(id);
         let data = client.send_sync();
         while !data.done.load(Ordering::Relaxed) {
-            self.dispatch();
-            // Also pump both endpoints directly: progress must never depend on
-            // readiness propagating through the nested epoll chain, which can
-            // (rarely) miss an edge.
+            // Pump both endpoints directly: progress must never depend on
+            // readiness propagating through the nested epoll chain.
             self.state.server.dispatch();
-            self.state.client(id).dispatch();
+            for client in &mut self.state.clients {
+                client.dispatch_wait();
+            }
         }
     }
 

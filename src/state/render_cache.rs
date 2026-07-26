@@ -5,6 +5,8 @@ use smithay::backend::renderer::gles::{GlesPixelProgram, GlesTexProgram, GlesTex
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::utils::{Physical, Size};
 
+use crate::decorations::DecorationKey;
+
 use super::CaptureOutputState;
 
 pub type ShadowCacheEntry = (PixelShaderElement, Option<crate::render::ShadowPhysKey>);
@@ -53,13 +55,8 @@ pub struct RenderCache {
     /// A one-shot tick timer is armed for the next animation frame. Without
     /// it the capped animation only advances alongside other redraws.
     pub background_tick_armed: bool,
-    pub shadow_cache: HashMap<ObjectId, ShadowCacheEntry>,
-    pub border_cache: HashMap<ObjectId, BorderCacheEntry>,
-    /// Last composed image of each visible window, refreshed only after that
-    /// window commits. This makes close animation independent of Wayland
-    /// resource destruction order without copying every window every frame.
-    pub close_snapshot_cache: HashMap<(String, ObjectId), crate::render::ClosingSnapshot>,
-    pub close_snapshot_dirty: std::collections::HashSet<(String, ObjectId)>,
+    pub shadow_cache: HashMap<DecorationKey, ShadowCacheEntry>,
+    pub border_cache: HashMap<DecorationKey, BorderCacheEntry>,
     /// One element per output for the configured background (shader / tile /
     /// wallpaper / textured shader — the mode lives inside `BackgroundElement`).
     /// Reload and output-disconnect clear it.
@@ -100,8 +97,6 @@ impl RenderCache {
             background_tick_armed: false,
             shadow_cache: HashMap::new(),
             border_cache: HashMap::new(),
-            close_snapshot_cache: HashMap::new(),
-            close_snapshot_dirty: std::collections::HashSet::new(),
             cached_bg: HashMap::new(),
             capture_state: HashMap::new(),
             tile_shader: None,
@@ -144,10 +139,6 @@ impl RenderCache {
         self.cached_bg.remove(output_name);
         self.shared_blur.remove(output_name);
         self.blur_cache.retain(|(out, _), _| out != output_name);
-        self.close_snapshot_cache
-            .retain(|(out, _), _| out != output_name);
-        self.close_snapshot_dirty
-            .retain(|(out, _)| out != output_name);
         self.blur_camera_generation.remove(output_name);
         self.blur_camera_moved_at.remove(output_name);
         self.background_last_animate.remove(output_name);

@@ -17,22 +17,36 @@ mod real;
 mod server;
 
 mod auto_navigate_click;
+mod auto_placement;
+mod bookmarks;
 mod camera_animation;
 mod cli_docs;
 mod client_teardown;
 mod config_reload;
 mod configure_sequences;
 mod cycle_windows;
+mod ext_workspace;
 mod focus_timing;
+mod fullscreen_handoff;
 mod hot_corners;
 mod hotplug;
+mod hover_focus;
+mod interact_min;
 mod opacity;
 mod popups;
 mod real_clients;
+mod relaunch;
+mod resize_parity;
 mod send_to_output;
+mod session_restore;
 mod soak;
+mod stand_in_parity;
+mod suspend_flows;
+mod suspended;
+mod window_animation;
 mod window_opening;
 mod window_rules;
+mod zoom_to_fit;
 
 use fixture::Fixture;
 
@@ -68,6 +82,29 @@ fn map_window(
     surface
 }
 
+/// Adopt the size the compositor most recently configured: set it client-side,
+/// attach a buffer, ack, and settle — the buffer-commit ritual a real client
+/// runs to acknowledge a configure.
+fn adopt_last_configure(
+    f: &mut Fixture,
+    id: client::ClientId,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+) {
+    let (w, h) = f
+        .client(id)
+        .window(surface)
+        .configures_received
+        .last()
+        .unwrap()
+        .1
+        .size;
+    let window = f.client(id).window(surface);
+    window.set_size(w as u16, h as u16);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+}
+
 /// Create an xdg popup on the toplevel backing `parent`, map it (attach a
 /// buffer and ack), and settle. Returns the client-side popup surface.
 fn map_popup(
@@ -75,9 +112,48 @@ fn map_popup(
     id: client::ClientId,
     parent: &wayland_client::protocol::wl_surface::WlSurface,
 ) -> wayland_client::protocol::wl_surface::WlSurface {
-    let popup = f.client(id).create_popup(parent);
-    let surface = popup.surface.clone();
-    popup.commit();
+    map_popup_with(f, id, parent, client::PopupProps::default())
+}
+
+/// [`map_popup`] with a custom positioner (see [`client::PopupProps`]).
+fn map_popup_with(
+    f: &mut Fixture,
+    id: client::ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+    props: client::PopupProps,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = f
+        .client(id)
+        .create_popup_with(parent, props)
+        .surface
+        .clone();
+    settle_popup(f, id, surface)
+}
+
+/// [`map_popup_with`] for a popup parented to a layer surface rather than a
+/// toplevel (`zwlr_layer_surface_v1.get_popup`).
+fn map_layer_popup_with(
+    f: &mut Fixture,
+    id: client::ClientId,
+    parent: &wayland_client::protocol::wl_surface::WlSurface,
+    props: client::PopupProps,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = f
+        .client(id)
+        .create_layer_popup_with(parent, props)
+        .surface
+        .clone();
+    settle_popup(f, id, surface)
+}
+
+/// Drive a freshly created popup through its map ritual: initial commit,
+/// buffer, ack, settle.
+fn settle_popup(
+    f: &mut Fixture,
+    id: client::ClientId,
+    surface: wayland_client::protocol::wl_surface::WlSurface,
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    f.client(id).popup(&surface).commit();
     f.roundtrip(id);
 
     let popup = f.client(id).popup(&surface);
@@ -117,10 +193,21 @@ fn window_by_app_id(f: &mut Fixture, app_id: &str) -> Option<Window> {
         .stage
         .windows()
         .find(|w| w.app_id_or_class().as_deref() == Some(app_id))
+        .and_then(|w| w.client())
         .cloned()
 }
 
 /// The server-side `WlSurface` backing a stage window.
 fn server_surface(window: &Window) -> WlSurface {
     window.wl_surface().unwrap().into_owned()
+}
+
+/// Whether `window`'s toplevel currently carries the xdg `Activated` state
+/// (the "focused window" chrome hint the compositor sets exclusively).
+fn is_activated(window: &Window) -> bool {
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+    window
+        .toplevel()
+        .expect("toplevel")
+        .with_pending_state(|s| s.states.contains(xdg_toplevel::State::Activated))
 }

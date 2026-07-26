@@ -167,6 +167,37 @@ impl DriftWm {
             new_config.child_env.insert("DISPLAY".into(), display);
         }
 
+        // Reconcile the live bookmark registry with the config seed diff. Config
+        // is a seed, so a name added or changed in config re-asserts into the
+        // registry, a name removed from config drops from it, and names config
+        // didn't touch keep any runtime set-bookmark value. Comparing the two
+        // defaults-applied tables handles a whole section being added/removed.
+        let bookmark_ops: Vec<(String, Option<[f64; 2]>)> = {
+            let old = &self.config.navigation_bookmarks;
+            let new = &new_config.navigation_bookmarks;
+            let mut ops = Vec::new();
+            for (name, value) in new {
+                if old.get(name) != Some(value) {
+                    ops.push((name.clone(), Some(*value)));
+                }
+            }
+            for name in old.keys() {
+                if !new.contains_key(name) {
+                    ops.push((name.clone(), None));
+                }
+            }
+            ops
+        };
+        if !bookmark_ops.is_empty() {
+            for (name, value) in bookmark_ops {
+                match value {
+                    Some(v) => self.bookmarks.insert(name, v),
+                    None => self.bookmarks.remove(&name),
+                };
+            }
+            self.session_store_mark_dirty();
+        }
+
         self.config = new_config;
 
         // Invalidate every SSD title bar's cached width so `update()`
@@ -175,8 +206,28 @@ impl DriftWm {
             deco.width = -1;
         }
 
+        // A suspended stand-in's centered label and rounded body fill live on
+        // its `Rc`, outside the decoration map, and cache on size/scale — reset
+        // both keys so a font/size/weight/color edit (label) or a
+        // bg_color/corner_radius edit (body) re-rasters them like every other
+        // decoration.
+        for element in self.stage.windows() {
+            if let Some(s) = element.suspended() {
+                let mut chrome = s.chrome.borrow_mut();
+                chrome.label_key = None;
+                chrome.body_key = None;
+            }
+        }
+
         self.apply_output_rules_after_reload();
         self.recompute_decoration_scale();
+
+        // A `zoom.interact_min` edit can flip pick mode without any pointer
+        // motion, so the stale pointer focus wouldn't self-heal until the next
+        // move. Resync once here (polish, not correctness: the pick decision
+        // uses element_under, not pointer focus, so a click right after the edit
+        // already behaves correctly). Runs after the config swap above.
+        self.refresh_pointer_focus();
 
         if let Some(msg) = super::errors::summarize_config_errors(&config_errors) {
             self.set_error(ErrorSource::Config, msg);
@@ -189,8 +240,8 @@ impl DriftWm {
 
     /// Re-apply per-output rules (mode/scale/transform/position). Mode
     /// changes go through `pending_mode_changes`; everything else applies
-    /// in-place via `Output::change_current_state`. Same lookup as
-    /// `output_connected` so reload and startup compute identically.
+    /// in-place via `Output::change_current_state`. Same position lookup as
+    /// `output_connected` so reload and startup place outputs identically.
     fn apply_output_rules_after_reload(&mut self) {
         use driftwm::config::{OutputMode as ConfigOutputMode, OutputPosition};
         use smithay::utils::Transform;
@@ -204,8 +255,26 @@ impl DriftWm {
             let name = output.name();
             let cfg = self.config.output_config(&name);
 
+            // On a backend-owned output the mode, scale and transform come from
+            // the backend, not the config: recomputing them would revert the
+            // nested output's Y-flip transform and the host window's size and
+            // HiDPI scale. Position still applies, as it does at startup.
+            let backend_owned = crate::state::output_state(&output).backend_owned_mode;
+            if backend_owned
+                && cfg.is_some_and(|c| {
+                    c.scale.is_some()
+                        || c.transform.is_some()
+                        || c.mode != ConfigOutputMode::default()
+                })
+            {
+                tracing::info!(
+                    "output {name}: ignoring mode/scale/transform from [[outputs]] — \
+                     the backend owns them for this output"
+                );
+            }
+
             let want_mode = cfg.map(|c| &c.mode).cloned().unwrap_or_default();
-            if let Some(current) = output.current_mode() {
+            if !backend_owned && let Some(current) = output.current_mode() {
                 let (cur_w, cur_h) = (current.size.w, current.size.h);
                 let cur_hz_milli = current.refresh;
                 let intent = match &want_mode {
@@ -229,16 +298,10 @@ impl DriftWm {
                     // can't resolve "preferred"/"max" or tell whether the
                     // current mode already satisfies the rule. Queue
                     // unconditionally; the backend skips no-op modesets.
-                    // Not on winit: nothing drains the queue there, and the
-                    // default-rule intent would sit in debug counters forever.
-                    ConfigOutputMode::Preferred | ConfigOutputMode::Max
-                        if !matches!(self.backend, Some(crate::backend::Backend::Winit(_))) =>
-                    {
-                        Some(match &want_mode {
-                            ConfigOutputMode::Max => crate::state::ModeIntent::Max,
-                            _ => crate::state::ModeIntent::Preferred,
-                        })
-                    }
+                    ConfigOutputMode::Preferred | ConfigOutputMode::Max => Some(match &want_mode {
+                        ConfigOutputMode::Max => crate::state::ModeIntent::Max,
+                        _ => crate::state::ModeIntent::Preferred,
+                    }),
                     _ => None,
                 };
                 if let Some(intent) = intent {
@@ -249,7 +312,7 @@ impl DriftWm {
             // Missing field reverts to 1.0.
             let want_scale = cfg.and_then(|c| c.scale).unwrap_or(1.0);
             let cur_scale = output.current_scale().fractional_scale();
-            let new_scale = if (cur_scale - want_scale).abs() > f64::EPSILON {
+            let new_scale = if !backend_owned && (cur_scale - want_scale).abs() > f64::EPSILON {
                 Some(smithay::output::Scale::Fractional(want_scale))
             } else {
                 None
@@ -257,7 +320,7 @@ impl DriftWm {
 
             // Missing field reverts to Normal.
             let want_transform = cfg.and_then(|c| c.transform).unwrap_or(Transform::Normal);
-            let new_transform = if output.current_transform() != want_transform {
+            let new_transform = if !backend_owned && output.current_transform() != want_transform {
                 Some(want_transform)
             } else {
                 None

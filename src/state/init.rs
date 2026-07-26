@@ -152,6 +152,10 @@ impl DriftWm {
             smithay::wayland::foreign_toplevel_list::ForeignToplevelListState::new_with_filter::<
                 Self,
             >(&dh, client_is_unrestricted);
+        let ext_workspace_state = driftwm::protocols::ext_workspace::ExtWorkspaceManagerState::new::<
+            Self,
+            _,
+        >(&dh, client_is_unrestricted);
         let screencopy_state = driftwm::protocols::screencopy::ScreencopyManagerState::new::<Self, _>(
             &dh,
             client_is_unrestricted,
@@ -262,6 +266,7 @@ impl DriftWm {
 
         let autostart = config.autostart.clone();
         let edge_pan_cursor = config.edge_pan_cursor;
+        let bookmarks = config.navigation_bookmarks.clone();
         Self {
             start_time: Instant::now(),
             display_handle: dh,
@@ -289,6 +294,10 @@ impl DriftWm {
             render: RenderCache::new(),
             window_animations: Default::default(),
             closing_snapshots: Vec::new(),
+            standin_fades: Vec::new(),
+            close_pixels: std::collections::HashMap::new(),
+            resize_captures: Default::default(),
+            resize_crossfades: HashMap::new(),
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
             render_device: None,
@@ -314,6 +323,7 @@ impl DriftWm {
             layer_shell_state,
             foreign_toplevel_state,
             foreign_toplevel_list_state,
+            ext_workspace_state,
             screencopy_state,
             output_management_state,
             output_power_state,
@@ -340,17 +350,29 @@ impl DriftWm {
             pending_fit: HashSet::new(),
             pending_fullscreen: HashMap::new(),
             auto_anchor_snapshot: HashMap::new(),
+            suppress_auto_anchor: false,
             pending_recenter: HashMap::new(),
             stable_snap_rects: HashMap::new(),
+            suspend_marks: HashMap::new(),
+            real_close_marks: HashMap::new(),
+            unmap_snapshots: HashMap::new(),
+            desktop_entry_cache: None,
+            next_suspended_id: 0,
+            pending_relaunches: BTreeMap::new(),
+            pending_adoptions: HashMap::new(),
+            session_store: super::SessionStore::default(),
+            bookmarks,
             window_focus: None,
             on_demand_layer: None,
             popup_grab: None,
+            interactive_move: Vec::new(),
             held_action: None,
             wheel_notch_accum: 0.0,
             tap: TapTracker::default(),
             pending_tap_action: None,
             suppressed_keys: HashSet::new(),
             held_buttons: HashSet::new(),
+            pick_swallowed_buttons: HashSet::new(),
             gesture_state: None,
             pending_middle_click: None,
             momentum_timer: None,
@@ -366,6 +388,7 @@ impl DriftWm {
             state_file_canvas_layers: Vec::new(),
             state_file_fullscreen: Vec::new(),
             state_file_active_output: None,
+            active_bookmark_dirty: false,
             autostart,
             active_outputs: HashSet::new(),
             redraws_needed: HashSet::new(),
@@ -387,6 +410,7 @@ impl DriftWm {
             last_titlebar_click: None,
             hot_corner_latch: None,
             pending_click_navigate: None,
+            pending_pick: None,
             click_navigate_timer: None,
             errors: init_errors,
             cursor_edge_pan: edge_pan_cursor,

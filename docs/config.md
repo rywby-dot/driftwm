@@ -15,7 +15,7 @@ config with `driftwm --check-config`.
 
 Default: `"super"`
 
-Window manager modifier key: "super" (default) or "alt"
+Window manager modifier key: "super" (default), "alt", or "mod3". Nothing occupies mod3 by default — remap a key onto it in your keymap first.
 
 ### `focus_follows_mouse`
 
@@ -31,7 +31,7 @@ Where new windows spawn when no window rule positions them:
 
 - `"center"` — viewport center; camera animates to the new window.
 - `"cursor"` — centered on the cursor (clamped to the active output's usable area); camera stays put unless zoomed out and zoom.reset_on_new_window is true.
-- `"auto"` — snap-place adjacent to the focused window's cluster: try focused's edges (clockwise from the one nearest the viewport center), then BFS to neighbors. Falls back to "center" when no focused window or no valid placement was found.
+- `"auto"` — snap-place adjacent to a cluster already in view: try the anchor's edges (clockwise from the one nearest the viewport center), then BFS to neighbors. The anchor is the focused window while it's visible enough, otherwise the nearest element in view (suspended stand-ins included). Falls back to "center" when nothing suitable is in view, when you clicked empty canvas to clear focus, or when no valid placement was found.
 
 ### `autostart`
 
@@ -50,6 +50,34 @@ systemctl --user mask xdg-desktop-autostart.target
 ```toml
 autostart = ["waybar", "swaync"]
 ```
+
+## `[session]`
+
+Persist your canvas across restarts. Suspended windows are always saved to ~/.local/state/driftwm/session.json; these flags control the rest.
+
+### `suspend_on_close`
+
+Default: `false`
+
+Suspend instead of close when a window is closed by the client (titlebar X, in-app quit). close-window bindings, `msg close`, and taskbar closes still close for real. Per-window overridable via a `suspend_on_close` window rule. See docs/session.md.
+
+### `restore_windows`
+
+Default: `false`
+
+Restore still-open windows after a restart: on quit or logout, windows that resolve to a .desktop entry are saved and come back as suspended windows on the next launch (nothing auto-launches). Per-window overridable via a `restore_windows` window rule. See docs/session.md.
+
+### `restore_camera`
+
+Default: `false`
+
+Restore each output's camera position and zoom from the saved session on the next launch. Off by default, so a fresh start centers every output. Read at launch: a mid-session change applies on the next launch.
+
+### `restore_bookmarks`
+
+Default: `false`
+
+Restore the bookmark registry from the saved session on the next launch, overlaying saved bookmarks on the [navigation.bookmarks] config seeds. Off by default, so runtime set-bookmark / `msg bookmark` edits don't survive a restart. Read at launch: a mid-session change applies on the next launch.
 
 ## `[env]`
 
@@ -260,11 +288,17 @@ Default: `0.5`
 
 momentum coast: 0 = off, 0.5 = default, 1 = floatiest
 
+### `camera_speed`
+
+Default: `0.3`
+
+camera lerp factor (higher = faster)
+
 ### `animation_speed`
 
 Default: `0.3`
 
-camera/window animation speed (higher = faster)
+window animation lerp factor (higher = faster; 1 = instant)
 
 ### `auto_navigate_on_close`
 
@@ -292,15 +326,26 @@ px per pan-viewport action (mod-ctrl-arrow by default)
 
 ### `anchors`
 
-Default: `[[0, 0]]`
+Default: `[]`
 
-Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow) even when no window is there. Uses Y-up coordinate system.
+Anchors: canvas points discoverable by center-nearest (4-finger swipe / Mod+Arrow) even when no window is there. Uses Y-up coordinate system. Empty by default.
 
-**Example: 4 corners**
+**Example: origin + 4 corners**
 
 ```toml
 anchors = [[0, 0], [-1750, 1750], [1750, 1750], [1750, -1750], [-1750, -1750]]
 ```
+
+## `[navigation.bookmarks]`
+
+Named canvas points for the go-to-bookmark / set-bookmark / move-to-bookmark actions and `driftwm msg bookmark`. Uses Y-up coordinates (same convention as window rules). This table only SEEDS the runtime registry at startup — set-bookmark and the IPC verb update it live. An explicitly empty table (just the header, no keys) disables the default seeds. Runtime edits persist across restarts only with the [session] restore_bookmarks flag. Bookmarks store a position only, never zoom.
+
+| Name | Position |
+| --- | --- |
+| `1` | `[-1750, 1750]` |
+| `2` | `[1750, 1750]` |
+| `3` | `[1750, -1750]` |
+| `4` | `[-1750, -1750]` |
 
 ## `[navigation.edge_pan]`
 
@@ -383,6 +428,12 @@ animate zoom to 1.0 when a new window is mapped (false = keep current zoom, pan 
 Default: `true`
 
 animate zoom to 1.0 when an off-screen window requests focus (false = keep current zoom, pan only)
+
+### `interact_min`
+
+Default: `0.0`
+
+zoom (1.0 = 100%) below which a window is too small to touch: left click centers it, drag anywhere moves it, pointer input is suppressed. 0 disables. Note the reachable minimum zoom is dynamic (fit * 0.5), so with few windows a low threshold can be unreachable and thus inert.
 
 ## `[snap]`
 
@@ -532,6 +583,12 @@ Default: `20`
 
 refresh rate of blur under an animated wallpaper (0-144, default 20; 0 = off, freezing the frost so it stops re-sampling the wallpaper). The background is blurred once into a shared full-output texture and each window slices its rect from it, so cost stays flat as windows are added; a window stacked over other windows falls back to an exact per-window blur at the same cadence. Animated wallpapers evolve slowly, so well below the output rate still looks continuous through frosted glass. Camera moves force a refresh.
 
+### `animation_scale`
+
+Default: `0.95`
+
+open/close grow/shrink amplitude (1 = fade only)
+
 ## `[background]`
 
 ### `type`
@@ -609,9 +666,9 @@ Frame-rate cap for animated (`u_time`) shader backgrounds. 0 = every output fram
 
 Default: `[]`
 
-Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures".
+Opt out of built-in default bindings by category, for a clean slate. Normally your [keybindings]/[mouse]/[gestures]/[touch] entries merge with the built-ins (use `= "none"` to drop a single default). Listing a category here removes ALL of that category's defaults, leaving only your own entries. Categories: "keys", "mouse", "gestures", "touch".
 
-**Example: bring your own keyboard scheme, keep mouse + gesture defaults**
+**Example: bring your own keyboard scheme, keep mouse + gesture + touch defaults**
 
 ```toml
 disable_defaults = ["keys"]
@@ -619,7 +676,7 @@ disable_defaults = ["keys"]
 
 ## `[keybindings]`
 
-Keyboard bindings: "Modifier+...+Keysym" = "action [arg]" Merges with defaults. Use "none" to unbind a default binding. "mod" expands to mod_key. Literal modifiers: alt, super, ctrl, shift. Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc. A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
+Keyboard bindings: "Modifier+...+Keysym" = "action [arg]" Merges with defaults. Use "none" to unbind a default binding. "mod" expands to mod_key. Literal modifiers: alt, super (alias logo), ctrl (alias control), shift, mod3. Keysyms are XKB names (case-insensitive): return, tab, up, a, equal, etc. A bare modifier combo (e.g. "alt+shift") is a tap binding (fires on chord release; see [input.keyboard] options).
 
 Actions:
 
@@ -628,6 +685,7 @@ Actions:
 - `exec-launcher` — launch the auto-detected app launcher (see [keybindings] below; override with $LAUNCHER)
 - `spawn <cmd>` — run a command without loading cursor and exiting fullscreen (toggles, OSD, screenshots)
 - `close-window` — close the focused window
+- `suspend-window` — close the focused window but leave a suspended window in its place (Enter/click relaunches; needs a .desktop entry); on an already-suspended window, dismisses it
 - `nudge-window <dir>` — move focused window by nudge_step px
 - `pan-viewport <dir>` — pan camera by pan_step px
 - `center-window` — center viewport on focused window + reset zoom
@@ -639,7 +697,9 @@ Actions:
 - `zoom-in` — step zoom in
 - `zoom-out` — step zoom out
 - `zoom-reset` — zoom to 1.0
-- `go-to <x> <y>` — jump camera to canvas position (bookmarks, Y-up)
+- `go-to-bookmark <name>` — jump the camera to a saved bookmark (position only, zoom untouched)
+- `set-bookmark <name>` — save the current camera center as a bookmark (create or overwrite)
+- `move-to-bookmark <name>` — move the focused window's center to a bookmark point
 - `zoom-to-fit` — fit all windows in viewport
 - `zoom-to-fit-snapped` — fit only the focused window's snap cluster
 - `toggle-fullscreen` — toggle focused window fullscreen
@@ -690,10 +750,14 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 | `"mod+z"` | `zoom-reset` |  |
 | `"mod+w"` | `zoom-to-fit` |  |
 | `"mod+shift+w"` | `zoom-to-fit-snapped` |  |
-| `"mod+1"` | `go-to -1750 1750` | top-left bookmark |
-| `"mod+2"` | `go-to 1750 1750` | top-right bookmark |
-| `"mod+3"` | `go-to 1750 -1750` | bottom-right bookmark |
-| `"mod+4"` | `go-to -1750 -1750` | bottom-left bookmark |
+| `"mod+1"` | `go-to-bookmark 1` | jump to bookmark 1 (top-left corner by default) |
+| `"mod+2"` | `go-to-bookmark 2` | jump to bookmark 2 (top-right corner) |
+| `"mod+3"` | `go-to-bookmark 3` | jump to bookmark 3 (bottom-right corner) |
+| `"mod+4"` | `go-to-bookmark 4` | jump to bookmark 4 (bottom-left corner) |
+| `"mod+shift+1"` | `set-bookmark 1` | overwrite bookmark 1 at the current view |
+| `"mod+shift+2"` | `set-bookmark 2` |  |
+| `"mod+shift+3"` | `set-bookmark 3` |  |
+| `"mod+shift+4"` | `set-bookmark 4` |  |
 | `"mod+alt+up"` | `send-to-output up` | move window to output above |
 | `"mod+alt+down"` | `send-to-output down` |  |
 | `"mod+alt+left"` | `send-to-output left` |  |
@@ -729,6 +793,12 @@ Directions: up, down, left, right, up-left, up-right, down-left, down-right
 
 ```toml
 "mod+g" = "fill-window"
+```
+
+**Example: suspend-window (unbound by default)**
+
+```toml
+"mod+s" = "suspend-window"
 ```
 
 ## `[mouse]`
@@ -889,6 +959,56 @@ Threshold actions: any action from the [keybindings] Actions list. center-neares
 
 ## `[touch]`
 
+### `swipe_threshold`
+
+Default: `15.0`
+
+Touch thresholds — independent of the [gestures] keys of the same name. A touchscreen is a display, so swipe travel is physical: swipe_threshold is in millimetres and scales with the panel's pixel density, where the [gestures] swipe_threshold is in px. The pinch scales are unitless ratios, same as their [gestures] counterparts, but tune independently — a finger on glass pinches differently from two on a touchpad.
+
+swipe_threshold has to be positive. The 4+ finger tier measures a swipe's travel as a fraction of it and compares that against the pinch scales, so 0 would not hair-trigger the swipe — it would read as infinite swipe progress and put pinch-in/out out of reach. A value of 0 or less falls back to 15.0 with a warning.
+
+mm cumulative distance before directional swipe fires
+
+### `pinch_in_threshold`
+
+Default: `0.85`
+
+scale below which pinch-in fires (1.0 = no pinch)
+
+### `pinch_out_threshold`
+
+Default: `1.15`
+
+scale above which pinch-out fires (1.0 = no pinch)
+
+### `tap_time`
+
+Default: `250`
+
+Tap and hold timings — how long a contact may linger before the recognizer stops reading it as a tap, and how long a drag must dwell before it counts as a hold. Raise them if gestures need a deliberate, unhurried touch; lower them if the panel feels sluggish to respond.
+
+double_tap_time is a latency you pay on every tap, not just double-taps: a single tap's action cannot fire until the window for a second tap has closed, so a bound tap action always waits this long before anything happens. Shorten it for a snappier single tap, at the price of a double-tap you must perform faster.
+
+ms a tap may last; lift later and no tap fires
+
+### `double_tap_time`
+
+Default: `300`
+
+ms window for a second tap to pair into a double-tap — and the delay a single tap's action waits out before it fires
+
+### `hold_time`
+
+Default: `350`
+
+ms of dwell before a drag commits as a hold gesture (hold-swipe, doubletap-hold-swipe) instead of a plain swipe
+
+### `tap_travel`
+
+Default: `2.0`
+
+mm a contact may drift and still count as a tap; past this it becomes a pan or drag. Applies where taps and drags compete for the same finger count — a tier bound only to a drag gesture leaves on the first motion regardless
+
 Bindings: `"N-finger-<type>" = "action"`  (touch has no keyboard modifiers) Context-aware: on-window, on-canvas, anywhere. Unbound gestures are forwarded to the focused app. "none" removes a binding in its context. A fully unbound gesture forwards to the app.
 
 Touch gesture types (1–5 fingers):
@@ -1011,7 +1131,7 @@ Default: `0.5`
 
 ## Outputs
 
-Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. Winit backend ignores [[outputs]] entries.
+Per-output configuration. Each [[outputs]] entry matches by connector name. Find connector names with wlr-randr or check driftwm logs at startup. Outputs without a matching entry default to scale 1.0. On the winit backend only `position` applies — mode, scale and transform belong to the host window.
 
 `name = "*"` is a wildcard entry: it applies to any connected output that has no exact-name entry (exact entries always win). A fixed `position` makes no sense on the wildcard — it's ignored (falls back to "auto").
 
@@ -1068,8 +1188,12 @@ Supported fields:
 - `position` — [x, y] coordinates (window center, Y-up). Canvas coords, or output-relative (origin = output center) when pinned_to_screen.
 - `size` — [width, height] initial window dimensions (one-shot; user/app can resize afterwards, so pair with widget = true to lock it)
 - `fullscreen` — true: force this window to open in fullscreen mode
+- `focus_on_open` — false: map the window without focusing it or moving the camera to it. Omit to keep the default focus-on-map behavior. Pairs well with pinned_to_screen for unobtrusive overlays; the window still takes focus later through normal interaction (hover or click). (default: true)
 - `widget` — true: pinned (immovable), below normal windows, excluded from navigation and alt-tab (default: false)
 - `pinned_to_screen` — true: lock the window to the output's screen space — ignores pan/zoom, floats above normal windows (PiP, toolbars). `position` becomes output-relative; movable unless widget = true. Toggle live with `toggle-pin-to-screen` (Mod+T). (default: false)
+- `suspend_on_close` — override [session].suspend_on_close for matched windows (true / false). Escape hatch for terminals and scratchpads that should always really close (or always suspend). (default: inherit)
+- `restore_windows` — override [session].restore_windows for matched windows (true / false). false keeps an app out of the graceful-shutdown save, so it doesn't come back as a suspended window on the next launch. true saves and restores one app while the section key stays off. Independent of suspend_on_close, which only governs closes: set both to false for an app that should never leave a stand-in behind. A window you suspended explicitly still comes back. Key the rule on app_id: saved records carry no title, so a title criterion narrows what gets saved, while on the way back the rule answers for every saved window of that app_id. A rule matching on title alone can't be keyed to a saved record, so it governs saving only. (default: inherit)
+- `preserve_aspect_ratio` — true: keep the window's aspect ratio during interactive resizes; the ratio is taken at the start of each resize. (default: false)
 - `decoration` — overrides [decorations] default_mode for matched windows. Omit to inherit default_mode. Values:
   - "client":  CSD — client's own titlebar
   - "server":  SSD — driftwm's titlebar

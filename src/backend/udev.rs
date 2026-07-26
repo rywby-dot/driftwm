@@ -220,16 +220,6 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         return;
     };
 
-    // Remember what was active before ticking. An animation may finish during
-    // this tick, but its final state still needs to be presented once.
-    let animated_outputs_before: Vec<Output> = data
-        .space
-        .outputs()
-        .filter(|output| data.output_has_active_animations(output))
-        .cloned()
-        .collect();
-    let global_visual_animation_before = data.has_global_visual_animations();
-
     // 1. Tick animations once for all outputs (before device borrow)
     data.tick_all_animations();
 
@@ -280,9 +270,7 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         if data.dpms_off_outputs.contains(&surface.output) {
             continue;
         }
-        if animated_outputs_before.contains(&surface.output)
-            || data.output_has_active_animations(&surface.output)
-        {
+        if data.output_has_active_animations(&surface.output) {
             data.redraws_needed.insert(surface.output.clone());
         }
         // Chunked-bg with tiles still to upload: keep firing frames until the
@@ -307,8 +295,6 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
         || data.cursor.exec_cursor_show_at.is_some()
         || data.cursor.exec_cursor_deadline.is_some()
         || data.cursor_is_animated()
-        || global_visual_animation_before
-        || data.has_global_visual_animations()
     {
         data.mark_all_dirty();
     } else if data.render.background_is_animated {
@@ -324,6 +310,7 @@ pub(crate) fn render_if_needed(data: &mut DriftWm) {
 
     // 4. Foreign toplevel refresh (once per frame, not per-output)
     crate::render::refresh_foreign_toplevels(data);
+    crate::render::refresh_ext_workspaces(data);
 
     // 4a. Drain queued mode changes before re-notifying clients so the
     // re-broadcast reflects the new mode state. Mode changes either come from
@@ -594,7 +581,7 @@ pub fn init_udev(
     let mut drm_scanner = DrmScanner::new();
     let scan_result = drm_scanner.scan_connectors(&drm)?;
     let mut device_surfaces: HashMap<crtc::Handle, SurfaceData> = HashMap::new();
-    let saved_output_state = crate::state::read_all_per_output_state();
+    let saved_output_state = data.saved_camera_state();
 
     for event in scan_result {
         match event {
@@ -604,7 +591,7 @@ pub fn init_udev(
             } => {
                 tracing::info!(
                     "Connector connected: {}-{} (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -622,14 +609,14 @@ pub fn init_udev(
             } => {
                 tracing::warn!(
                     "Connector {}-{} has no available CRTC",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id()
                 );
             }
             DrmScanEvent::Disconnected { connector, crtc } => {
                 tracing::debug!(
                     "Connector {}-{} disconnected (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -674,7 +661,6 @@ pub fn init_udev(
         .handle()
         .insert_source(drm_notifier, move |event, meta, data: &mut DriftWm| {
             let mut dev = device_for_drm.borrow_mut();
-            let mut render_after_event = false;
             match event {
                 DrmEvent::VBlank(crtc) => {
                     let Some(surface) = dev.surfaces.get_mut(&crtc) else {
@@ -692,19 +678,13 @@ pub fn init_udev(
                     if let Some(token) = data.estimated_vblank_timers.remove(&crtc) {
                         data.loop_handle.remove(token);
                     }
-                    render_after_event = true;
+                    if data.redraws_needed.contains(&surface.output) {
+                        render_frame(data, &mut surface.compositor, &surface.output, crtc);
+                    }
                 }
                 DrmEvent::Error(err) => {
                     tracing::error!("DRM error: {err}");
                 }
-            }
-            drop(dev);
-
-            // VBlank is the clock for output animations. Re-enter the regular
-            // render path so it advances animation state and marks the affected
-            // output dirty before deciding whether another frame is needed.
-            if render_after_event {
-                render_if_needed(data);
             }
         })?;
 
@@ -810,14 +790,14 @@ pub fn init_udev(
                                     }
                                     tracing::info!(
                                         "Hotplug: {}-{} connected",
-                                        connector_type_name(&connector),
+                                        connector.interface().as_str(),
                                         connector.interface_id()
                                     );
                                     // Placeholders are retired inside output_connected,
                                     // after create_surface — the sequence is synchronous
                                     // within this handler, so active_output() never
                                     // observes a gap.
-                                    let saved = crate::state::read_all_per_output_state();
+                                    let saved = data.saved_camera_state();
                                     let dh = data.display_handle.clone();
                                     if let Some(sd) = create_surface(
                                         drm,
@@ -923,7 +903,7 @@ fn log_drm_connectors(drm: &DrmDevice) {
         if let Ok(info) = ControlDevice::get_connector(drm, handle, true) {
             tracing::info!(
                 "  connector {}-{}: state={:?}, modes={}",
-                connector_type_name(&info),
+                info.interface().as_str(),
                 info.interface_id(),
                 info.state(),
                 info.modes().len(),
@@ -1058,7 +1038,7 @@ fn create_surface(
 ) -> Option<SurfaceData> {
     let connector_name = format!(
         "{}-{}",
-        connector_type_name(connector),
+        connector.interface().as_str(),
         connector.interface_id()
     );
 
@@ -1290,14 +1270,10 @@ fn render_frame(
     data.display_handle.flush_clients().ok();
 
     // Read per-output state for this frame
-    let (cur_camera, cur_zoom, last_cam, last_zoom) = {
+    let (cur_camera, cur_zoom) = data.world_view(output);
+    let (last_cam, last_zoom) = {
         let os = crate::state::output_state(output);
-        (
-            os.camera,
-            os.zoom,
-            os.last_rendered_camera,
-            os.last_rendered_zoom,
-        )
+        (os.last_rendered_camera, os.last_rendered_zoom)
     };
 
     // Update background element
@@ -1350,11 +1326,17 @@ fn render_frame(
     };
     #[cfg(feature = "profile-with-tracy")]
     let _cursor_span = tracy_client::span!("udev::build_cursor_elements");
+    // The cursor tracks the live camera, not `world_view` — see its doc for why
+    // the two can differ during a fullscreen entry.
+    let (cursor_camera, cursor_zoom) = {
+        let os = crate::state::output_state(output);
+        (os.camera, os.zoom)
+    };
     let cursor_elements = crate::render::build_cursor_elements(
         data,
         renderer,
-        cur_camera,
-        cur_zoom,
+        cursor_camera,
+        cursor_zoom,
         output.current_scale().fractional_scale(),
         cursor_alpha,
     );
@@ -1459,9 +1441,10 @@ fn render_frame(
 
     // Record camera+zoom for next-frame change detection
     {
+        let (camera, zoom) = data.world_view(output);
         let mut os = crate::state::output_state(output);
-        os.last_rendered_camera = os.camera;
-        os.last_rendered_zoom = os.zoom;
+        os.last_rendered_camera = camera;
+        os.last_rendered_zoom = zoom;
     }
     data.write_state_file_if_dirty();
 
@@ -1543,10 +1526,6 @@ fn queue_estimated_vblank_timer(data: &mut DriftWm, output: &Output, crtc: crtc:
         .loop_handle
         .insert_source(timer, move |_, _, data: &mut DriftWm| {
             data.estimated_vblank_timers.remove(&crtc);
-            // EmptyFrame produces no kernel VBlank. Treat this timer as its
-            // replacement so an ongoing animation can advance and request the
-            // next frame without waiting for unrelated input or client damage.
-            render_if_needed(data);
             TimeoutAction::Drop
         }) {
         Ok(tok) => {
@@ -1720,20 +1699,5 @@ fn convert_subpixel(sp: connector::SubPixel) -> Subpixel {
         connector::SubPixel::VerticalBgr => Subpixel::VerticalBgr,
         connector::SubPixel::None => Subpixel::None,
         _ => Subpixel::Unknown,
-    }
-}
-
-fn connector_type_name(connector: &connector::Info) -> &'static str {
-    match connector.interface() {
-        connector::Interface::DVII => "DVI-I",
-        connector::Interface::DVID => "DVI-D",
-        connector::Interface::DVIA => "DVI-A",
-        connector::Interface::SVideo => "S-Video",
-        connector::Interface::DisplayPort => "DP",
-        connector::Interface::HDMIA => "HDMI-A",
-        connector::Interface::HDMIB => "HDMI-B",
-        connector::Interface::EmbeddedDisplayPort => "eDP",
-        connector::Interface::VGA => "VGA",
-        _ => "Unknown",
     }
 }

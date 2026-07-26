@@ -14,7 +14,7 @@ use super::toml::{
     OutputOutlineConfig, OutputRuleFile, PassKeysFile, WindowRuleFile,
 };
 use super::types::{
-    Action, BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, HotCorners,
+    BackendConfig, DecorationConfig, DecorationMode, EffectsConfig, FontWeight, HotCorners,
     KeyCombo, ModKey, OutputConfig, OutputMode, OutputOutlineSettings, OutputPosition, PassKeys,
     Pattern, TitleAlign, WindowRule,
 };
@@ -68,6 +68,48 @@ where
         max
     } else {
         value
+    }
+}
+
+/// Validate a lerp/scale factor in (0, 1]: reject `<= 0`/NaN back to `default`
+/// with a warning (0 would freeze motion), clamp `> 1` down to 1.
+pub(super) fn unit_range_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be in (0, 1], using {default}"),
+            );
+            default
+        }
+        other => clamp_warn(other.unwrap_or(default), 0.0, 1.0, field, errors),
+    }
+}
+
+/// Validate a value the code goes on to *divide by*: reject `<= 0`/NaN back to
+/// `default` with a warning. Flooring at zero would be wrong here — zero isn't a
+/// hair trigger, it makes the ratio the value feeds infinite (or NaN at rest),
+/// and nothing measured against that ratio can ever win.
+pub(super) fn positive_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be positive, using {default}"),
+            );
+            default
+        }
+        other => other.unwrap_or(default),
     }
 }
 
@@ -405,8 +447,12 @@ pub(super) fn parse_window_rule(
         position: r.position.map(|[x, y]| (x, y)),
         size,
         fullscreen: r.fullscreen,
+        focus_on_open: r.focus_on_open,
         widget: r.widget,
         pinned_to_screen: r.pinned_to_screen,
+        suspend_on_close: r.suspend_on_close,
+        restore_windows: r.restore_windows,
+        preserve_aspect_ratio: r.preserve_aspect_ratio,
         decoration,
         blur: r.blur.unwrap_or(false),
         opacity,
@@ -439,6 +485,12 @@ pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings
         ),
         // 0 = off (frost freezes, stops re-sampling the animated wallpaper).
         animate_blur_fps: raw.animate_blur_fps.unwrap_or(20).min(144),
+        animation_scale: unit_range_or_default(
+            raw.animation_scale,
+            "effects.animation_scale",
+            0.95,
+            errors,
+        ),
     }
 }
 
@@ -553,7 +605,7 @@ pub(super) fn parse_output_rule(
         .unwrap_or_default();
 
     let hot_corners = match r.hot_corners {
-        Some(hcf) => parse_hot_corners(hcf)?,
+        Some(hcf) => parse_hot_corners(hcf, errors)?,
         None => HotCorners::default(),
     };
 
@@ -567,7 +619,10 @@ pub(super) fn parse_output_rule(
     })
 }
 
-pub(super) fn parse_hot_corners(hcf: HotCornersFile) -> Result<HotCorners, String> {
+pub(super) fn parse_hot_corners(
+    hcf: HotCornersFile,
+    errors: &mut Warnings,
+) -> Result<HotCorners, String> {
     use super::parse::parse_action;
     use super::types::HotCorner;
 
@@ -579,25 +634,29 @@ pub(super) fn parse_hot_corners(hcf: HotCornersFile) -> Result<HotCorners, Strin
     }
 
     let mut bindings = HashMap::new();
-    let try_set = |corner: HotCorner,
-                   raw: &Option<String>,
-                   bindings: &mut HashMap<HotCorner, Action>|
-     -> Result<(), String> {
-        if let Some(s) = raw {
-            if s == "none" {
-                bindings.remove(&corner);
-            } else {
-                let action = parse_action(s)?;
+    for (corner, field, raw) in [
+        (HotCorner::TopLeft, "top_left", &hcf.top_left),
+        (HotCorner::TopRight, "top_right", &hcf.top_right),
+        (HotCorner::BottomLeft, "bottom_left", &hcf.bottom_left),
+        (HotCorner::BottomRight, "bottom_right", &hcf.bottom_right),
+    ] {
+        let Some(s) = raw else { continue };
+        if s == "none" {
+            bindings.remove(&corner);
+            continue;
+        }
+        match parse_action(s) {
+            Ok(action) => {
                 bindings.insert(corner, action);
             }
+            // Drop only the corner — failing the whole entry would also drop
+            // the monitor's scale/mode/position, bringing the display up wrong.
+            Err(e) => collect_warn(
+                errors,
+                format!("config: [outputs.hot_corners] {field} = \"{s}\": {e}"),
+            ),
         }
-        Ok(())
-    };
-
-    try_set(HotCorner::TopLeft, &hcf.top_left, &mut bindings)?;
-    try_set(HotCorner::TopRight, &hcf.top_right, &mut bindings)?;
-    try_set(HotCorner::BottomLeft, &hcf.bottom_left, &mut bindings)?;
-    try_set(HotCorner::BottomRight, &hcf.bottom_right, &mut bindings)?;
+    }
 
     let disable_when_fullscreen = hcf.disable_when_fullscreen.unwrap_or(true);
     let disable_while_dragging = hcf.disable_while_dragging.unwrap_or(true);

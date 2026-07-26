@@ -4,26 +4,12 @@ use smithay::backend::input::TouchSlot;
 use smithay::utils::{Logical, Point};
 
 use driftwm::config::{
-    Action, BindingContext, Config, ContinuousAction, GestureConfigEntry, GestureThresholds,
-    GestureTrigger, ThresholdAction,
+    Action, BindingContext, Config, ContinuousAction, GestureConfigEntry, GestureTrigger,
+    ThresholdAction, TouchThresholds,
 };
 
 use crate::input::gestures::direction_from_vector;
 
-/// Finger travel before a `PanZoom` gesture leaves the dead zone and starts to
-/// pan, in millimetres (converted to px per panel via `px_per_mm` so the feel is
-/// the same on any touchscreen). Below this — and below the zoom slop — it stays a
-/// candidate tap.
-const DEAD_ZONE_MM: f64 = 2.0;
-/// Max duration of a 3-finger tap (center / fit trigger).
-const TAP_MAX_MS: u32 = 250;
-/// Window for a second 3-finger tap to count as a double-tap.
-const DOUBLE_TAP_MS: u32 = 300;
-/// Dwell (ms) before a drag commits that turns a 3-finger drag into a hold
-/// gesture: hold-swipe (no prior tap) or doubletap-hold-swipe (after a
-/// double-tap). Long enough that a normal pan, which drags promptly, never
-/// trips it.
-const HOLD_MS: u32 = 350;
 /// Per-frame pinch-zoom deadzone (on the spread ratio). The spread metric is
 /// noisy, so a pure pan would wobble the zoom; ignore scale changes inside this
 /// band. The baseline only advances on a committed zoom, so a deliberate pinch
@@ -56,11 +42,6 @@ const PINCH_MIN_DELTA_MM: f64 = 3.0;
 /// in magnitude and only its *persistence* tells them apart. One frame over the
 /// floor can't fire zoom.
 const PINCH_CONFIRM_FRAMES: u32 = 2;
-/// Centroid travel for a 4-finger directional navigation swipe, in millimetres
-/// (converted to px per panel via `px_per_mm`). A muscle-memory command gesture
-/// wants consistent physical travel across panels; a real mm-scale threshold also
-/// keeps a pinch-in's small centroid drift from being misread as a swipe.
-const NAV_SWIPE_MM: f64 = 15.0;
 /// During 4-finger navigation, a swipe won't fire once pinch progress reaches
 /// this fraction. A natural pinch-in drags the thumb a long way toward the other
 /// fingers, drifting the centroid enough to read as a swipe, so the pinch has to
@@ -266,8 +247,9 @@ pub enum TapOutcome {
 
 /// The clock-free, compositor-free multi-finger touch-gesture classifier. It sees
 /// only screen-space positions, event times, and the resolved `[touch]` config,
-/// and emits [`Decision`]s the adapter carries out. Every constant, comparison,
-/// latch and ordering is preserved from the original in-grab recognizer.
+/// and emits [`Decision`]s the adapter carries out. Its comparisons, latches and
+/// ordering are preserved from the original in-grab recognizer; the seven values
+/// it used to hardcode now arrive as `[touch]` config.
 pub struct TouchRecognizer {
     /// Screen positions of the currently-down slots.
     points: HashMap<TouchSlot, Point<f64, Logical>>,
@@ -514,7 +496,7 @@ impl TouchRecognizer {
     pub fn process(
         &mut self,
         cfg: &Config,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         input: &TouchInput,
         last_three_finger_tap: Option<u32>,
         holdback_active: bool,
@@ -525,6 +507,7 @@ impl TouchRecognizer {
                 app_owns_hit,
             } => self.down(
                 cfg,
+                thresholds,
                 input.slot,
                 location,
                 app_owns_hit,
@@ -539,6 +522,7 @@ impl TouchRecognizer {
                 holdback_active,
             ),
             TouchKind::Up => self.up(
+                thresholds,
                 input.slot,
                 input.time_ms,
                 holdback_active,
@@ -547,9 +531,11 @@ impl TouchRecognizer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn down(
         &mut self,
         cfg: &Config,
+        thresholds: &TouchThresholds,
         slot: TouchSlot,
         screen: Point<f64, Logical>,
         app_owns_hit: bool,
@@ -575,8 +561,8 @@ impl TouchRecognizer {
             } else {
                 BindingContext::OnCanvas
             };
-            self.armed_for_move =
-                last_three_finger_tap.is_some_and(|t| time.saturating_sub(t) < DOUBLE_TAP_MS);
+            self.armed_for_move = last_three_finger_tap
+                .is_some_and(|t| time.saturating_sub(t) < thresholds.double_tap_ms);
         } else {
             // Landing stagger, for tuning `HOLDBACK_MS` against real hardware.
             tracing::debug!(
@@ -650,6 +636,7 @@ impl TouchRecognizer {
 
     fn up(
         &mut self,
+        thresholds: &TouchThresholds,
         slot: TouchSlot,
         time: u32,
         holdback_active: bool,
@@ -695,7 +682,7 @@ impl TouchRecognizer {
                 out.push(Decision::Momentum);
             }
             if was_present && !self.claims_blocked {
-                self.detect_tap(time, last_three_finger_tap, &mut out);
+                self.detect_tap(thresholds, time, last_three_finger_tap, &mut out);
             }
             out.push(Decision::UnsetGrab);
         } else {
@@ -706,7 +693,7 @@ impl TouchRecognizer {
 
     fn motion(
         &mut self,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         slot: TouchSlot,
         screen: Point<f64, Logical>,
         time: u32,
@@ -764,7 +751,7 @@ impl TouchRecognizer {
             let spread_pinch = has_two
                 && span_ratio >= slop
                 && (cur_spread - self.last_spread).abs() >= PINCH_MIN_DELTA_MM * self.px_per_mm;
-            let dead_zone = DEAD_ZONE_MM * self.px_per_mm;
+            let dead_zone = thresholds.dead_zone_mm * self.px_per_mm;
             // Break the dead zone on the spread change alone, ungated by finger
             // count: a stale, over-counted `max_fingers` must never trap a pure,
             // non-translating pinch. Safe because zoom only *engages* with the full
@@ -789,7 +776,7 @@ impl TouchRecognizer {
             // has no pan bound, so that drag is inert. Cluster scope is the action's
             // own (no implicit upgrade).
             if !self.zoom_engaged {
-                let held = time.saturating_sub(self.tap_start_time) >= HOLD_MS;
+                let held = time.saturating_sub(self.tap_start_time) >= thresholds.hold_ms;
                 let action =
                     if self.armed_for_move && held && self.plan.doubletap_hold_swipe.is_some() {
                         self.plan.doubletap_hold_swipe.clone()
@@ -863,7 +850,7 @@ impl TouchRecognizer {
 
     fn apply_navigate(
         &mut self,
-        thresholds: &GestureThresholds,
+        thresholds: &TouchThresholds,
         centroid: Point<f64, Logical>,
         out: &mut Vec<Decision>,
     ) {
@@ -880,7 +867,7 @@ impl TouchRecognizer {
 
         let th = thresholds;
         let swipe_dist = (self.nav_cumulative.x.powi(2) + self.nav_cumulative.y.powi(2)).sqrt();
-        let swipe_threshold = NAV_SWIPE_MM * self.px_per_mm;
+        let swipe_threshold = th.swipe_distance_mm * self.px_per_mm;
         let swipe_progress = swipe_dist / swipe_threshold;
 
         // Pinch progress as a fraction of the in/out margin: a pure swipe's natural
@@ -953,6 +940,7 @@ impl TouchRecognizer {
     /// window regardless of what's under it.
     fn detect_tap(
         &mut self,
+        thresholds: &TouchThresholds,
         time: u32,
         last_three_finger_tap: Option<u32>,
         out: &mut Vec<Decision>,
@@ -960,10 +948,11 @@ impl TouchRecognizer {
         if self.ever_active || (self.plan.tap.is_none() && self.plan.doubletap.is_none()) {
             return;
         }
-        if time.saturating_sub(self.tap_start_time) > TAP_MAX_MS {
+        if time.saturating_sub(self.tap_start_time) > thresholds.tap_max_ms {
             return;
         }
-        let double = last_three_finger_tap.is_some_and(|t| time.saturating_sub(t) < DOUBLE_TAP_MS);
+        let double = last_three_finger_tap
+            .is_some_and(|t| time.saturating_sub(t) < thresholds.double_tap_ms);
         let focus_at = self.start_centroid;
         if double {
             let outcome = match self.plan.doubletap.clone() {
@@ -981,7 +970,7 @@ impl TouchRecognizer {
                 // double-tap (fit) or double-tap-drag (move); a fresh interaction
                 // cancels it. Specific to center — other tap actions fire now.
                 Some(ThresholdAction::Fixed(Action::CenterWindow)) => TapOutcome::DeferCenter {
-                    delay_ms: DOUBLE_TAP_MS,
+                    delay_ms: thresholds.double_tap_ms,
                 },
                 Some(action) => TapOutcome::Fire(self.resolve_threshold(action)),
                 None => TapOutcome::None,

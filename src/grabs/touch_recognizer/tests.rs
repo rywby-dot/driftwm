@@ -86,13 +86,9 @@ impl<'a> Harness<'a> {
         let cfg = self.cfg;
         let holdback_active = self.holdback.is_some();
         let last_tap = self.last_tap;
-        let decs = self.core.process(
-            cfg,
-            &cfg.gesture_thresholds,
-            input,
-            last_tap,
-            holdback_active,
-        );
+        let decs = self
+            .core
+            .process(cfg, &cfg.touch_thresholds, input, last_tap, holdback_active);
         for d in &decs {
             match d {
                 Decision::Hold => self
@@ -388,8 +384,8 @@ fn held_hold_swipe_wins_over_swipe_grab() {
          \"3-finger-swipe\" = \"move-window\"\n",
     )
     .unwrap();
-    // The fingers dwell past HOLD_MS (350ms) before the drag activates → the
-    // hold-swipe grab (resize) wins over the swipe-slot grab (move).
+    // The fingers dwell past the default hold_time (350ms) before the drag
+    // activates → the hold-swipe grab (resize) wins over the swipe-slot grab (move).
     let seq = vec![
         down(0, 500.0, 500.0, false, 0),
         down(1, 550.0, 500.0, false, 10),
@@ -443,8 +439,8 @@ fn armed_held_uses_doubletap_hold_swipe_for_cluster() {
         up(1, 45),
         up(2, 50),
     ]);
-    // Armed drag that dwells past HOLD_MS (350ms) before activating → armed AND
-    // held → the doubletap-hold-swipe binding (cluster move).
+    // Armed drag that dwells past the default hold_time (350ms) before activating
+    // → armed AND held → the doubletap-hold-swipe binding (cluster move).
     h.run(&[
         down(0, 500.0, 500.0, false, 100),
         down(1, 550.0, 500.0, false, 110),
@@ -651,7 +647,8 @@ fn three_finger_tap_within_window_taps() {
 #[test]
 fn slow_tap_past_tap_window_does_not_tap() {
     let cfg = cfg_default();
-    // Same clean 3-finger tap but the lift lands well past TAP_MAX_MS (250ms).
+    // Same clean 3-finger tap but the lift lands well past the default tap_time
+    // (250ms).
     let seq = vec![
         down(0, 500.0, 500.0, false, 0),
         down(1, 550.0, 500.0, false, 10),
@@ -664,6 +661,226 @@ fn slow_tap_past_tap_window_does_not_tap() {
     assert!(
         !decs.iter().any(|d| matches!(d, Decision::Tap { .. })),
         "a tap past the window must not fire, got {decs:?}"
+    );
+}
+
+/// The same lift the default rejects, accepted once `tap_time` is widened — the
+/// configured value has to reach the recognizer, not just the `Config`.
+#[test]
+fn configured_tap_time_widens_the_tap_window() {
+    let cfg = Config::from_toml("[touch]\ntap_time = 500\n").unwrap();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 400),
+        up(1, 410),
+        up(2, 420),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(d, Decision::Tap { .. })),
+        "a lift inside the widened window must tap, got {decs:?}"
+    );
+}
+
+/// `double_tap_time` is also the delay a single tap's action waits out, so the
+/// deferred-center outcome carries it verbatim.
+#[test]
+fn configured_double_tap_time_sets_the_deferred_center_delay() {
+    let cfg = Config::from_toml("[touch]\ndouble_tap_time = 120\n").unwrap();
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        up(0, 40),
+        up(1, 50),
+        up(2, 60),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::Tap {
+                outcome: TapOutcome::DeferCenter { delay_ms: 120 },
+                ..
+            }
+        )),
+        "the deferred center must wait the configured window, got {decs:?}"
+    );
+}
+
+/// A dwell too short for the default `hold_time` commits as a hold once the key
+/// is lowered.
+#[test]
+fn configured_hold_time_commits_the_hold_grab_sooner() {
+    let cfg = Config::from_toml(
+        "[touch]\n\
+         hold_time = 100\n\
+         [touch.anywhere]\n\
+         \"3-finger-pinch\" = \"none\"\n\
+         \"3-finger-hold-swipe\" = \"resize-window\"\n\
+         \"3-finger-swipe\" = \"move-window\"\n",
+    )
+    .unwrap();
+    // 150ms of dwell: past the configured 100ms, far short of the 350ms default.
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 550.0, 500.0, false, 10),
+        down(2, 600.0, 500.0, false, 20),
+        motion(0, 500.0, 560.0, 150),
+        motion(1, 550.0, 560.0, 155),
+        motion(2, 600.0, 560.0, 160),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::StartWindowGrab {
+                action: ContinuousAction::ResizeWindow
+            }
+        )),
+        "the shortened dwell must select the hold-swipe grab, got {decs:?}"
+    );
+}
+
+/// A drag that pans under the default dead zone stays inert once `tap_travel`
+/// puts it back inside.
+#[test]
+fn configured_tap_travel_widens_the_dead_zone() {
+    let cfg = Config::from_toml("[touch]\ntap_travel = 30.0\n").unwrap();
+    // 60px of travel: past the default 2mm (8px here), inside the configured
+    // 30mm (120px).
+    let seq = vec![
+        down(0, 500.0, 500.0, false, 0),
+        down(1, 600.0, 500.0, false, 10),
+        motion(0, 500.0, 530.0, 20),
+        motion(1, 600.0, 530.0, 25),
+        motion(0, 500.0, 560.0, 30),
+        motion(1, 600.0, 560.0, 35),
+    ];
+    let decs = run_all(&cfg, &seq);
+    assert_eq!(
+        count(&decs, is_pan),
+        0,
+        "travel inside the widened dead zone must not pan, got {decs:?}"
+    );
+}
+
+/// Four fingers planted on one row, then walked through each frame's positions in
+/// slot order — the shape the one-shot navigate tier arbitrates on.
+fn four_finger_nav(start: [f64; 4], frames: &[[f64; 4]]) -> Vec<TouchInput> {
+    let mut seq: Vec<TouchInput> = start
+        .iter()
+        .enumerate()
+        .map(|(i, x)| down(i as u32, *x, 500.0, false, i as u32 * 5))
+        .collect();
+    let mut t = 20;
+    for frame in frames {
+        for (i, x) in frame.iter().enumerate() {
+            seq.push(motion(i as u32, *x, 500.0, t));
+            t += 2;
+        }
+    }
+    seq
+}
+
+/// The `[touch]` pinch keys default to the very `[gestures]` values they used to
+/// borrow, so only a non-default one proves the recognizer reads touch's own.
+#[test]
+fn configured_pinch_out_threshold_fires_a_spread_the_default_rejects() {
+    // A spread to scale 1.10, symmetric about the centroid so no swipe competes:
+    // past a configured 1.05, short of the 1.15 default.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[172.0, 388.0, 712.0, 928.0], [165.0, 385.0, 715.0, 935.0]],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "the default 1.15 must reject a 1.10 spread, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\npinch_out_threshold = 1.05\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "the lowered threshold must fire the 4-finger pinch-out, got {decs:?}"
+    );
+}
+
+#[test]
+fn configured_pinch_in_threshold_fires_a_contraction_the_default_rejects() {
+    // The mirror image: a contraction to scale 0.90 — past a configured 0.95,
+    // short of the 0.85 default.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[228.0, 412.0, 688.0, 872.0], [235.0, 415.0, 685.0, 865.0]],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "the default 0.85 must reject a 0.90 contraction, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\npinch_in_threshold = 0.95\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::ZoomToFit))),
+        "the raised threshold must fire the 4-finger pinch-in, got {decs:?}"
+    );
+}
+
+#[test]
+fn configured_swipe_threshold_makes_a_firing_swipe_inert() {
+    // 120px of centroid travel at a constant spread: past the default 15mm (60px
+    // here), nowhere near the configured 100mm (400px).
+    let seq = four_finger_nav(
+        [400.0, 500.0, 600.0, 700.0],
+        &[
+            [360.0, 460.0, 560.0, 660.0],
+            [320.0, 420.0, 520.0, 620.0],
+            [280.0, 380.0, 480.0, 580.0],
+        ],
+    );
+    let decs = run_all(&cfg_default(), &seq);
+    assert!(
+        decs.iter().any(|d| matches!(
+            d,
+            Decision::FireThreshold(Action::CenterNearest(Direction::Right))
+        )),
+        "the default threshold must fire the swipe, got {decs:?}"
+    );
+
+    let cfg = Config::from_toml("[touch]\nswipe_threshold = 100.0\n").unwrap();
+    let decs = run_all(&cfg, &seq);
+    assert_eq!(
+        count(&decs, is_fire),
+        0,
+        "travel short of the raised threshold must fire nothing, got {decs:?}"
+    );
+}
+
+/// Swipe progress is a *ratio* of `swipe_threshold`, and the pinch has to out-rank
+/// it to fire, so a zero threshold once left the whole navigate tier inert. The
+/// tier has to stay live whatever the config says.
+#[test]
+fn zero_swipe_threshold_leaves_the_pinch_reachable() {
+    let cfg = Config::from_toml("[touch]\nswipe_threshold = 0.0\n").unwrap();
+    // A deliberate spread to scale 1.25, past even the default 1.15 pinch-out.
+    let seq = four_finger_nav(
+        [200.0, 400.0, 700.0, 900.0],
+        &[[130.0, 370.0, 730.0, 970.0], [112.5, 362.5, 737.5, 987.5]],
+    );
+    let decs = run_all(&cfg, &seq);
+    assert!(
+        decs.iter()
+            .any(|d| matches!(d, Decision::FireThreshold(Action::HomeToggle))),
+        "the pinch must still reach its threshold, got {decs:?}"
     );
 }
 

@@ -28,12 +28,60 @@ pub fn refresh_foreign_toplevels(state: &mut crate::state::DriftWm) {
         .filter(|o| !state.disconnected_outputs.contains(&o.name()))
         .cloned()
         .collect();
-    driftwm::protocols::foreign_toplevel::refresh::<crate::state::DriftWm>(
+    driftwm::protocols::foreign_toplevel::refresh::<crate::state::DriftWm, _>(
         &mut state.foreign_toplevel_state,
         &mut state.foreign_toplevel_list_state,
         &state.stage,
         focused.as_ref(),
         &outputs,
+    );
+}
+
+/// Recompute each output's active bookmark and sync the ext-workspace protocol.
+/// Call once per frame alongside `refresh_foreign_toplevels`. Incumbents live
+/// per-output in `OutputState`; the focused output's is what the protocol's
+/// single `active` bit and the IPC `active_bookmark` fields report.
+pub fn refresh_ext_workspaces(state: &mut crate::state::DriftWm) {
+    use crate::state::{output_logical_size, output_state};
+
+    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+    for output in &outputs {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        let viewport = output_logical_size(output);
+        let usable_center = state.usable_center_screen_on(output);
+        let incumbent = output_state(output).active_bookmark.clone();
+        let winner = canvas::active_bookmark(
+            &state.bookmarks,
+            camera,
+            viewport,
+            zoom,
+            usable_center,
+            incumbent.as_deref(),
+        );
+        if winner != incumbent {
+            output_state(output).active_bookmark = winner;
+            state.active_bookmark_dirty = true;
+        }
+    }
+
+    let active = state
+        .active_output()
+        .and_then(|o| output_state(&o).active_bookmark.clone());
+    // Only outputs with a live wl_output global can carry group enters; the
+    // virtual placeholders left by a full disconnect have none.
+    let live_outputs: Vec<Output> = outputs
+        .iter()
+        .filter(|o| !state.disconnected_outputs.contains(&o.name()))
+        .cloned()
+        .collect();
+    driftwm::protocols::ext_workspace::refresh::<crate::state::DriftWm>(
+        &mut state.ext_workspace_state,
+        &state.bookmarks,
+        active.as_deref(),
+        &live_outputs,
     );
 }
 
@@ -71,7 +119,7 @@ pub fn update_primary_scanout_output(
     use smithay::wayland::compositor::TraversalAction;
     use smithay::wayland::compositor::with_surface_tree_downward;
 
-    for window in state.stage.windows() {
+    for window in state.stage.windows().filter_map(|w| w.client()) {
         window.with_surfaces(|surface, surface_data| {
             update_surface_primary_scanout_output(
                 surface,
@@ -153,7 +201,7 @@ pub fn take_presentation_feedback(
 
     let mut feedback = OutputPresentationFeedback::new(output);
 
-    for window in state.stage.windows() {
+    for window in state.stage.windows().filter_map(|w| w.client()) {
         window.take_presentation_feedback(
             &mut feedback,
             surface_primary_scanout_output,
@@ -205,7 +253,7 @@ pub fn post_render(state: &mut crate::state::DriftWm, output: &Output) {
     let viewport_size = crate::state::output_logical_size(output);
     let visible_rect = canvas::visible_canvas_rect(camera.to_i32_round(), viewport_size, zoom);
 
-    for window in state.stage.windows() {
+    for window in state.stage.windows().filter_map(|w| w.client()) {
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
@@ -302,7 +350,7 @@ pub fn send_frame_callbacks_fallback(state: &mut crate::state::DriftWm) {
     let Some(output) = state.space.outputs().next().cloned() else {
         return;
     };
-    for window in state.stage.windows() {
+    for window in state.stage.windows().filter_map(|w| w.client()) {
         window.send_frame(&output, time, Some(FRAME_CALLBACK_THROTTLE), |_, _| None);
     }
     for cl in &state.canvas_layers {

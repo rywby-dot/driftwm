@@ -130,6 +130,31 @@ fn parse_action_close_window() {
 }
 
 #[test]
+fn parse_action_suspend_window() {
+    assert!(matches!(
+        parse_action("suspend-window").unwrap(),
+        Action::SuspendWindow
+    ));
+}
+
+// suspend-window is a plain action, so it maps on the non-keyboard paths too:
+// a mouse button wraps it, and a gesture treats it as a threshold action.
+#[test]
+fn suspend_window_maps_on_mouse_and_gesture_paths() {
+    use driftwm::config::GestureTrigger;
+    assert!(matches!(
+        parse_mouse_action("suspend-window").unwrap(),
+        MouseAction::Action(Action::SuspendWindow)
+    ));
+    let trigger = GestureTrigger::Hold { fingers: 4 };
+    let entry = parse_gesture_config_entry(&trigger, "suspend-window").unwrap();
+    assert!(matches!(
+        entry,
+        GestureConfigEntry::Threshold(ThresholdAction::Fixed(Action::SuspendWindow))
+    ));
+}
+
+#[test]
 fn parse_action_nudge_window_up() {
     let result = parse_action("nudge-window up").unwrap();
     assert!(matches!(result, Action::NudgeWindow(Direction::Up)));

@@ -93,6 +93,36 @@ toplevel.with_pending_state(|state| {
 toplevel.send_pending_configure();
 ```
 
+### Detecting an unacked configure
+`XdgToplevelSurfaceRoleAttributes::pending_configures() -> &[ToplevelConfigure]`
+is public, reached via `with_states(surface, |s| s.data_map.get::<XdgToplevelSurfaceData>())`
+(`XdgToplevelSurfaceData = Mutex<XdgToplevelSurfaceRoleAttributes>`, so
+`.lock().unwrap().pending_configures()`). Entries are pruned in `ack_configure`
+with `retain(|c| c.serial > serial)`, so non-empty ⇔ the latest configure is not
+yet acked. Treat a missing data entry as "no pending" (`unwrap_or(false)`).
+Non-empty does **not** imply a pending *resize*: a compositor queues size-less
+(`state.size == None`/`(0,0)`, "client picks") configures too, so to detect an
+owed resize inspect each `ToplevelConfigure`'s `state.size` for a real
+(non-zero) size differing from the committed geometry, not just list length.
+
+Pruning is latched to the `ack_configure` *request* (the acked configure moves
+to `last_acked`), not to the commit that applies it — and real clients (GTK4)
+ack as soon as they process the event, then keep committing old-size frames
+until their next resized render. So "no pending configures" must **not** be
+read as "committed geometry is current". To gate on a size transition actually
+completing, track it compositor-side off the committed geometry changing (see
+`pending_recenter`), not off ack state.
+
+### `send_pending_configure` before the initial configure
+`ToplevelSurface::send_pending_configure()` gates on `has_pending_changes()`,
+which is `!initial_configure_sent || <server_pending differs>`. So it does **not**
+no-op before the initial configure — it forces one out. To flush a mid-session
+change (e.g. an Activated flip on focus change) without prematurely sending, and
+thereby fragmenting, a batched first-commit configure, guard on
+`ToplevelSurface::is_initial_configure_sent()` first. `Window::set_activated(bool)
+-> bool` returns whether the hint actually changed, so pair the two: flush only
+when `set_activated` reports a change and the initial configure is already out.
+
 ### Keyboard modifier state
 ```rust
 let modifiers = self.seat.get_keyboard().unwrap().modifier_state();
@@ -243,6 +273,51 @@ fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFo
     set_primary_focus(dh, seat, client);
 }
 ```
+
+## xdg-activation (`src/wayland/xdg_activation/`)
+
+Startup-notification / focus-request tokens. `XdgActivationState` owns a
+`HashMap<XdgActivationToken, XdgActivationTokenData>`. `XdgActivationToken` is a
+newtype over a random 32-char alphanumeric `String` (`Deref<Target = str>`,
+`as_str()`, `From<String>`).
+
+```rust
+// Compositor-minted token, no client association. Does NOT call token_created.
+// Returns refs borrowed from the &mut XdgActivationState.
+pub fn create_external_token(
+    &mut self,
+    data: impl Into<Option<XdgActivationTokenData>>,
+) -> (&XdgActivationToken, &XdgActivationTokenData);
+
+pub fn remove_token(&mut self, token: &XdgActivationToken) -> bool;
+pub fn data_for_token(&self, token: &XdgActivationToken) -> Option<&XdgActivationTokenData>;
+pub fn retain_tokens<F: FnMut(&XdgActivationToken, &XdgActivationTokenData) -> bool>(&mut self, f: F);
+```
+
+`XdgActivationTokenData` fields: `client_id`, `serial: Option<(Serial, WlSeat)>`
+(the input serial — `None` for a compositor-minted or spontaneous token),
+`app_id`, `surface` (the *requesting* surface, not the one to activate),
+`timestamp: Instant`, and `user_data: Arc<UserDataMap>`.
+
+**Attaching custom data:** stamp `user_data` (an `Arc<UserDataMap>`) right after
+minting via the returned data ref:
+```rust
+let (token, data) = state.create_external_token(None);
+data.user_data.insert_if_missing_threadsafe(|| MyMarker(id)); // T: Send + Sync + 'static
+let token = token.clone();
+```
+`UserDataMap::get::<T>()` returns `Option<&T>`; a value inserted with the
+non-threadsafe `insert_if_missing` is only visible from the thread it was
+inserted on (use `insert_if_missing_threadsafe` to be thread-agnostic).
+
+**Round-trip:** on a client `xdg_activation_v1.activate { token, surface }`, the
+dispatch looks up `known_tokens.get(&token).cloned()` and calls
+`XdgActivationHandler::request_activation(token, token_data, surface)`. The
+`token_data` is a *clone*, but `user_data` is an `Arc`, so a stamped marker is
+visible there. An unknown token string is silently dropped (no handler call).
+The token stays in the pool after `request_activation` until `remove_token` /
+`retain_tokens`. `token_created` fires only for client-built tokens (the
+`.commit()` path), never for `create_external_token`.
 
 ## xcursor Crate (0.3)
 

@@ -3,7 +3,8 @@ pub mod compositor;
 pub mod layer_shell;
 pub mod xdg_shell;
 
-use crate::state::{DriftWm, FocusTarget};
+use crate::decorations::DecorationKey;
+use crate::state::{DriftWm, FocusIntent, FocusTarget, StageWindow};
 use driftwm::window_ext::WindowExt;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
@@ -131,7 +132,7 @@ impl SeatHandler for DriftWm {
         if let Some(focus) = focused
             && self.window_for_surface(&focus.0).is_some()
         {
-            self.window_focus = Some(focus.clone());
+            self.window_focus = Some(FocusIntent::Surface(focus.clone()));
         }
     }
 }
@@ -158,7 +159,7 @@ impl WaylandDndGrabHandler for DriftWm {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.dnd_icon = icon.map(|surface| crate::state::DndIcon {
+        let dnd_icon = icon.map(|surface| crate::state::DndIcon {
             surface,
             offset: (0, 0).into(),
         });
@@ -176,6 +177,10 @@ impl WaylandDndGrabHandler for DriftWm {
                 touch.set_grab(self, grab, serial);
             }
         }
+        // set_grab tears down any grab already in place, and a DnD grab going
+        // down that way reports cancelled() — which clears dnd_icon. Publish
+        // the new icon after that, or a restarted drag drops its own icon.
+        self.dnd_icon = dnd_icon;
     }
 }
 impl dnd::DndGrabHandler for DriftWm {
@@ -186,6 +191,10 @@ impl dnd::DndGrabHandler for DriftWm {
         _seat: Seat<Self>,
         _location: Point<f64, Logical>,
     ) {
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
         self.dnd_icon = None;
     }
 }
@@ -273,6 +282,69 @@ impl XdgActivationHandler for DriftWm {
         if self_activation {
             self.cursor.exec_cursor_show_at = None;
             self.cursor.exec_cursor_deadline = None;
+        }
+
+        // A compositor-minted relaunch token adopts its target suspended window
+        // instead of following the normal activation path. Honored before the
+        // serial gate (our tokens carry no serial) and before the zero-size
+        // early return (a pre-first-commit adopt is stashed for the placement
+        // arm). A stale marker (target dismissed/expired) falls through to the
+        // normal path.
+        if let Some(sid) = token_data
+            .user_data
+            .get::<crate::state::RelaunchMarker>()
+            .map(|m| m.0)
+            && self.pending_relaunches.contains_key(&sid)
+            && self.find_suspended(sid).is_some()
+        {
+            let window = self.window_for_surface(&surface);
+            let root = window
+                .as_ref()
+                .and_then(|w| w.wl_surface().map(|s| s.into_owned()))
+                .unwrap_or_else(|| surface.clone());
+            if self.pending_center.contains(&root) {
+                // Not yet placed: the first-commit placement arm adopts it.
+                self.pending_adoptions.insert(root, sid);
+                return;
+            }
+            // Already placed. Any window presenting our token is the app's own
+            // answer to this relaunch: the token traveled from the spawn through
+            // the child env into the app, so a single-instance app forwarding it
+            // to its running window is fulfilling the press, not being hijacked.
+            // The press expressed placement intent at the stand-in's slot, so
+            // adopt the window into it.
+            if let Some(window) = window {
+                // A window already fullscreen, pinned, rule-placed as a widget,
+                // or living as a dialog/modal of another window is where policy
+                // (or its parent) wants it; adopting would rip it out of that
+                // membership — and, for a dialog, tear it off its parent. Every
+                // suspend path excludes dialogs, so no stand-in ever stands for
+                // one. Drop the stand-in instead and leave the window alone.
+                if self.is_window_fullscreen(&window)
+                    || self.is_pinned(&window)
+                    || window.is_widget()
+                    || window.parent_surface().is_some()
+                    || window.is_modal()
+                {
+                    tracing::debug!(
+                        "relaunch adopt of {sid:?} skipped: window is fullscreen/pinned/widget/dialog; dismissing stand-in"
+                    );
+                    self.dismiss_suspended(sid);
+                    return;
+                }
+                // About to adopt — but not while the window is under an active
+                // interactive move/resize grab: teleporting it would fight the
+                // grab. Transient (unlike the carve-outs above), so leave the
+                // pending relaunch to its TTL and don't dismiss the stand-in.
+                if self.element_under_interactive_grab(&StageWindow::Client(window.clone())) {
+                    return;
+                }
+                self.adopt_relaunched(&window, &root, sid);
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_configure();
+                }
+                return;
+            }
         }
 
         // Only honor tokens created from user input (has a serial).
@@ -438,16 +510,19 @@ impl driftwm::protocols::virtual_keyboard::VirtualKeyboardBindingHandler for Dri
             return false;
         }
         // Respect the focused window's pass_keys rule, as the physical path
-        // does: a combo the window claims forwards even when bound.
-        let pass_keys = self.focused_window().and_then(|w| {
-            let app_id = w.app_id_or_class().unwrap_or_default();
-            let title = w.window_title().unwrap_or_default();
-            self.config
-                .resolve_window_rules(&app_id, &title)
-                .map(|r| r.pass_keys)
-        });
-        if pass_keys.is_some_and(|pk| pk.allows_raw(modifiers, sym)) {
-            return false;
+        // does: a combo the window claims forwards even when bound. Skipped
+        // when a suspended window holds the gated focus — no client to claim.
+        if self.gated_suspended_focus().is_none() {
+            let pass_keys = self.focused_window().and_then(|w| {
+                let app_id = w.app_id_or_class().unwrap_or_default();
+                let title = w.window_title().unwrap_or_default();
+                self.config
+                    .resolve_window_rules(&app_id, &title)
+                    .map(|r| r.pass_keys)
+            });
+            if pass_keys.is_some_and(|pk| pk.allows_raw(modifiers, sym)) {
+                return false;
+            }
         }
         let Some(action) = self.config.lookup(modifiers, sym) else {
             return false;
@@ -614,21 +689,31 @@ impl XdgDecorationHandler for DriftWm {
             let window = self.window_for_surface(&wl_surface);
             if let Some(window) = window {
                 let geo = window.geometry();
-                if geo.size.w > 0 && !self.decorations.contains_key(&wl_surface.id()) {
+                if geo.size.w > 0
+                    && !self
+                        .decorations
+                        .contains_key(&DecorationKey::Surface(wl_surface.id()))
+                {
                     let deco = crate::decorations::WindowDecoration::new(
                         geo.size.w,
                         true,
                         &self.config.decorations,
                     );
-                    self.decorations.insert(wl_surface.id(), deco);
+                    self.decorations
+                        .insert(DecorationKey::Surface(wl_surface.id()), deco);
                 }
             }
         } else if mode == Mode::ClientSide {
             // Client switching back to CSD: drop any stale SSD chrome.
             self.pending_ssd.remove(&wl_surface.id());
-            self.decorations.remove(&wl_surface.id());
-            self.render.shadow_cache.remove(&wl_surface.id());
-            self.render.border_cache.remove(&wl_surface.id());
+            self.decorations
+                .remove(&DecorationKey::Surface(wl_surface.id()));
+            self.render
+                .shadow_cache
+                .remove(&DecorationKey::Surface(wl_surface.id()));
+            self.render
+                .border_cache
+                .remove(&DecorationKey::Surface(wl_surface.id()));
         }
     }
 
@@ -666,7 +751,11 @@ impl ForeignToplevelHandler for DriftWm {
     fn close(&mut self, wl_surface: WlSurface) {
         let window = self.window_for_surface(&wl_surface);
         if let Some(window) = window {
-            self.request_window_close(&window);
+            // A taskbar close is explicit user intent to close for real — mark
+            // it so `suspend_on_close` doesn't leave a ghost the taskbar can't
+            // see.
+            self.mark_real_close(&window);
+            window.send_close();
         }
     }
 
@@ -711,6 +800,51 @@ impl ForeignToplevelHandler for DriftWm {
 }
 
 driftwm::delegate_foreign_toplevel!(DriftWm);
+
+use driftwm::protocols::ext_workspace::{ExtWorkspaceHandler, ExtWorkspaceManagerState};
+
+impl ExtWorkspaceHandler for DriftWm {
+    fn ext_workspace_state(&mut self) -> &mut ExtWorkspaceManagerState {
+        &mut self.ext_workspace_state
+    }
+
+    fn ext_workspace_outputs(&self) -> Vec<smithay::output::Output> {
+        // Skip virtual placeholders for disconnected monitors — their wl_output
+        // global is gone, so advertising them to a late-binding client would
+        // enter an output the client can't resolve.
+        self.space
+            .outputs()
+            .filter(|o| !self.disconnected_outputs.contains(&o.name()))
+            .cloned()
+            .collect()
+    }
+
+    fn workspace_activate(&mut self, name: String) {
+        self.execute_action(&driftwm::config::Action::GoToBookmark(name));
+    }
+
+    fn workspace_create(&mut self, name: String) {
+        if name.is_empty() {
+            tracing::info!("ext-workspace create_workspace: ignoring empty name");
+            return;
+        }
+        // Capture the focused viewport center under this name — set-bookmark
+        // semantics (overwrites an existing bookmark; registry keys are unique).
+        self.execute_action(&driftwm::config::Action::SetBookmark(name));
+        // The registry change reaches clients only through the per-frame
+        // refresh, so poke a render (nothing else self-schedules one at idle).
+        self.mark_all_dirty();
+    }
+
+    fn workspace_remove(&mut self, name: String) {
+        if self.bookmarks.remove(&name).is_some() {
+            self.session_store_mark_dirty();
+            self.mark_all_dirty();
+        }
+    }
+}
+
+driftwm::delegate_ext_workspace!(DriftWm);
 
 impl smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler for DriftWm {
     fn foreign_toplevel_list_state(
@@ -1036,6 +1170,10 @@ impl SessionLockHandler for DriftWm {
         }
         self.held_action = None;
         self.cursor.grab_cursor = false;
+        // Pick mode makes decoration_cursor true over whole window bodies, so
+        // locking while hovering a pick target would leave it set through the
+        // lock and until the next motion after unlock.
+        self.cursor.decoration_cursor = false;
         // Withheld touch events must never reach an app beneath the lock
         // surface — their deadline timer would otherwise replay them mid-lock.
         self.discard_touch_holdback();

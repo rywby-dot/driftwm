@@ -65,6 +65,11 @@ impl DriftWm {
 
         let keyboard = self.seat.get_keyboard().unwrap();
 
+        // THE GATE for suspended-focus keyboard behavior, captured before the
+        // input closure borrows the keyboard: intent is `Suspended` AND no
+        // higher-priority owner holds the derived seat focus.
+        let suspended_gate = self.gated_suspended_focus();
+
         let action = keyboard.input(
             self,
             keycode,
@@ -124,19 +129,24 @@ impl DriftWm {
                 // PassKeys::Only — forward only the listed combos; rest stay active.
                 // VT-switching above is always handled regardless.
                 // Uses live config so a config-reload takes effect immediately.
-                let focused_pass_keys = state.focused_window().and_then(|w| {
-                    let app_id = w.app_id_or_class().unwrap_or_default();
-                    let title = w.window_title().unwrap_or_default();
-                    state
-                        .config
-                        .resolve_window_rules(&app_id, &title)
-                        .map(|r| r.pass_keys)
-                });
-                if focused_pass_keys
-                    .as_ref()
-                    .is_some_and(|pk| pk.allows_raw(modifiers, sym))
-                {
-                    return FilterResult::Forward;
+                // Skip pass_keys entirely when a suspended window holds the
+                // gated focus: it has no client, so a matching rule would only
+                // Forward bindings (and Enter) into a `None` seat focus.
+                if suspended_gate.is_none() {
+                    let focused_pass_keys = state.focused_window().and_then(|w| {
+                        let app_id = w.app_id_or_class().unwrap_or_default();
+                        let title = w.window_title().unwrap_or_default();
+                        state
+                            .config
+                            .resolve_window_rules(&app_id, &title)
+                            .map(|r| r.pass_keys)
+                    });
+                    if focused_pass_keys
+                        .as_ref()
+                        .is_some_and(|pk| pk.allows_raw(modifiers, sym))
+                    {
+                        return FilterResult::Forward;
+                    }
                 }
 
                 if let Some(action) = state.config.lookup(modifiers, sym) {
@@ -151,6 +161,19 @@ impl DriftWm {
                 {
                     state.suppressed_keys.insert(keycode_u32);
                     return FilterResult::Intercept(Some(action.clone()));
+                }
+
+                // Enter over a focused suspended window relaunches it (bindings
+                // above keep precedence). Suppress the release too so the
+                // adopted client never sees a stray key-up. (The release path
+                // returns above; the `Pressed` guard makes that explicit.)
+                if let Some(id) = suspended_gate
+                    && key_state == KeyState::Pressed
+                    && is_enter_keysym(sym.raw())
+                {
+                    state.suppressed_keys.insert(keycode_u32);
+                    state.relaunch_suspended(id);
+                    return FilterResult::Intercept(None);
                 }
 
                 FilterResult::Forward
@@ -190,14 +213,24 @@ impl DriftWm {
     }
 }
 
+/// Return or keypad-Enter — the relaunch key for a focused suspended window.
+fn is_enter_keysym(raw: u32) -> bool {
+    raw == keysyms::KEY_Return || raw == keysyms::KEY_KP_Enter
+}
+
 /// Tells a held chord modifier apart from a real key landing on top. The
 /// modifier keysyms are the contiguous block Shift_L … Hyper_R, minus the two
 /// lock keysyms in that range (Caps_Lock, Shift_Lock): those toggle rather than
 /// hold, so pressing one should cancel a tap like any other key.
+///
+/// ISO_Level5_Shift (the Mod3 keysym) sits far below that block, so it must
+/// be named separately or `mod3` taps would taint their own chord and never
+/// fire.
 fn is_modifier_keysym(raw: u32) -> bool {
     (keysyms::KEY_Shift_L..=keysyms::KEY_Hyper_R).contains(&raw)
         && raw != keysyms::KEY_Caps_Lock
         && raw != keysyms::KEY_Shift_Lock
+        || raw == keysyms::KEY_ISO_Level5_Shift
 }
 
 /// Tracks held modifier chords so tap-modifier bindings can fire — an action
@@ -276,6 +309,7 @@ mod tests {
             alt,
             shift,
             logo,
+            ..Modifiers::EMPTY
         }
     }
 
@@ -372,5 +406,32 @@ mod tests {
         let alt = m(false, true, false, false);
         t.update(KeyState::Pressed, true, &alt);
         assert_eq!(t.update(KeyState::Released, true, &NONE), Some(alt));
+    }
+
+    #[test]
+    fn mod3_tap_fires_via_is_modifier_keysym() {
+        // Other tests pass a hand-picked `is_modifier` bool; this one runs the
+        // real is_modifier_keysym so a regression there is caught here too.
+        let mut t = TapTracker::default();
+        let mod3 = Modifiers {
+            mod3: true,
+            ..Modifiers::EMPTY
+        };
+        let is_mod3 = is_modifier_keysym(keysyms::KEY_ISO_Level5_Shift);
+        t.update(KeyState::Pressed, is_mod3, &mod3);
+        assert_eq!(t.update(KeyState::Released, is_mod3, &NONE), Some(mod3));
+    }
+
+    #[test]
+    fn mod3_press_would_taint_its_own_chord_if_treated_as_a_normal_key() {
+        // Without the ISO_Level5_Shift carve-out, this press taints the chord
+        // as a non-modifier key, so the release never completes it.
+        let mut t = TapTracker::default();
+        let mod3 = Modifiers {
+            mod3: true,
+            ..Modifiers::EMPTY
+        };
+        t.update(KeyState::Pressed, false, &mod3);
+        assert_eq!(t.update(KeyState::Released, false, &NONE), None);
     }
 }

@@ -9,8 +9,12 @@ fn bare_rule(app_id: Option<&str>, title: Option<&str>) -> WindowRule {
         position: None,
         size: None,
         fullscreen: None,
+        focus_on_open: None,
         widget: false,
         pinned_to_screen: false,
+        suspend_on_close: None,
+        restore_windows: None,
+        preserve_aspect_ratio: false,
         decoration: None,
         blur: false,
         opacity: None,
@@ -537,6 +541,126 @@ fn pinned_to_screen_sticky_across_two_toml_rules() {
     let config = Config::from_toml(toml).unwrap();
     let applied = config.resolve_window_rules("myapp", "title").unwrap();
     assert!(applied.pinned_to_screen);
+}
+
+// ── preserve_aspect_ratio ─────────────────────────────────────────────────────
+
+#[test]
+fn preserve_aspect_ratio_defaults_to_false() {
+    let rule = bare_rule(Some("foot"), None);
+    assert!(!rule.preserve_aspect_ratio);
+    assert!(!AppliedWindowRule::from(&rule).preserve_aspect_ratio);
+}
+
+#[test]
+fn preserve_aspect_ratio_parses_from_toml() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "mpv"
+        preserve_aspect_ratio = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("mpv", "title").unwrap();
+    assert!(applied.preserve_aspect_ratio);
+}
+
+#[test]
+fn preserve_aspect_ratio_is_sticky_on_in_merge_from() {
+    let rule_on = WindowRule {
+        preserve_aspect_ratio: true,
+        ..bare_rule(Some("x"), None)
+    };
+    let rule_off = WindowRule {
+        preserve_aspect_ratio: false,
+        ..bare_rule(Some("x"), None)
+    };
+    let mut applied = AppliedWindowRule::from(&rule_on);
+    applied.merge_from(&rule_off);
+    assert!(applied.preserve_aspect_ratio);
+}
+
+// ── focus_on_open ─────────────────────────────────────────────────────────────
+
+#[test]
+fn focus_on_open_defaults_to_none() {
+    let rule = bare_rule(Some("foot"), None);
+    assert_eq!(rule.focus_on_open, None);
+    assert_eq!(AppliedWindowRule::from(&rule).focus_on_open, None);
+}
+
+#[test]
+fn focus_on_open_parses_false_from_toml() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "my-hud"
+        focus_on_open = false
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let applied = config.resolve_window_rules("my-hud", "title").unwrap();
+    assert_eq!(applied.focus_on_open, Some(false));
+}
+
+#[test]
+fn focus_on_open_last_wins_in_merge_from() {
+    let rule_false = WindowRule {
+        focus_on_open: Some(false),
+        ..bare_rule(Some("x"), None)
+    };
+    let rule_true = WindowRule {
+        focus_on_open: Some(true),
+        ..bare_rule(Some("x"), None)
+    };
+    let mut applied = AppliedWindowRule::from(&rule_false);
+    assert_eq!(applied.focus_on_open, Some(false));
+    applied.merge_from(&rule_true);
+    assert_eq!(applied.focus_on_open, Some(true));
+}
+
+// ── restore_windows ───────────────────────────────────────────────────────────
+
+#[test]
+fn restore_windows_parses_and_merges_last_wins() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "*"
+        restore_windows = false
+
+        [[window_rules]]
+        app_id = "myapp"
+        restore_windows = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("myapp", "")
+            .unwrap()
+            .restore_windows,
+        Some(true)
+    );
+    assert_eq!(
+        config
+            .resolve_window_rules("otherapp", "")
+            .unwrap()
+            .restore_windows,
+        Some(false)
+    );
+}
+
+#[test]
+fn restore_windows_defaults_to_none() {
+    let toml = r#"
+        [[window_rules]]
+        app_id = "myapp"
+        blur = true
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    assert_eq!(
+        config
+            .resolve_window_rules("myapp", "")
+            .unwrap()
+            .restore_windows,
+        None
+    );
 }
 
 #[test]

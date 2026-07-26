@@ -1,0 +1,246 @@
+# Window Suspend & Session Restore
+
+One mechanism backs three related things: a keybindable action that leaves a
+placeholder behind when you close a window, an option that does the same
+automatically for every client-initiated close, and an option that restores
+your whole canvas after a restart.
+
+## Suspended windows
+
+`suspend-window` closes the target window but leaves a **suspended window** —
+a compositor-drawn stand-in — at its exact canvas position and size, with the
+app's name centered in it.
+
+Every stand-in wears the same chrome: a textless title bar (the centered name
+already labels it) carrying a close button. A **server-decorated** window's
+stand-in reuses the bar it already had; a **client-decorated** window's
+stand-in keeps its exact original footprint by shrinking the body under the
+bar, and is handed the full size back when it relaunches. The close button
+dismisses the stand-in — as do `close-window`, a second `suspend-window`
+press, and `msg close`.
+
+It's draggable, resizable, raisable, and focusable like any window. Pressing
+`Enter` while it's focused, or clicking/tapping the centered name, relaunches
+the app; while the relaunch is pending the name reads `<app> launching…`. The
+new window takes over the stand-in's exact geometry and z-order slot.
+
+It's a regular action — bind it in `[keybindings]`, `[mouse]`, `[gestures]`,
+or `[touch]` like any other. There's no default binding:
+
+```toml
+[keybindings]
+"mod+shift+s" = "suspend-window"
+```
+
+Under focus-follows-mouse, an on-window binding's target is just the focused
+window (hovering already focused it) — no special targeting needed.
+
+A few things are deliberately different about a suspended window:
+
+- **Excluded from Alt-Tab and focus history**, the same as a pinned widget —
+  it's still focusable by hovering or clicking, but cycling and MRU never
+  land on it, and neither does a taskbar's window list.
+- **Unpinnable, unfullscreenable, unfittable** — those actions no-op on it.
+
+If the window was fullscreen or screen-pinned when suspended, it's returned
+to the canvas first, at its most recent windowed size.
+
+### The `.desktop` requirement
+
+A suspended window only exists for an app driftwm can relaunch. `suspend-window`
+resolves the target's `app_id` against your installed `.desktop` entries (exact
+filename match, then `StartupWMClass`, then a case-insensitive filename match);
+`Terminal=true` entries don't count — relaunching one would open a bare
+terminal, not the app. No match means no suspended window: the action logs why
+and closes the window normally instead of leaving a placeholder that could
+never come back.
+
+## `suspend_on_close`
+
+```toml
+[session]
+suspend_on_close = true
+```
+
+With this on, a client-initiated close converts into a suspended window
+instead of the window vanishing. This is the only honest way to cover the
+title-bar close button: the compositor never actually sees a CSD `×` click —
+the client just destroys its own toplevel, indistinguishable from `Ctrl+Q` or
+the app quitting on its own. So the flag covers every client-side close of an
+eligible window: SSD `×`, CSD `×`, an in-app quit, a shell exiting in a
+terminal. Widgets and dialogs (a toplevel with a parent) are never eligible —
+same as `suspend-window` itself.
+
+Escape hatches, for closes you want to stay real closes:
+
+- The `close-window` action, `msg close`, and a taskbar's close button all
+  close for real, even with the flag on.
+- Closing a suspended window (its own close button, `close-window` while it's
+  focused, or `msg close`) dismisses it — it doesn't re-suspend.
+- A window rule can override the flag per app:
+
+  ```toml
+  [[window_rules]]
+  app_id            = "kitty"
+  suspend_on_close  = false   # this terminal should always really close
+  ```
+
+> [!TIP]
+> A crash leaves a suspended window too — the compositor can't tell an app
+> crashing from it quitting cleanly. That's a free side effect worth knowing
+> about: with `suspend_on_close` on, a crashed app's window and position
+> aren't just gone, and `Enter` brings it right back.
+
+## `restore_windows`
+
+```toml
+[session]
+restore_windows = true
+```
+
+On a graceful shutdown — `quit`/`Super+Ctrl+Shift+Q` or a logout that sends
+SIGTERM/SIGHUP — every eligible live window is saved. On the next launch they
+come back as dormant suspended windows at the positions they were at; nothing
+auto-launches, you relaunch each one same as any other suspended window (or
+leave it be). A `kill -9`, a crash, or unplugging the machine skips this save
+entirely — those aren't "graceful."
+
+Suspended windows themselves are **always** saved and restored, regardless of
+this flag — they're already an explicit, user-visible artifact on your canvas.
+`restore_windows` only decides whether still-_open_ windows get saved too on
+the way out.
+
+The window you had focused comes back focused too, as focus on its stand-in — so
+it wears a focus ring, `Enter` relaunches it, and `placement = "auto"` puts your
+first new window beside it instead of dropping it in the middle of the viewport.
+A focused _suspended_ window carries its focus across a restart whether or not
+this flag is on; a focused _live_ window is only saved at all when it's on, so
+with it off the canvas comes back unfocused. Either way the focus is only handed
+over once that stand-in is on screen (in practice: `restore_camera` is on, or you
+quit with it in view) — focus you can't see is focus you'd act on by accident, so
+the canvas starts unfocused instead and the record waits for a launch that can
+use it.
+
+A window rule can override the flag per app, in either direction: `false` keeps
+one app off the canvas after a restart while the rest of your session comes back,
+and `true` brings one app back while the flag stays off for everything else.
+
+```toml
+[[window_rules]]
+app_id          = "footclient"
+restore_windows = false
+```
+
+Three things worth knowing about it:
+
+- It's **independent of `suspend_on_close`**. That one governs closes; this one
+  governs the logout save. `suspend_on_close = false` with restore on is a
+  perfectly good combination — the `×` really closes, but a window still open at
+  logout comes back. Set *both* to `false` for an app that should never leave a
+  stand-in behind.
+- A window you suspended **explicitly** still comes back, since that's a
+  deliberate artifact you placed on the canvas. The rule only governs the
+  automatic logout save.
+- **Key it on `app_id`.** Saved records carry no title, so a `title` criterion
+  narrows only what gets *saved*, where the live title is known. On the way back
+  the rule is read off `app_id` alone, so it decides for *every* saved window of
+  that app — a rule matching on both keeps the titled windows out of the save
+  and keeps all of the app's saved records from coming back. A rule matching on
+  `title` alone has nothing to key a record on, so it governs saving only.
+  Records saved before you added the rule stay in the file but sit inert: they
+  stop coming back, and return if you drop the rule again.
+
+## `restore_camera`
+
+```toml
+[session]
+restore_camera = true
+```
+
+With this on, each output's camera position and zoom are restored across
+restarts too, so your canvas comes back framed exactly where you left it. It's
+off by default — the default config starts every output at its centered camera.
+The flag is read at launch, so flipping it mid-session takes effect on the next
+launch, not immediately. (Cameras are always saved regardless, so turning it on
+later restores what your session had.)
+
+## `restore_bookmarks`
+
+```toml
+[session]
+restore_bookmarks = true
+```
+
+Bookmarks (named canvas points — see `[navigation.bookmarks]` and the
+`go-to-bookmark` / `set-bookmark` / `move-to-bookmark` actions) are a runtime
+registry seeded from config. With this off (the default), the registry resets to
+the config seeds on every launch, so a `set-bookmark` or `driftwm msg bookmark`
+edit lasts only for the session. Turn it on to overlay the saved registry on top
+of the config seeds at launch, so a restored bookmark wins per name and config
+seeds fill the names the save lacks. Like the camera flag, it's read at launch.
+
+The session lives at `~/.local/state/driftwm/session.json` (respects
+`XDG_STATE_HOME`). It's written through immediately on anything you'd notice
+(suspending, dismissing, relaunching) and debounced (~1s) for continuous
+changes like dragging a suspended window. A file that fails to parse (wrong
+version, corrupted write) is quarantined to
+`session.json.corrupt.<timestamp>` next to it and startup continues with an
+empty session — a bad file never blocks driftwm from starting.
+
+## Relaunching & matching
+
+Relaunch (`Enter`, clicking the name, or `msg relaunch`) spawns the app with an
+activation token and waits for its window to come back, matching it to the
+stand-in by, in order:
+
+1. **The activation token**, if the app presents it back (most native Wayland
+   toolkits do). This works whether the app maps a fresh window or — as a
+   single-instance app does — forwards the token to its already-running window;
+   either way that window moves into the stand-in's slot, sized to fit. Note
+   that the app picks the answering window: one with several windows open that
+   forwards the token to an existing sibling will have *that* sibling moved,
+   abandoning its old spot.
+2. **App identity**, as a 5-second fallback for apps that ignore the token:
+   the oldest pending relaunch of the same app_id adopts the next window of
+   that app_id to map.
+
+### Limitations
+
+- **Apps that never present the token back** and map no new window (some
+  single-instance apps just focus an existing window without forwarding the
+  activation token) leave nothing to adopt. The stand-in reverts to dormant
+  (showing the app's name again) after about 30 seconds.
+- **The 5-second fallback window is a capture hazard**: if you manually launch
+  another window of the same app while a relaunch is pending, it can get
+  captured into the suspended window's rect instead of the actual relaunch,
+  which then places itself normally.
+- **An app that reports a different `app_id` on relaunch** than it was
+  suspended under only adopts via the activation token — the identity
+  fallback won't recognize it as the same app.
+- **Multiple simultaneous relaunches of the same app** match first-come,
+  first-served by spawn order — with two pending at once, a token-ignoring
+  client can end up adopted into the wrong one's rect.
+- Touch only taps a suspended window (focus, raise, relaunch) — drag-move and
+  drag-resize by touch aren't wired up yet.
+
+## Nested / dev sessions
+
+A nested (winit) driftwm skips durable session persistence by default, so a
+dev session run inside your main one can never clobber it. Opt in with
+`--session-file <path>`:
+
+```bash
+driftwm --backend winit --session-file /tmp/driftwm-dev-session.json
+```
+
+This is unrelated to suspended windows within a single run — those are on the
+canvas the moment they're created, in any backend. Durability, though, needs a
+store: the udev backend uses the default path, and a winit run persists only
+with `--session-file`. Without a store path nothing is written — the flag only
+affects whether a _quit_ is saved to (and a _startup_ is restored from) a file
+at all.
+
+## IPC
+
+Suspended windows are visible and controllable over the [IPC](ipc.md) socket
+too — see [IPC › Suspended windows](ipc.md#suspended-windows).

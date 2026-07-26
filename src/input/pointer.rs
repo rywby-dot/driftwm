@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use smithay::{
@@ -14,16 +13,20 @@ use smithay::{
         calloop::timer::{TimeoutAction, Timer},
         wayland_protocols::xdg::shell::server::xdg_toplevel,
     },
-    utils::{Point, SERIAL_COUNTER},
+    utils::{Point, SERIAL_COUNTER, Size},
     wayland::compositor::with_states,
 };
 
 use smithay::wayland::seat::WaylandFocus;
 
+use std::rc::Rc;
+
 use crate::decorations::DecorationHit;
-use crate::grabs::{MoveSurfaceGrab, NavigateGrab, PanGrab, ResizeState, ResizeSurfaceGrab};
+use crate::grabs::{MIN_SUSPENDED_SIZE, MoveGrab, NavigateGrab, PanGrab, ResizeGrab, ResizeState};
+use crate::input::DecoTarget;
 use crate::state::{
-    ClusterResizeSnapshot, DriftWm, FocusTarget, PendingMiddleClick, ZoomAnimationAnchor,
+    CLICK_NAVIGATE_SLOP, ClusterMember, ClusterResizeSnapshot, DriftWm, FocusTarget,
+    PendingMiddleClick, PickTarget, StageWindow, SuspendedWindow, ZoomAnimationAnchor,
 };
 use driftwm::canvas::{self, CanvasPos, canvas_to_screen};
 use driftwm::config::{self, BindingContext, MouseAction};
@@ -68,15 +71,21 @@ impl DriftWm {
         (binding, has_modifier)
     }
 
-    /// Keep `held_buttons` in sync with a button event. Must run for every
-    /// button event on every dispatch path (including the locked-session one),
-    /// or a release missed while locked leaves a stuck entry that suppresses
-    /// hot corners until the button is pressed and released again.
-    pub(super) fn track_held_button(&mut self, button: u32, state: ButtonState) {
+    /// Keep `held_buttons` in sync with a button event, and drain the
+    /// pick-swallowed set on release. Must run for every button event on every
+    /// dispatch path (including the locked-session one), or a release missed
+    /// while locked leaves a stuck entry that suppresses hot corners until the
+    /// button is pressed and released again — and, for the pick set, suppresses
+    /// a later real release. Returns `true` when this release lifts a button
+    /// whose press pick mode swallowed, so the caller suppresses the client
+    /// forward too.
+    pub(super) fn track_held_button(&mut self, button: u32, state: ButtonState) -> bool {
         if state == ButtonState::Pressed {
             self.held_buttons.insert(button);
+            false
         } else {
             self.held_buttons.remove(&button);
+            self.pick_swallowed_buttons.remove(&button)
         }
     }
 
@@ -87,7 +96,7 @@ impl DriftWm {
     pub(super) fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
         let button = event.button_code();
         let button_state = event.state();
-        self.track_held_button(button, button_state);
+        let released_pick_swallow = self.track_held_button(button, button_state);
 
         // Outputs can transiently disappear (cable unplug, GPU resume race);
         // bail out so downstream active_output() / position lookups can't panic.
@@ -112,6 +121,9 @@ impl DriftWm {
             // which keeps the pending because another held button lifting isn't
             // a new interaction.
             self.cancel_click_navigate();
+            // A new press is a fresh interaction: drop any armed pick so it
+            // can't fire after an unrelated click (mirrors the line above).
+            self.cancel_pick();
             self.set_last_scroll_pan(None);
             self.with_output_state(|os| os.momentum.stop());
 
@@ -189,8 +201,9 @@ impl DriftWm {
                             .active_fullscreen_window()
                             .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())))
                         {
-                            let already =
-                                self.window_focus.as_ref().is_some_and(|f| f.0 == surface.0);
+                            let already = self
+                                .window_focus_surface()
+                                .is_some_and(|f| f.0 == surface.0);
                             if !already {
                                 let focus_serial = SERIAL_COUNTER.next_serial();
                                 self.set_window_focus(Some(surface), focus_serial);
@@ -247,12 +260,30 @@ impl DriftWm {
                 return;
             }
 
+            // Pick mode (below `zoom_interact_min`): a canvas window or stand-in
+            // is one uniform target — swallow the press and arm a center / drag
+            // move. Sits before try_suspended_button so the stand-in chrome (×,
+            // relaunch label, resize border) is bypassed below the threshold.
+            if self.try_pick_button(&pointer, pos, button, serial, mods) {
+                return;
+            }
+
+            // Suspended windows are opaque: any button over one is consumed here
+            // (chrome interactions, window move/resize, else focus + swallow),
+            // never leaking to a window/layer beneath. Modifier bindings that
+            // aren't window move/resize pass through (bindings beat chrome).
+            if self.try_suspended_button(&pointer, pos, button, serial, mods) {
+                return;
+            }
+
             // `modifier_binding` gates the chrome paths below.
             let context = self.pointer_context(pos);
             let (binding, modifier_binding) = self.modifier_button_binding(&mods, button, context);
 
             // SSD decoration clicks: title bar → move, close button → close, resize border → resize
-            if !modifier_binding && let Some((window, hit)) = self.decoration_under(pos) {
+            if !modifier_binding
+                && let Some((DecoTarget::Client(window), hit)) = self.decoration_under(pos)
+            {
                 // Decoration interactions must only apply to the topmost window.
                 // Otherwise a lower SSD title bar/border can steal clicks through
                 // an overlapping window.
@@ -271,7 +302,7 @@ impl DriftWm {
                     if button == config::BTN_LEFT {
                         match hit {
                             DecorationHit::CloseButton => {
-                                self.request_window_close(&window);
+                                window.send_close();
                                 return;
                             }
                             DecorationHit::TitleBar if !is_widget => {
@@ -314,13 +345,13 @@ impl DriftWm {
                                 // Moving re-anchors the window, so a fill restore
                                 // point (which includes position) no longer applies.
                                 self.stage.clear_fill(&window);
-                                let grab = MoveSurfaceGrab::new(
+                                self.arm_interactive_move(&window);
+                                let grab = MoveGrab::new(
                                     start_data,
                                     window,
                                     initial_window_location,
                                     output,
                                     Vec::new(),
-                                    HashSet::new(),
                                 );
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
                                 return;
@@ -377,10 +408,13 @@ impl DriftWm {
                             };
                             // Only MoveSnappedWindows captures the cluster;
                             // plain MoveWindow stays strictly single-window.
-                            let (cluster_members, cluster_member_surfaces) = if want_cluster {
-                                self.cluster_snapshot_for_drag(&window, initial_window_location)
+                            let cluster_members = if want_cluster {
+                                self.cluster_snapshot_for_drag(
+                                    &StageWindow::Client(window.clone()),
+                                    initial_window_location,
+                                )
                             } else {
-                                (Vec::new(), HashSet::new())
+                                Vec::new()
                             };
                             // Re-anchoring invalidates any fill restore point —
                             // for the primary and every member dragged along.
@@ -388,13 +422,13 @@ impl DriftWm {
                             for (member, _) in &cluster_members {
                                 self.stage.clear_fill(member);
                             }
-                            let grab = MoveSurfaceGrab::new(
+                            self.arm_interactive_move(&window);
+                            let grab = MoveGrab::new(
                                 start_data,
                                 window,
                                 initial_window_location,
                                 output,
                                 cluster_members,
-                                cluster_member_surfaces,
                             );
                             pointer.set_grab(self, grab, serial, Focus::Clear);
                             return;
@@ -458,6 +492,13 @@ impl DriftWm {
                             self.element_under(pos).map(|(w, l)| (w.clone(), l))
                         {
                             self.raise_and_focus(&window, serial);
+                        } else if let Some((DecoTarget::Suspended(s), _)) =
+                            self.decoration_under(pos)
+                        {
+                            // Occlusion-aware `element_under` returns nothing over
+                            // a stand-in; raise the stand-in itself instead of a
+                            // client hidden beneath it.
+                            self.focus_and_raise_suspended(s.id);
                         }
                         self.execute_action(action);
                         return;
@@ -498,20 +539,36 @@ impl DriftWm {
             }
         }
 
-        pointer.button(
-            self,
-            &ButtonEvent {
-                button,
-                state: button_state,
-                serial,
-                time: Event::time_msec(&event),
-            },
-        );
-        pointer.frame(self);
+        // A pick-mode press was swallowed; its release resolves the pick and is
+        // itself swallowed (never forwarded to a client that never saw the
+        // press). Resolve *before* the forward below, because that forward tears
+        // down any active grab and resolve's is_grabbed() guard must still see a
+        // gesture/edge-pan grab. A promoted move grab, though, must still receive
+        // the release to self-terminate, so only suppress the forward when no
+        // grab is active.
+        let released = button_state == ButtonState::Released;
+        let suppress_forward = released && released_pick_swallow && !pointer.is_grabbed();
+        if released {
+            self.resolve_pick(button);
+        }
+
+        if !suppress_forward {
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button,
+                    state: button_state,
+                    serial,
+                    time: Event::time_msec(&event),
+                },
+            );
+            pointer.frame(self);
+        }
 
         // Resolve only after the release forwards to the client, so the app
-        // still sees the click.
-        if button_state == ButtonState::Released {
+        // still sees the click. (Inert in pick mode: the press was consumed
+        // before arm_click_navigate could run.)
+        if released {
             self.resolve_click_navigate(button, pointer.current_location());
         }
     }
@@ -537,7 +594,11 @@ impl DriftWm {
         };
         let canvas_pos_0 = pointer.current_location();
         let screen_pos_0 = canvas_to_screen(CanvasPos(canvas_pos_0), self.camera(), self.zoom()).0;
-        let Some((focus, adjusted_0)) = self.pointer_focus_under(screen_pos_0, canvas_pos_0) else {
+        // Pick variant: in pick mode a canvas window yields None here, so
+        // `focus != target` bails — the intended outcome, since this grab is
+        // only for screen-space (layer / pinned) content, never a pick target.
+        let Some((focus, adjusted_0)) = self.pointer_focus_under_pick(screen_pos_0, canvas_pos_0)
+        else {
             return;
         };
         if focus != target {
@@ -559,6 +620,347 @@ impl DriftWm {
             screen_loc,
         };
         pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Keep);
+    }
+
+    /// Dispatch a button press over a suspended window. Suspended windows are
+    /// opaque, so this consumes every button over one (returning `true`) unless
+    /// a non-move/resize modifier binding should beat the chrome, in which case
+    /// it defers to normal dispatch.
+    pub(crate) fn try_suspended_button(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        mods: smithay::input::keyboard::ModifiersState,
+    ) -> bool {
+        let Some((DecoTarget::Suspended(s), hit)) = self.decoration_under(pos) else {
+            return false;
+        };
+        let id = s.id;
+
+        // A held-modifier move/resize binding grabs the stand-in; other modifier
+        // bindings defer to normal dispatch. A bare binding does NOT beat chrome —
+        // the opaque frame acts like a title bar.
+        let (binding, modifier_binding) =
+            self.modifier_button_binding(&mods, button, BindingContext::OnWindow);
+        match binding {
+            Some(action @ (MouseAction::MoveWindow | MouseAction::MoveSnappedWindows))
+                if modifier_binding =>
+            {
+                // Only `MoveSnappedWindows` carries the cluster; plain
+                // `MoveWindow` stays single-window — same as the client path.
+                let want_cluster = matches!(action, MouseAction::MoveSnappedWindows);
+                self.focus_and_raise_suspended(id);
+                self.start_suspended_move(pointer, &s, pos, button, serial, want_cluster);
+                return true;
+            }
+            Some(action @ (MouseAction::ResizeWindow | MouseAction::ResizeWindowSnapped))
+                if modifier_binding =>
+            {
+                // Derive cluster participation from the binding variant, like a
+                // client's modifier resize — not from the SSD-border config flag.
+                let want_cluster = matches!(action, MouseAction::ResizeWindowSnapped);
+                self.focus_and_raise_suspended(id);
+                self.start_suspended_resize(pointer, &s, pos, button, serial, None, want_cluster);
+                return true;
+            }
+            Some(_) if modifier_binding => return false,
+            _ => {}
+        }
+
+        if button == config::BTN_LEFT {
+            match hit {
+                DecorationHit::CloseButton => self.dismiss_suspended(id),
+                DecorationHit::Label => {
+                    self.focus_and_raise_suspended(id);
+                    self.relaunch_suspended(id);
+                }
+                DecorationHit::TitleBar => {
+                    self.focus_and_raise_suspended(id);
+                    self.start_suspended_move(pointer, &s, pos, button, serial, false);
+                }
+                DecorationHit::ResizeBorder(edge) => {
+                    self.focus_and_raise_suspended(id);
+                    // A border drag has no modifier context, so it follows the
+                    // config flag — same as a client's SSD-border resize.
+                    let want_cluster = self.config.decoration_resize_snapped;
+                    self.start_suspended_resize(
+                        pointer,
+                        &s,
+                        pos,
+                        button,
+                        serial,
+                        Some(edge),
+                        want_cluster,
+                    );
+                }
+                DecorationHit::Body => {
+                    // The body is focus-only for every stand-in — the bar drags.
+                    self.focus_and_raise_suspended(id);
+                }
+            }
+            return true;
+        }
+
+        // Any other button over the opaque frame: focus + swallow so nothing
+        // beneath receives it.
+        self.focus_and_raise_suspended(id);
+        true
+    }
+
+    /// Dispatch a button press in pick mode (below `zoom_interact_min`), where a
+    /// canvas window or stand-in is one uniform target: the whole body picks or
+    /// drag-moves it, chrome and all. Returns `true` when consumed. Bypassed
+    /// above the threshold, and empty canvas falls through to on-canvas bindings.
+    pub(crate) fn try_pick_button(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        mods: smithay::input::keyboard::ModifiersState,
+    ) -> bool {
+        if !self.pick_mode() {
+            return false;
+        }
+        // A live popup grab must keep routing the press or the popup can never
+        // dismiss on click-outside (PopupPointerGrab::button ungrabs only on a
+        // Pressed event), same hazard guarded in maybe_grab_screen_space_click.
+        if pointer.is_grabbed() {
+            return false;
+        }
+        // Configured held-modifier bindings win, so e.g. alt+drag still moves a
+        // single window. Hardcode OnWindow rather than calling pointer_context
+        // (which runs three hit-tests the target lookup below repeats);
+        // try_suspended_button re-runs this same lookup harmlessly on the
+        // fall-through.
+        let (_, modifier_binding) =
+            self.modifier_button_binding(&mods, button, BindingContext::OnWindow);
+        if modifier_binding {
+            return false;
+        }
+
+        // Resolve the target through the shared helper so the swallowed press,
+        // the hover affordance and the scroll fallback can't disagree on what a
+        // click hits — chrome included, which an element_under (surface-bbox)
+        // lookup would miss, leaving the SSD title bar / close / borders live.
+        let Some(target) = self.pick_target_under(pos) else {
+            // Empty canvas (or a widget / canvas layer, which stay interactive):
+            // fall through to the normal on-canvas dispatch.
+            return false;
+        };
+
+        // Record the swallowed press so its release is swallowed too (drained in
+        // track_held_button). Focus + raise like the suspended-tail precedent; a
+        // left press also arms the center to fire on release.
+        self.pick_swallowed_buttons.insert(button);
+        match &target {
+            PickTarget::Client(window) => self.raise_and_focus(window, serial),
+            PickTarget::Suspended(id) => self.focus_and_raise_suspended(*id),
+        }
+        if button == config::BTN_LEFT {
+            self.arm_pick(target, pos, button);
+        }
+        true
+    }
+
+    /// Once a pick-mode press has dragged past the click slop, promote it to a
+    /// move grab (drag anywhere moves the target) and cancel the armed center.
+    /// Called from both motion handlers before `pointer.motion` so the grab sees
+    /// the triggering event. Returns `true` when it installed a grab.
+    pub(crate) fn maybe_promote_pick(
+        &mut self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> bool {
+        let Some(pending) = self.pending_pick.as_ref() else {
+            return false;
+        };
+        let button = pending.button;
+        let output = pending.output.clone();
+        let press_screen_pos = pending.press_screen_pos;
+        let target = pending.target.clone();
+
+        // A release lost while locked or after an output drop never reaches the
+        // resolve tail, leaving the pick armed. Without this, the first drag
+        // afterwards would install a move grab with no button held — the window
+        // glued to the cursor. held_buttons is kept in sync on every path.
+        if !self.held_buttons.contains(&button) {
+            self.cancel_pick();
+            return false;
+        }
+        let pointer = self.seat.get_pointer().unwrap();
+        // set_grab would overwrite a live grab (e.g. a concurrent popup).
+        if pointer.is_grabbed() {
+            return false;
+        }
+        // Cross-output travel makes the press screen coords incomparable, same
+        // guard as PendingClickNavigate::output.
+        if self.active_output().as_ref() != Some(&output) {
+            return false;
+        }
+        let cur_screen = canvas_to_screen(CanvasPos(canvas_pos), self.camera(), self.zoom()).0;
+        let dx = cur_screen.x - press_screen_pos.x;
+        let dy = cur_screen.y - press_screen_pos.y;
+        if dx * dx + dy * dy <= CLICK_NAVIGATE_SLOP * CLICK_NAVIGATE_SLOP {
+            return false;
+        }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        // A drag, not a click: drop the center (else dragging past the slop and
+        // back within it would move *and* center).
+        self.cancel_pick();
+        match target {
+            PickTarget::Client(window) => {
+                let Some(initial_window_location) = self.stage.position_of(&window) else {
+                    return false;
+                };
+                let Some(output) = self.active_output() else {
+                    return false;
+                };
+                // The fill restore point references the pre-drag position.
+                self.stage.clear_fill(&window);
+                self.arm_interactive_move(&window);
+                let start_data = GrabStartData {
+                    focus: None,
+                    button,
+                    location: canvas_pos,
+                };
+                let grab = MoveGrab::new(
+                    start_data,
+                    window,
+                    initial_window_location,
+                    output,
+                    Vec::new(),
+                );
+                // Own the cursor for the drag; the grab's unset restores it only
+                // because grab_cursor is set here.
+                self.cursor.grab_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Grabbing);
+                pointer.set_grab(self, grab, serial, Focus::Clear);
+            }
+            PickTarget::Suspended(id) => {
+                let Some(s) = self.find_suspended(id) else {
+                    return false;
+                };
+                // Take the cursor only once the grab is certain — start_suspended_move
+                // has its own silent bails, and a stale grab_cursor would latch
+                // the Grabbing icon forever (update_decoration_cursor early-returns
+                // on it). start_suspended_move clears fill and installs the grab.
+                if !self.start_suspended_move(&pointer, &s, canvas_pos, button, serial, false) {
+                    return false;
+                }
+                self.cursor.grab_cursor = true;
+                self.cursor.cursor_status = CursorImageStatus::Named(CursorIcon::Grabbing);
+            }
+        }
+        true
+    }
+
+    /// Returns `true` when the grab was installed; `false` on a silent bail
+    /// (no position or no active output), so callers that own the cursor can
+    /// avoid latching a grab icon on a move that never started.
+    pub(super) fn start_suspended_move(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        want_cluster: bool,
+    ) -> bool {
+        let element = StageWindow::Suspended(s.clone());
+        let Some(origin) = self.stage.position_of(&element) else {
+            return false;
+        };
+        let Some(output) = self.active_output() else {
+            return false;
+        };
+        // Only a cluster-move binding (`MoveSnappedWindows`) carries the
+        // cluster; a plain move / title-bar / body drag stays single-window,
+        // mirroring the client move dispatch.
+        let cluster_members = if want_cluster {
+            self.cluster_snapshot_for_drag(&element, origin)
+        } else {
+            Vec::new()
+        };
+        // Re-anchoring the primary and every member invalidates their fill
+        // restore points.
+        self.stage.clear_fill(&element);
+        for (member, _) in &cluster_members {
+            self.stage.clear_fill(member);
+        }
+        let start_data = GrabStartData {
+            focus: None,
+            button,
+            location: pos,
+        };
+        self.arm_interactive_move(&s.id);
+        let grab = MoveGrab::new(start_data, s.id, origin, output, cluster_members);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_suspended_resize(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<DriftWm>,
+        s: &Rc<SuspendedWindow>,
+        pos: Point<f64, smithay::utils::Logical>,
+        button: u32,
+        serial: smithay::utils::Serial,
+        explicit_edge: Option<xdg_toplevel::ResizeEdge>,
+        want_cluster: bool,
+    ) {
+        let element = StageWindow::Suspended(s.clone());
+        let Some(origin) = self.stage.position_of(&element) else {
+            return;
+        };
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        let size = s.size.get();
+        let edges = explicit_edge.unwrap_or_else(|| edges_from_position(pos, origin, size));
+        self.cursor.grab_cursor = true;
+        self.cursor.cursor_status = CursorImageStatus::Named(resize_cursor(edges));
+        let start_data = GrabStartData {
+            focus: None,
+            button,
+            location: pos,
+        };
+        // Snapshot the cluster only when the caller opted in — the binding
+        // variant (`ResizeWindowSnapped`) for a modifier resize, the config flag
+        // for an SSD-border drag — mirroring the client resize path.
+        let cluster_resize = if want_cluster {
+            self.cluster_snapshot_for_resize(&element, edges)
+        } else {
+            ClusterResizeSnapshot::empty()
+        };
+        let grab = ResizeGrab {
+            start_data,
+            target: ClusterMember::Suspended(s.id),
+            edges,
+            initial_window_location: origin,
+            initial_window_size: size,
+            last_window_size: size,
+            output,
+            last_clamped_location: pos,
+            snap: driftwm::layout::snap::SnapState::default(),
+            // A stand-in has no client-declared min/max; fold its usable-chrome
+            // floor into the shared constraints so the apply head clamps it just
+            // like a client minimum.
+            constraints: crate::grabs::SizeConstraints {
+                min: Size::from((MIN_SUSPENDED_SIZE, MIN_SUSPENDED_SIZE)),
+                max: Size::from((0, 0)),
+            },
+            cluster_resize,
+            pinned_initial_screen_pos: None,
+            touch_start: None,
+            touch_slots: 0,
+            locked_ratio: None,
+        };
+        self.arm_interactive_move(&s.id);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     /// Dispatch a left/other button press over a screen-pinned window in screen
@@ -594,7 +996,7 @@ impl DriftWm {
                 .and_then(|s| config::applied_rule(&s))
                 .is_some_and(|r| r.widget);
             match hit {
-                DecorationHit::CloseButton => self.request_window_close(&window),
+                DecorationHit::CloseButton => window.send_close(),
                 DecorationHit::TitleBar if !is_widget => {
                     self.raise_and_focus(&window, serial);
                     self.start_pinned_move(pointer, &window, pos, button, serial);
@@ -714,7 +1116,8 @@ impl DriftWm {
             button,
             location: pos,
         };
-        let grab = MoveSurfaceGrab::new_pinned(start_data, window.clone(), output, grab_offset);
+        self.arm_interactive_move(window);
+        let grab = MoveGrab::new_pinned(start_data, window.clone(), output, grab_offset);
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
@@ -808,6 +1211,7 @@ impl DriftWm {
                     initial_window_location,
                     initial_window_size,
                     initial_screen_pos: pinned_initial_screen_pos,
+                    last_committed_size: initial_window_size,
                 });
         });
 
@@ -839,14 +1243,15 @@ impl DriftWm {
         // the motion-time cascade and `snap_targets` sees no exclusions —
         // exactly the pre-slice-2 behavior.
         let cluster_resize = if want_cluster && pinned_initial_screen_pos.is_none() {
-            self.cluster_snapshot_for_resize(window, edges)
+            self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
         } else {
             ClusterResizeSnapshot::empty()
         };
         let constraints = crate::grabs::SizeConstraints::for_window(window);
-        let grab = ResizeSurfaceGrab {
+        let locked_ratio = crate::grabs::locked_ratio_for(window, initial_window_size);
+        let grab = ResizeGrab {
             start_data,
-            window: window.clone(),
+            target: ClusterMember::Client(window.clone()),
             edges,
             initial_window_location,
             initial_window_size,
@@ -859,6 +1264,7 @@ impl DriftWm {
             pinned_initial_screen_pos,
             touch_start: None,
             touch_slots: 0,
+            locked_ratio,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
@@ -881,6 +1287,18 @@ impl DriftWm {
         let pointer = self.seat.get_pointer().unwrap();
         let mut pos = pointer.current_location();
         let source = event.source();
+
+        // Scroll over an opaque suspended window is swallowed: there's no client
+        // to forward it to, and it must not pan/zoom the canvas beneath.
+        if matches!(
+            self.decoration_under(pos),
+            Some((DecoTarget::Suspended(_), _))
+        ) {
+            let frame = AxisFrame::new(Event::time_msec(&event));
+            pointer.axis(self, frame);
+            pointer.frame(self);
+            return;
+        }
 
         // Discrete wheel-notch bindings (wheel-up / wheel-down) run any
         // action once per notch — volume on mod+shift+scroll and the like.
@@ -965,11 +1383,27 @@ impl DriftWm {
         };
 
         // Single lookup: context-aware
-        if let Some(action) = self
+        let mut action = self
             .config
             .mouse_scroll_lookup_ctx(&mods, source, context)
-            .cloned()
-        {
+            .cloned();
+
+        // Pick mode cuts a canvas window off from pointer focus, so a bare
+        // scroll over one finds no binding (OnWindow is empty and the `anywhere`
+        // scroll defaults are all mod-qualified) and would dispatch to a client
+        // that can't receive it — dying silently. Retry against OnCanvas so it
+        // pans instead. Gated on a non-widget canvas window actually being under
+        // the pointer (the same surface-tree test pick mode suppresses on), so
+        // widget / canvas-layer scroll stays interactive and still reaches the
+        // client.
+        if action.is_none() && self.pick_mode() && self.pick_target_under(pos).is_some() {
+            action = self
+                .config
+                .mouse_scroll_lookup_ctx(&mods, source, BindingContext::OnCanvas)
+                .cloned();
+        }
+
+        if let Some(action) = action {
             match action {
                 MouseAction::PanViewport => {
                     let h = event.amount(Axis::Horizontal).unwrap_or(0.0);
@@ -984,7 +1418,14 @@ impl DriftWm {
                         self.drift_pan(canvas_delta, Event::time_msec(&event));
                         let new_pos = pos + canvas_delta;
                         let serial = SERIAL_COUNTER.next_serial();
-                        let under = self.surface_under(new_pos, None);
+                        // Suspended-aware cascade: a stand-in under the panned
+                        // cursor yields no focus, matching a real motion. Uses
+                        // the pick variant — routing only the obvious motion
+                        // sites would let this re-dispatch restore client focus
+                        // on every scroll event, undoing the pick guard.
+                        let screen_pos =
+                            canvas_to_screen(CanvasPos(new_pos), self.camera(), self.zoom()).0;
+                        let under = self.pointer_focus_under_pick(screen_pos, new_pos);
                         pointer.motion(
                             self,
                             under,
@@ -1025,18 +1466,9 @@ impl DriftWm {
                                 os.overview_return = None;
                                 os.momentum.stop();
                             });
-
-                            let under = self.surface_under(pos, None);
-                            let serial = SERIAL_COUNTER.next_serial();
-                            pointer.motion(
-                                self,
-                                under,
-                                &MotionEvent {
-                                    location: pos,
-                                    serial,
-                                    time: Event::time_msec(&event),
-                                },
-                            );
+                            // No resync here: zoom is unchanged until the
+                            // animation ticks, which warp through the guarded
+                            // focus path.
                         }
                     }
                 }

@@ -5,7 +5,6 @@
 //! only reached through swipe and DoubletapSwipe begin paths.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 
 use smithay::{
     backend::input::{
@@ -28,9 +27,9 @@ use driftwm::config::{
 };
 use driftwm::layout::snap::SnapState;
 
-use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab};
+use crate::grabs::{MoveGrab, ResizeGrab, ResizeState};
 use crate::input::pointer::{edges_from_position, resize_cursor};
-use crate::state::{DriftWm, FocusTarget};
+use crate::state::{ClusterMember, DriftWm, FocusTarget, StageWindow};
 
 use super::{GestureState, direction_from_vector};
 
@@ -420,7 +419,7 @@ impl DriftWm {
         self.gesture_output = None;
     }
 
-    /// Enter Swipe3Move state: focus + raise the window, set a MoveSurfaceGrab
+    /// Enter Swipe3Move state: focus + raise the window, set a MoveGrab
     /// on the pointer so gesture updates just warp the cursor and the grab
     /// handles window positioning (identical to Alt+click drag). Pinned windows
     /// get the screen-space pinned grab; widgets fall through to Swipe3Pan.
@@ -435,7 +434,7 @@ impl DriftWm {
             return;
         }
         let serial = SERIAL_COUNTER.next_serial();
-        self.raise_with_children(&window);
+        self.raise_with_children(&StageWindow::Client(window.clone()));
         let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
             return;
         };
@@ -452,10 +451,13 @@ impl DriftWm {
         }
 
         let initial_window_location = self.stage.position_of(&window).unwrap_or_default();
-        let (members, surfaces) = if cluster {
-            self.cluster_snapshot_for_drag(&window, initial_window_location)
+        let members = if cluster {
+            self.cluster_snapshot_for_drag(
+                &StageWindow::Client(window.clone()),
+                initial_window_location,
+            )
         } else {
-            (Vec::new(), HashSet::new())
+            Vec::new()
         };
         let pointer = self.seat.get_pointer().unwrap();
         let Some(output) = self.active_output() else {
@@ -467,7 +469,8 @@ impl DriftWm {
         for (member, _) in &members {
             self.stage.clear_fill(member);
         }
-        let grab = MoveSurfaceGrab::new(
+        self.arm_interactive_move(&window);
+        let grab = MoveGrab::new(
             GrabStartData {
                 focus: None,
                 button: 0, // no physical button — gesture-initiated
@@ -477,14 +480,13 @@ impl DriftWm {
             initial_window_location,
             output,
             members,
-            surfaces,
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
 
         self.gesture_state = Some(GestureState::SwipeMove);
     }
 
-    /// Set up a ResizeSurfaceGrab on the pointer so gesture updates just warp
+    /// Set up a ResizeGrab on the pointer so gesture updates just warp
     /// the cursor and the grab handles the resize (mirrors `start_gesture_move`
     /// / Alt+RMB drag).
     ///
@@ -499,7 +501,7 @@ impl DriftWm {
         let Some(wl_surface) = window.wl_surface().map(|s| s.into_owned()) else {
             return;
         };
-        self.raise_with_children(&window);
+        self.raise_with_children(&StageWindow::Client(window.clone()));
         self.set_window_focus(Some(FocusTarget(wl_surface.clone())), serial);
         self.enforce_below_windows();
 
@@ -541,6 +543,7 @@ impl DriftWm {
                     initial_window_location: initial_location,
                     initial_window_size: initial_size,
                     initial_screen_pos: None,
+                    last_committed_size: initial_size,
                 });
         });
 
@@ -557,21 +560,22 @@ impl DriftWm {
         // variant snapshots the cluster. Plain gesture resize builds an
         // empty snapshot and behaves as single-window.
         let cluster_resize = if want_cluster {
-            self.cluster_snapshot_for_resize(&window, edges)
+            self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
         } else {
             crate::state::ClusterResizeSnapshot::empty()
         };
         let constraints = crate::grabs::SizeConstraints::for_window(&window);
+        let locked_ratio = crate::grabs::locked_ratio_for(&window, initial_size);
         let Some(output) = self.active_output() else {
             return;
         };
-        let grab = ResizeSurfaceGrab {
+        let grab = ResizeGrab {
             start_data: GrabStartData {
                 focus: None,
                 button: 0, // no physical button — gesture-initiated
                 location: pos,
             },
-            window,
+            target: ClusterMember::Client(window),
             edges,
             initial_window_location: initial_location,
             initial_window_size: initial_size,
@@ -584,6 +588,7 @@ impl DriftWm {
             pinned_initial_screen_pos: None,
             touch_start: None,
             touch_slots: 0,
+            locked_ratio,
         };
         let pointer = self.seat.get_pointer().unwrap();
         pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -625,9 +630,12 @@ impl DriftWm {
         // `element_under` misses it; fall back to a decoration hit-test.
         self.element_under(pos)
             .map(|(w, l)| (w.clone(), l))
-            .or_else(|| {
-                self.decoration_under(pos)
-                    .and_then(|(w, _)| self.stage.position_of(&w).map(|l| (w, l)))
+            .or_else(|| match self.decoration_under(pos) {
+                // Suspended windows have no client to forward a gesture to.
+                Some((crate::input::DecoTarget::Client(w), _)) => {
+                    self.stage.position_of(&w).map(|l| (w, l))
+                }
+                _ => None,
             })
     }
 

@@ -65,10 +65,26 @@ pub enum Request {
     },
     /// Close a window (the focused one when `None`); errors when nothing matches.
     Close(Option<WindowSelector>),
+    /// Suspend a window (the focused one when `None`) — routes through the same
+    /// path as the `suspend-window` action, targeted at the selected window.
+    Suspend(Option<WindowSelector>),
+    /// Relaunch a suspended window (the focused stand-in when `None`).
+    Relaunch(Option<WindowSelector>),
     /// Run a config action by its config-grammar string, e.g. `"switch-layout
     /// next"`. Any keybindable action is reachable, so one-shot ops live here
     /// rather than as their own commands.
     Action(String),
+    /// List, get, set, or delete bookmarks (name → canvas point, Y-up). All
+    /// fields default: no `name` + `!delete` lists all; `name` alone gets; `name`
+    /// + `to` sets/creates; `delete` + `name` removes. Never touches zoom.
+    Bookmark {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        to: Option<(f64, f64)>,
+        #[serde(default)]
+        delete: bool,
+    },
     /// Capture to a PNG at `path` (absolute), at `scale` pixels per canvas unit.
     /// Windows render with full chrome; `region`/`all` include the background, a
     /// `window` capture stays transparent (see [`ScreenshotTarget`]).
@@ -114,7 +130,9 @@ pub enum Response {
     },
     Zoom(f64),
     Layout(String),
-    State(StateInfo),
+    /// Boxed so the whole-state snapshot doesn't bloat every other (tiny)
+    /// reply variant. Serde-transparent, so the wire shape is unchanged.
+    State(Box<StateInfo>),
     DebugCounters(BTreeMap<String, usize>),
     Focused(Option<FocusedWindow>),
     /// Window-center, Y-up coordinates.
@@ -129,6 +147,13 @@ pub enum Response {
         path: String,
         width: u32,
         height: u32,
+    },
+    /// Every bookmark, name → [x, y] (Y-up), sorted by name.
+    Bookmarks(BTreeMap<String, [f64; 2]>),
+    /// One bookmark's canvas point (Y-up), echoed on get and set.
+    Bookmark {
+        x: f64,
+        y: f64,
     },
     Ok,
 }
@@ -173,6 +198,11 @@ pub struct StateInfo {
     /// the top-level `camera`.
     #[serde(default)]
     pub outputs: Vec<OutputInfo>,
+    /// The focused output's active bookmark — the bookmark nearest its usable
+    /// center among those visible, or `None` when no bookmark is in view. The
+    /// same value the ext-workspace-v1 protocol marks `active`.
+    #[serde(default)]
+    pub active_bookmark: Option<String>,
 }
 
 /// One output's viewport in the `state` reply. `camera` is the viewport
@@ -184,6 +214,10 @@ pub struct OutputInfo {
     pub zoom: f64,
     pub size: [i32; 2],
     pub active: bool,
+    /// This output's active bookmark (nearest visible to its usable center),
+    /// or `None` when no bookmark is in view.
+    #[serde(default)]
+    pub active_bookmark: Option<String>,
 }
 
 /// A line pushed to a subscribed connection. Not wrapped in a `Reply` —
@@ -208,6 +242,11 @@ pub struct WindowInfo {
     pub size: [i32; 2],
     pub is_focused: bool,
     pub is_widget: bool,
+    /// A compositor-drawn stand-in for a suspended window (no live client).
+    /// `position`/`size` describe its canvas rect; the `id` selector focuses,
+    /// moves, or dismisses it.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 /// A fullscreen window in the IPC `state` reply — one per fullscreened output.
@@ -318,7 +357,31 @@ mod tests {
             },
             Request::Close(None),
             Request::Close(Some(WindowSelector::Id(7))),
+            Request::Suspend(None),
+            Request::Suspend(Some(WindowSelector::Id(4))),
+            Request::Relaunch(None),
+            Request::Relaunch(Some(WindowSelector::AppId("foot".into()))),
             Request::Action("switch-layout next".into()),
+            Request::Bookmark {
+                name: None,
+                to: None,
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: Some((100.0, -200.0)),
+                delete: false,
+            },
+            Request::Bookmark {
+                name: Some("home".into()),
+                to: None,
+                delete: true,
+            },
             Request::Screenshot {
                 target: ScreenshotTarget::Viewport,
                 scale: 1.0,
@@ -411,6 +474,7 @@ mod tests {
                 size: [640, 480],
                 is_focused: true,
                 is_widget: false,
+                suspended: false,
             }],
             fullscreen: vec![OutputFullscreen {
                 id: 2,
@@ -438,7 +502,9 @@ mod tests {
                 zoom: 1.0,
                 size: [1920, 1200],
                 active: true,
+                active_bookmark: Some("home".into()),
             }],
+            active_bookmark: Some("home".into()),
         }
     }
 
@@ -447,7 +513,7 @@ mod tests {
         let replies: Vec<Reply> = vec![
             Ok(Response::Camera { x: 1.0, y: 2.0 }),
             Ok(Response::Zoom(1.5)),
-            Ok(Response::State(sample_state())),
+            Ok(Response::State(Box::new(sample_state()))),
             Ok(Response::DebugCounters(
                 [("stage_entries".to_string(), 2usize)]
                     .into_iter()
@@ -459,6 +525,13 @@ mod tests {
                 app_id: Some("foot".into()),
             }))),
             Ok(Response::Opacity(0.5)),
+            Ok(Response::Bookmark {
+                x: 100.0,
+                y: -200.0,
+            }),
+            Ok(Response::Bookmarks(
+                [("home".to_string(), [0.0, 0.0])].into_iter().collect(),
+            )),
             Ok(Response::Ok),
             Err("no focused window".into()),
         ];
@@ -477,7 +550,7 @@ mod tests {
     /// The `State` reply serializes as `{"State":{...}}` with every field present.
     #[test]
     fn state_response_wire_shape() {
-        let json = serde_json::to_value(Response::State(sample_state())).unwrap();
+        let json = serde_json::to_value(Response::State(Box::new(sample_state()))).unwrap();
         let obj = json
             .get("State")
             .expect("State serializes as {\"State\":{...}}");
@@ -503,7 +576,7 @@ mod tests {
     /// variants — pin them together.
     #[test]
     fn event_payload_matches_state_reply() {
-        let response = serde_json::to_value(Response::State(sample_state())).unwrap();
+        let response = serde_json::to_value(Response::State(Box::new(sample_state()))).unwrap();
         let event = serde_json::to_value(Event::State(sample_state())).unwrap();
         assert_eq!(response.get("State"), event.get("State"));
         assert!(response.get("State").is_some());

@@ -13,9 +13,58 @@ use smithay::{
 };
 use std::collections::{HashMap, HashSet};
 
-use crate::decorations::WindowDecoration;
+use crate::decorations::{DecorationKey, WindowDecoration};
 
-use super::DriftWm;
+use super::{DriftWm, StageWindow, SuspendedId};
+
+/// A cluster member a grab holds across motion ticks. `PointerGrab`/`TouchGrab`
+/// require `Send`, but `StageWindow` wraps a non-`Send` `Rc`, so a grab can't
+/// store one directly. `Window` and `SuspendedId` are both `Send`; the grab
+/// stores this and re-resolves it to a live `StageWindow` each tick (a member
+/// closed mid-drag simply stops resolving).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum ClusterMember {
+    Client(Window),
+    Suspended(SuspendedId),
+}
+
+impl ClusterMember {
+    pub fn from_element(w: &StageWindow) -> Self {
+        match w {
+            StageWindow::Client(c) => Self::Client(c.clone()),
+            StageWindow::Suspended(s) => Self::Suspended(s.id),
+        }
+    }
+
+    /// Resolve back to the live stage element, or `None` if it left the stage.
+    /// The `Client` arm checks *liveness* (`IsAlive`); the `Suspended` arm checks
+    /// *stage presence* — two different notions, so this can't be collapsed into
+    /// one uniform check.
+    pub fn resolve(&self, stage: &driftwm::stage::Stage<StageWindow>) -> Option<StageWindow> {
+        match self {
+            Self::Client(w) => {
+                smithay::utils::IsAlive::alive(w).then(|| StageWindow::Client(w.clone()))
+            }
+            Self::Suspended(id) => stage
+                .windows()
+                .filter_map(|w| w.suspended())
+                .find(|s| s.id == *id)
+                .map(|s| StageWindow::Suspended(s.clone())),
+        }
+    }
+}
+
+impl From<Window> for ClusterMember {
+    fn from(w: Window) -> Self {
+        Self::Client(w)
+    }
+}
+
+impl From<SuspendedId> for ClusterMember {
+    fn from(id: SuspendedId) -> Self {
+        Self::Suspended(id)
+    }
+}
 
 /// Cluster member (other than primary) captured at resize grab start.
 /// Non-shifted members are stored too so the motion-time cascade can detect
@@ -25,21 +74,30 @@ use super::DriftWm;
 /// neighbors of the primary's resized edge, plus downstream cluster
 /// members). `None` means stationary unless cascade picks it up.
 pub struct ClusterResizeMember {
-    pub window: Window,
+    pub window: ClusterMember,
     pub initial_pos: Point<i32, Logical>,
     pub initial_rect: driftwm::layout::snap::SnapRect,
     pub axis_x: Option<driftwm::layout::cluster::Side>,
     pub axis_y: Option<driftwm::layout::cluster::Side>,
 }
 
-/// Frozen-at-grab-start cluster snapshot for `ResizeSurfaceGrab`.
+impl ClusterResizeMember {
+    /// A member is in the static-shift (exclude) set exactly when it has an
+    /// axis classification; stationary members stay snap targets.
+    pub fn is_shifted(&self) -> bool {
+        self.axis_x.is_some() || self.axis_y.is_some()
+    }
+}
+
+/// Frozen-at-grab-start cluster snapshot for `ResizeGrab`.
 ///
-/// `members` holds every cluster member except primary. `exclude` is the
-/// *static* shift set only — stationary cluster members stay valid
-/// `snap_targets` so e.g. `A.right` can snap to a still-life neighbor.
+/// `members` holds every cluster member except primary. The snap-target
+/// exclude set is the *static* shift set only (members with an axis
+/// classification, see [`ClusterResizeMember::is_shifted`]) — stationary
+/// members stay valid `snap_targets` so e.g. `A.right` can snap to a
+/// still-life neighbor; grabs resolve it live via [`Self::exclude_set`].
 pub struct ClusterResizeSnapshot {
     pub members: Vec<ClusterResizeMember>,
-    pub exclude: HashSet<WlSurface>,
     /// Sticky bonds formed during push cascade. Once `(m, n)` is bonded, `n`
     /// tracks `m`'s leading edge ± gap unconditionally — including drag
     /// reversal past `n`'s initial position. Vec preserves insertion order
@@ -60,7 +118,6 @@ impl ClusterResizeSnapshot {
     pub fn empty() -> Self {
         Self {
             members: Vec::new(),
-            exclude: HashSet::new(),
             bonds: Vec::new(),
             bonds_set: HashSet::new(),
             primary_rect: driftwm::layout::snap::SnapRect {
@@ -73,37 +130,58 @@ impl ClusterResizeSnapshot {
         }
     }
 
+    /// The static-shift members resolved to live stage elements — the snap
+    /// exclude set for the active resize. Rebuilt per tick since a grab can't
+    /// hold `StageWindow`s.
+    #[allow(clippy::mutable_key_type)]
+    pub fn exclude_set(&self, stage: &driftwm::stage::Stage<StageWindow>) -> HashSet<StageWindow> {
+        self.members
+            .iter()
+            .filter(|m| m.is_shifted())
+            .filter_map(|m| m.window.resolve(stage))
+            .collect()
+    }
+
     /// Compute shifts, reposition every affected cluster member, and re-map
     /// the primary to the top of the z-order so it stays on top of its own
     /// cluster. Writes go through the stage (the map_window contract, inlined
     /// here because the grab owns this snapshot, not `DriftWm`).
+    ///
+    /// Returns whether a member's *live* position actually changed this call
+    /// (compared before each re-map, excluding the primary's z-raise re-map) —
+    /// the interactive-resize blur bump consumes this to catch a mid-tick
+    /// reflow on a size-constant tick. "Shifts non-empty" would over-report,
+    /// bumping every tick of a held cascade.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_member_shifts(
         &mut self,
-        stage: &mut driftwm::stage::Stage<Window>,
-        primary: &Window,
+        stage: &mut driftwm::stage::Stage<crate::state::StageWindow>,
+        primary: &StageWindow,
         initial_size: Size<i32, Logical>,
         new_w: i32,
         new_h: i32,
         gap: f64,
-    ) {
-        use smithay::utils::IsAlive;
+    ) -> bool {
         if self.members.is_empty() {
-            return;
+            return false;
         }
         let width_delta = new_w - initial_size.w;
         let height_delta = new_h - initial_size.h;
-        let shifts = self.compute_shifts(width_delta, height_delta, gap);
+        let shifts = self.compute_shifts(stage, width_delta, height_delta, gap);
 
+        let mut moved = false;
         for (i, (dx, dy)) in &shifts {
             let m = &self.members[*i];
-            if !m.window.alive() {
+            let Some(element) = m.window.resolve(stage) else {
                 continue;
-            }
+            };
             // Shifting a member re-anchors it, invalidating any fill restore point.
-            stage.clear_fill(&m.window);
+            stage.clear_fill(&element);
             let new_pos = m.initial_pos + Point::from((*dx, *dy));
-            stage.map(m.window.clone(), new_pos);
+            if stage.position_of(&element) != Some(new_pos) {
+                moved = true;
+            }
+            stage.map(element, new_pos);
         }
 
         if !shifts.is_empty()
@@ -111,18 +189,23 @@ impl ClusterResizeSnapshot {
         {
             stage.map(primary.clone(), cur);
         }
+        moved
     }
 
     /// Per-member translation vector for one motion tick. Wraps
     /// `resolve_cluster_shifts`, persisting newly-formed bonds across frames.
+    /// `stage` resolves each member's liveness: a client dies with its surface,
+    /// but a stand-in can also leave the stage mid-drag (dismissed via IPC or a
+    /// keybind, or adopted by a relaunch), so both degrade to `DEAD_RECT` rather
+    /// than ghost-push at their frozen rect.
     pub fn compute_shifts(
         &mut self,
+        stage: &driftwm::stage::Stage<StageWindow>,
         width_delta: i32,
         height_delta: i32,
         gap: f64,
     ) -> HashMap<usize, (i32, i32)> {
         use driftwm::layout::cluster::{ResizeClassification, resolve_cluster_shifts};
-        use smithay::utils::IsAlive;
 
         // Dead windows get a degenerate rect that can't overlap in cascade,
         // preventing ghost-rect collisions from mid-drag unmaps.
@@ -137,7 +220,7 @@ impl ClusterResizeSnapshot {
             .members
             .iter()
             .map(|m| {
-                let alive = m.window.alive();
+                let alive = m.window.resolve(stage).is_some();
                 ResizeClassification {
                     axis_x: if alive { m.axis_x } else { None },
                     axis_y: if alive { m.axis_y } else { None },
@@ -180,43 +263,32 @@ impl ClusterResizeSnapshot {
     }
 }
 
-/// Snapshot for a move drag: members carry canvas-offset-from-primary;
-/// surfaces are the exclude set for `snap_targets`.
-pub type ClusterDragSnapshot = (Vec<(Window, Point<i32, Logical>)>, HashSet<WlSurface>);
+/// Snapshot for a move drag: each cluster member (other than primary) with its
+/// canvas offset from the primary. Members may be suspended stand-ins. The
+/// grab converts these into `Send`-safe [`ClusterMember`]s and derives the
+/// `snap_targets` exclude set from them each tick.
+pub type ClusterDragSnapshot = Vec<(StageWindow, Point<i32, Logical>)>;
 
 impl DriftWm {
     /// Snap target rects for all windows except `primary` and
     /// `cluster_excludes` (latter used during multi-window cluster drags to
     /// stop members snapping against each other). Widgets, pinned, and
     /// fullscreen windows are never snap targets (see `snap_rect_for`).
+    #[allow(clippy::mutable_key_type)]
     pub fn snap_targets(
         &self,
-        primary: &WlSurface,
-        cluster_excludes: &HashSet<WlSurface>,
+        primary: &StageWindow,
+        cluster_excludes: &HashSet<StageWindow>,
     ) -> (Vec<driftwm::layout::snap::SnapRect>, i32, i32) {
-        let dc = &self.config.decorations;
-        let self_bar = if self.decorations.contains_key(&primary.id()) {
-            dc.title_bar_height
-        } else {
-            0
-        };
-        let primary_rule = driftwm::config::applied_rule(primary);
-        let primary_mode = driftwm::config::effective_decoration_mode(
-            primary_rule.as_ref().and_then(|r| r.decoration.as_ref()),
-            &dc.default_mode,
-        );
-        let self_bw =
-            driftwm::config::effective_border_width(primary_rule.as_ref(), primary_mode, dc);
+        let self_bar = self.window_ssd_bar(primary);
+        let self_bw = self.element_border_width(primary);
 
         // `snap_rect_for` is the single definition of a snappable window — it
         // already drops widgets, pinned, and fullscreen windows; here we only
         // additionally skip the primary itself and its frozen cluster.
         let mut others = Vec::new();
         for w in self.stage.windows() {
-            let Some(surface) = w.wl_surface() else {
-                continue;
-            };
-            if &*surface == primary || cluster_excludes.contains(&*surface) {
+            if w == primary || cluster_excludes.contains(w) {
                 continue;
             }
             if let Some(rect) = self.snap_rect_for(w) {
@@ -226,26 +298,128 @@ impl DriftWm {
         (others, self_bar, self_bw)
     }
 
-    /// Every non-widget window with its `SnapRect`. Feeds `cluster_of` at
-    /// drag start; BFS needs `Window` identity, not surface.
-    pub fn all_windows_with_snap_rects(&self) -> Vec<(Window, driftwm::layout::snap::SnapRect)> {
+    /// Snap a dragged element's natural content top-left to nearby windows,
+    /// mirroring the client move-grab magnetic snap. `primary` identifies the
+    /// dragged element (its size + SSD bar + border set the snapped extent);
+    /// `excludes` is its frozen cluster, kept out of the target set. Returns the
+    /// snapped content top-left. Callers gate on `config.snap_enabled`; the
+    /// suspended and client move grabs share this so their snap is identical.
+    #[allow(clippy::mutable_key_type)]
+    pub(crate) fn snap_move_location(
+        &self,
+        primary: &StageWindow,
+        zoom: f64,
+        natural: Point<f64, Logical>,
+        snap: &mut driftwm::layout::snap::SnapState,
+        excludes: &HashSet<StageWindow>,
+    ) -> Point<f64, Logical> {
+        use driftwm::layout::snap::{SnapParams, update_axis};
+
+        let effective_distance = self.config.snap_distance / zoom;
+        let effective_break = self.config.snap_break_force / zoom;
+        let gap = self.config.snap_gap;
+        let (others, self_bar, self_bw) = self.snap_targets(primary, excludes);
+        let size = primary.geometry().size;
+
+        // Inflate self's extent by `self_bw` on each side (and the SSD bar on
+        // top) so the snap math operates on the same visible-frame coords as
+        // `others`, which `window_snap_rect` already inflated.
+        let extent_x = size.w as f64 + 2.0 * self_bw as f64;
+        let extent_y = size.h as f64 + self_bar as f64 + 2.0 * self_bw as f64;
+        let visual_x = natural.x - self_bw as f64;
+        let visual_y = natural.y - self_bar as f64 - self_bw as f64;
+
+        // Perpendicular ranges track the *visual* window, not the raw cursor:
+        // a held-snapped axis can let the cursor drift by up to break_force
+        // while the window stays pinned, which would otherwise spawn spurious
+        // corner snaps on the other axis.
+        let visual_y_for_perp = snap.y.as_ref().map_or(visual_y, |s| s.snapped_pos);
+        let params_x = SnapParams {
+            extent: extent_x,
+            perp_low: visual_y_for_perp,
+            perp_high: visual_y_for_perp + extent_y,
+            horizontal: true,
+            others: &others,
+            gap,
+            threshold: effective_distance,
+            break_force: effective_break,
+            same_edge: self.config.snap_corners,
+            edge_center: self.config.snap_centers,
+        };
+        let final_visual_x = update_axis(&mut snap.x, &mut snap.cooldown_x, visual_x, &params_x);
+
+        let visual_x_for_perp = snap.x.as_ref().map_or(visual_x, |s| s.snapped_pos);
+        let params_y = SnapParams {
+            extent: extent_y,
+            perp_low: visual_x_for_perp,
+            perp_high: visual_x_for_perp + extent_x,
+            horizontal: false,
+            others: &others,
+            gap,
+            threshold: effective_distance,
+            break_force: effective_break,
+            same_edge: self.config.snap_corners,
+            edge_center: self.config.snap_centers,
+        };
+        let final_visual_y = update_axis(&mut snap.y, &mut snap.cooldown_y, visual_y, &params_y);
+
+        Point::from((
+            final_visual_x + self_bw as f64,
+            final_visual_y + self_bar as f64 + self_bw as f64,
+        ))
+    }
+
+    /// Every snappable element with its `SnapRect`, keyed by `StageWindow` so
+    /// suspended stand-ins traverse `cluster_of` as ordinary members. Feeds
+    /// `cluster_of` at drag start; BFS needs element identity, not surface.
+    #[allow(clippy::mutable_key_type)]
+    pub fn all_windows_with_snap_rects(
+        &self,
+    ) -> Vec<(StageWindow, driftwm::layout::snap::SnapRect)> {
         self.stage
             .windows()
             .filter_map(|w| self.snap_rect_for(w).map(|rect| (w.clone(), rect)))
             .collect()
     }
 
-    /// Border + title-bar inflated `SnapRect`. `None` for widgets / pinned /
-    /// fullscreen / unmapped. Pinned and fullscreen windows live in screen space
-    /// (a fullscreen window is parked at its output's camera origin), so they
-    /// have no canvas snap rect — this excludes them from snapping, clustering,
-    /// and all the viewport-relation queries built on top of it.
-    pub fn snap_rect_for(&self, w: &Window) -> Option<driftwm::layout::snap::SnapRect> {
+    /// Border + title-bar inflated `SnapRect` for any stage element. `None` for
+    /// widgets / pinned / fullscreen / unmapped. Pinned and fullscreen windows
+    /// live in screen space (a fullscreen window is parked at its output's
+    /// camera origin), so they have no canvas snap rect — this excludes them
+    /// from snapping, clustering, and all the viewport-relation queries built
+    /// on top of it. A suspended stand-in's rect mirrors its live window's:
+    /// body rect + `window_ssd_bar` strip + the global-default border, so other
+    /// windows snap to it exactly as they would to the window it replaced.
+    pub fn snap_rect_for(&self, w: &StageWindow) -> Option<driftwm::layout::snap::SnapRect> {
         if self.is_pinned(w) || self.is_window_fullscreen(w) {
             return None;
         }
-        window_snap_rect(&self.stage, &self.decorations, &self.config.decorations, w)
-            .map(|(_, r)| r)
+        match w {
+            StageWindow::Client(c) => {
+                window_snap_rect(&self.stage, &self.decorations, &self.config.decorations, c)
+                    .map(|(_, r)| r)
+            }
+            StageWindow::Suspended(s) => {
+                let loc = self.stage.position_of(w)?;
+                let size = s.size.get();
+                let bar = self.window_ssd_bar(w) as f64;
+                let bw = self.default_border_width() as f64;
+                Some(driftwm::layout::snap::SnapRect {
+                    x_low: loc.x as f64 - bw,
+                    x_high: loc.x as f64 + size.w as f64 + bw,
+                    y_low: loc.y as f64 - bar - bw,
+                    y_high: loc.y as f64 + size.h as f64 + bw,
+                })
+            }
+        }
+    }
+
+    /// Where an element's visible frame (border + SSD title bar + content) sits
+    /// on the canvas — the *navigation* rect. Delegates to
+    /// [`Self::snap_rect_for`] (stand-ins are snap targets too); kept as a
+    /// named alias so navigation / IPC callsites read by intent.
+    pub fn visual_frame_rect(&self, w: &StageWindow) -> Option<driftwm::layout::snap::SnapRect> {
+        self.snap_rect_for(w)
     }
 
     /// Snapshot `w`'s current `SnapRect` into `stable_snap_rects`. Call on
@@ -254,35 +428,36 @@ impl DriftWm {
     /// those paths directly (configure not yet acked, so `geometry().size`
     /// would be wrong here). The cached rect outlives mid-teardown geometry
     /// changes and is consulted by `first_spatially_related_in_history`.
-    pub fn refresh_stable_snap_rect(&mut self, w: &Window) {
+    pub fn refresh_stable_snap_rect(&mut self, w: &StageWindow) {
         let Some(rect) = self.snap_rect_for(w) else {
             return;
         };
+        // A stand-in has no surface to key the cache on — and needs none: its
+        // `snap_rect_for` is always live-correct (no configure lag to outlast).
         let Some(surface) = w.wl_surface() else {
             return;
         };
         self.stable_snap_rects.insert(surface.id(), rect);
     }
 
-    /// Snapshot the focused window's cluster for a move drag: member offsets
-    /// from primary + exclude set of member surfaces. Frozen at drag start —
-    /// cluster membership and offsets are invariant over motion / snap /
-    /// cross-output teleport.
+    /// Snapshot the focused element's cluster for a move drag: each member with
+    /// its canvas offset from the primary. Frozen at drag start — cluster
+    /// membership and offsets are invariant over motion / snap / cross-output
+    /// teleport. Members may include suspended stand-ins, which ride along at
+    /// their fixed offset.
     //
-    // smithay's `Window` wraps `Arc<WindowInner>` (contains AtomicF64), so
-    // clippy flags interior-mutable hash key. False positive: Hash + Eq are
-    // implemented on Arc pointer identity, stable under interior mutation.
+    // `StageWindow` (like `Window`) hashes on pointer identity over an
+    // interior-mutable payload; the lint's concern doesn't apply.
     #[allow(clippy::mutable_key_type)]
     pub fn cluster_snapshot_for_drag(
         &self,
-        window: &Window,
+        window: &StageWindow,
         primary_pos: Point<i32, Logical>,
     ) -> ClusterDragSnapshot {
         let rects = self.all_windows_with_snap_rects();
         let component = driftwm::layout::cluster::cluster_of(window, &rects, self.config.snap_gap);
 
         let mut members = Vec::new();
-        let mut surfaces = HashSet::new();
         for m in component {
             if &m == window {
                 continue;
@@ -291,12 +466,9 @@ impl DriftWm {
                 continue;
             };
             let offset = pos - primary_pos;
-            if let Some(s) = m.wl_surface() {
-                surfaces.insert(s.into_owned());
-            }
             members.push((m, offset));
         }
-        (members, surfaces)
+        members
     }
 
     /// Snapshot focused window's cluster for a resize drag.
@@ -313,7 +485,7 @@ impl DriftWm {
     #[allow(clippy::mutable_key_type)]
     pub fn cluster_snapshot_for_resize(
         &self,
-        window: &Window,
+        window: &StageWindow,
         edges: xdg_toplevel::ResizeEdge,
     ) -> ClusterResizeSnapshot {
         use crate::grabs::{has_bottom, has_left, has_right, has_top};
@@ -330,14 +502,15 @@ impl DriftWm {
             return ClusterResizeSnapshot::empty();
         };
 
-        // Rect lookup keyed on cloned Arc — cheap.
-        let rect_of: HashMap<Window, SnapRect> =
+        // Rect lookup keyed on cloned element identity — cheap.
+        let rect_of: HashMap<StageWindow, SnapRect> =
             rects.iter().map(|(w, r)| (w.clone(), *r)).collect();
 
-        let compute_shift_set = |side: Side| -> HashSet<Window> {
+        let compute_shift_set = |side: Side| -> HashSet<StageWindow> {
             // Step 1: direct neighbors of primary on this side.
-            let mut set: HashSet<Window> = HashSet::new();
-            let mut queue: std::collections::VecDeque<Window> = std::collections::VecDeque::new();
+            let mut set: HashSet<StageWindow> = HashSet::new();
+            let mut queue: std::collections::VecDeque<StageWindow> =
+                std::collections::VecDeque::new();
             for (w, r) in &rects {
                 if w == window {
                     continue;
@@ -401,19 +574,9 @@ impl DriftWm {
             HashSet::new()
         };
 
-        // Exclude = union of static shift sets only. Stationary members
-        // stay as snap targets so the primary can snap against them.
-        let mut exclude: HashSet<WlSurface> = HashSet::new();
-        for set in [&right_set, &left_set, &bottom_set, &top_set] {
-            for w in set {
-                if let Some(s) = w.wl_surface() {
-                    exclude.insert(s.into_owned());
-                }
-            }
-        }
-
         // Members come from the FULL cluster — unshifted ones still ride
-        // along so the cascade can reach them.
+        // along so the cascade can reach them. The static-shift (exclude) set
+        // is recovered later from each member's axis classification.
         let mut members = Vec::new();
         for m in full {
             if &m == window {
@@ -440,7 +603,7 @@ impl DriftWm {
                 None
             };
             members.push(ClusterResizeMember {
-                window: m,
+                window: ClusterMember::from_element(&m),
                 initial_pos,
                 initial_rect,
                 axis_x,
@@ -450,7 +613,6 @@ impl DriftWm {
 
         ClusterResizeSnapshot {
             members,
-            exclude,
             bonds: Vec::new(),
             bonds_set: HashSet::new(),
             primary_rect,
@@ -464,8 +626,8 @@ impl DriftWm {
 /// so snap/cluster math operates on the visible footprint. `None` for
 /// widgets / unmapped / surfaceless.
 fn window_snap_rect(
-    stage: &driftwm::stage::Stage<Window>,
-    decorations: &HashMap<smithay::reexports::wayland_server::backend::ObjectId, WindowDecoration>,
+    stage: &driftwm::stage::Stage<crate::state::StageWindow>,
+    decorations: &HashMap<DecorationKey, WindowDecoration>,
     decoration_config: &driftwm::config::DecorationConfig,
     w: &Window,
 ) -> Option<(WlSurface, driftwm::layout::snap::SnapRect)> {
@@ -476,7 +638,7 @@ fn window_snap_rect(
     }
     let loc = stage.position_of(w)?;
     let size = w.geometry().size;
-    let bar = if decorations.contains_key(&surface.id()) {
+    let bar = if decorations.contains_key(&DecorationKey::Surface(surface.id())) {
         decoration_config.title_bar_height
     } else {
         0
@@ -496,4 +658,82 @@ fn window_snap_rect(
             y_high: loc.y as f64 + size.h as f64 + bw,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use driftwm::desktop_entry::AppIdentity;
+    use driftwm::layout::cluster::Side;
+    use driftwm::layout::snap::SnapRect;
+    use driftwm::session::Origin;
+    use driftwm::stage::Stage;
+    use smithay::utils::{Point, Size};
+
+    use super::{ClusterMember, ClusterResizeMember, ClusterResizeSnapshot};
+    use crate::state::{StageWindow, SuspendedId, SuspendedWindow};
+
+    fn stand_in(id: u64) -> StageWindow {
+        StageWindow::Suspended(Rc::new(SuspendedWindow::new(
+            SuspendedId(id),
+            Size::from((100, 100)),
+            AppIdentity {
+                app_id: "app".into(),
+                desktop_id: "app.desktop".into(),
+                display_name: "App".into(),
+            },
+            Origin::Explicit,
+            false,
+        )))
+    }
+
+    /// A single member shifted along the right edge; primary parked far away so
+    /// no primary-push interferes with the phase-1 static shift.
+    fn snapshot_with_shifted_member(id: u64) -> ClusterResizeSnapshot {
+        let mut snap = ClusterResizeSnapshot::empty();
+        snap.members.push(ClusterResizeMember {
+            window: ClusterMember::Suspended(SuspendedId(id)),
+            initial_pos: Point::from((0, 0)),
+            initial_rect: SnapRect {
+                x_low: 0.0,
+                x_high: 100.0,
+                y_low: 0.0,
+                y_high: 100.0,
+            },
+            axis_x: Some(Side::Right),
+            axis_y: None,
+        });
+        snap.primary_rect = SnapRect {
+            x_low: 5000.0,
+            x_high: 5100.0,
+            y_low: 5000.0,
+            y_high: 5100.0,
+        };
+        snap.resize_edges = 0;
+        snap
+    }
+
+    #[test]
+    fn dismissed_standin_member_degrades_to_dead_rect() {
+        // Alive: the stand-in is on the stage, so its Right-axis classification
+        // yields the static shift.
+        let mut stage: Stage<StageWindow> = Stage::new();
+        stage.map(stand_in(1), Point::from((0, 0)));
+        let shifts = snapshot_with_shifted_member(1).compute_shifts(&stage, 100, 0, 8.0);
+        assert_eq!(
+            shifts.get(&0),
+            Some(&(100, 0)),
+            "a live member takes its edge-delta shift"
+        );
+
+        // Dismissed mid-drag: no stage entry, so liveness resolves false and the
+        // member drops to `DEAD_RECT` with no axis — no shift, no ghost push.
+        let empty: Stage<StageWindow> = Stage::new();
+        let shifts = snapshot_with_shifted_member(1).compute_shifts(&empty, 100, 0, 8.0);
+        assert!(
+            !shifts.contains_key(&0),
+            "a dismissed stand-in no longer pushes as a ghost"
+        );
+    }
 }

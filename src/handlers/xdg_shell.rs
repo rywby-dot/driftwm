@@ -1,8 +1,12 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
 
-use crate::grabs::{MoveSurfaceGrab, ResizeState, ResizeSurfaceGrab};
-use crate::state::{DriftWm, FocusTarget, PopupGrabState, output_state};
+use crate::grabs::{MoveGrab, ResizeGrab, ResizeState};
+use crate::state::{
+    ClusterMember, DriftWm, FocusTarget, PopupGrabState, StageWindow, output_logical_size,
+    output_state,
+};
+use crate::surface_tree::focus_belongs_to_toplevel;
+use driftwm::window_ext::WindowExt;
 use smithay::{
     delegate_xdg_shell,
     desktop::{
@@ -10,6 +14,7 @@ use smithay::{
         find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
     },
     input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
+    output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -17,7 +22,7 @@ use smithay::{
             protocol::{wl_output, wl_seat},
         },
     },
-    utils::{Rectangle, Serial},
+    utils::{IsAlive, Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
         input_method::InputMethodSeat,
@@ -54,18 +59,11 @@ impl XdgShellHandler for DriftWm {
             })
             .unwrap_or((0, 0));
 
-        // Snapshot the last focused *window* so `auto_placement_pos` can anchor
-        // against whatever the user was working with — `window_focus` survives
-        // even when a launcher (an exclusive layer surface) currently holds the
-        // live keyboard focus. `None` here means the user explicitly had no
-        // focused window (e.g. clicked empty canvas), so auto placement falls
-        // back to center.
-        let prev_focus_window = self
-            .window_focus
-            .as_ref()
-            .and_then(|t| self.window_for_surface(&t.0));
+        // Snapshot the focus anchor so `auto_placement_pos` can anchor a new
+        // window beside it once mapping steals focus; see `focused_anchor_element`.
+        let prev_focus = self.focused_anchor_element();
         self.auto_anchor_snapshot
-            .insert(wl_surface.clone(), prev_focus_window);
+            .insert(wl_surface.clone(), prev_focus);
 
         // Initial configure is deferred to ensure_initial_configure in
         // compositor.rs first-commit handler so rule-resolved state (size,
@@ -73,13 +71,15 @@ impl XdgShellHandler for DriftWm {
         // Sending one here would produce a configure with unresolved state,
         // and a second on first commit — SDL2/SCTK clients have historically
         // desynced on back-to-back initial configures.
-        self.map_window(window.clone(), pos.into(), true);
-        self.raise_window(&window, true);
+        self.map_window(window.clone(), pos.into(), false);
+        self.raise_window(&window, false);
         self.enforce_below_windows();
         // Don't focus here: a pre-buffer wl_keyboard.enter is unusable, and
         // set_focus is a no-op when the target is unchanged, so focusing now
         // would trap the client unfocused (the on-commit re-focus does nothing).
-        // Focus is delivered once mapped, on first commit.
+        // Focus is delivered once mapped, on first commit; activation is
+        // likewise deferred to that commit so it can ride the placement
+        // configure instead of arriving as a premature standalone one.
         self.pending_center.insert(wl_surface);
     }
 
@@ -215,8 +215,9 @@ impl XdgShellHandler for DriftWm {
     // driftwm has no minimize concept, but a client that minimizes itself
     // stalls: xdg-shell carries no "minimized" state, so the toolkit stops
     // drawing and only clears its internal minimized flag on a configure with
-    // `Activated` — which driftwm never sends on plain focus. Refuse the
-    // minimize and send an `Activated` configure to wake it back up.
+    // `Activated`. The exclusive-activation gate would suppress that configure
+    // when the window is already the activated one (idempotent, sends nothing),
+    // so force `Activated` unconditionally here to un-stick the client.
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
@@ -236,6 +237,15 @@ impl XdgShellHandler for DriftWm {
         // visibility against the home output's camera, which stays parked
         // until this runs.)
         let fs_output = self.find_fullscreen_output_for_surface(&wl_surface);
+        // Captured before the teardown drops the entry: a markless
+        // (suspend_on_close) conversion of a fullscreen self-close must seat
+        // the stand-in at the pre-fullscreen rect, not the fullscreen-sized
+        // buffer parked at the camera origin.
+        let fullscreen_restore_rect = fs_output.as_ref().and_then(|output| {
+            self.stage
+                .fullscreen_on(&output.name())
+                .map(|entry| Rectangle::new(entry.saved_location, entry.saved_size))
+        });
         if let Some(ref output) = fs_output {
             self.stage.take_fullscreen(&output.name());
             // Two statements, not one `if let`: the scrutinee's MutexGuard
@@ -249,14 +259,147 @@ impl XdgShellHandler for DriftWm {
         // can't match above; sweep any fullscreen entry it left behind.
         self.reap_dead_fullscreen();
 
-        if let Some(window) = window {
-            // Keep the last committed surface tree mapped for one composition
-            // pass. The renderer snapshots it, then performs the unmap, focus
-            // recovery, and per-surface cleanup.
-            self.begin_destroyed_window_close(&window);
-        } else {
+        // A live suspend mark, or an eligible client-initiated close under
+        // `suspend_on_close`, converts the window into a compositor-drawn
+        // stand-in in place instead of destroying it. Runs before the
+        // focus-follow / unmap path below and before `cleanup_surface_state`,
+        // which the conversion relies on to purge the surface-keyed state.
+        if let Some(window) = &window
+            && let Some(conv) =
+                self.resolve_suspend_conversion(&wl_surface, window, fullscreen_restore_rect)
+        {
+            // Crossfade the dying window over the stand-in that takes its rect
+            // (fade in place, scale 1). Capture precedes the stage surgery.
+            self.snapshot_closing_window(window, &wl_surface, fs_output.as_ref(), true);
+            self.convert_to_suspended(window, &wl_surface, conv);
             self.cleanup_surface_state(&wl_surface);
+            return;
         }
+
+        if let Some(ref window) = window {
+            // Pick a window to follow when the destroyed one was focused.
+            // Priority: explicit parent (xdg_toplevel.set_parent), then the
+            // MRU history entry that's spatially related (cluster member or
+            // overlap), then plain MRU. Spatial fallback covers transient/
+            // OAuth windows that auto-placement snapped near the launcher
+            // but don't carry a parent_surface relation.
+            let follow = window
+                .parent_surface()
+                .and_then(|ps| {
+                    let parent = self.window_for_surface(&ps)?;
+                    Some(
+                        self.topmost_modal_child(&parent)
+                            .filter(|mc| mc != window)
+                            .unwrap_or(parent),
+                    )
+                })
+                .or_else(|| {
+                    self.first_spatially_related_in_history(&StageWindow::Client(window.clone()))
+                });
+
+            // When auto-navigation is off, dropping an off-screen follow target
+            // guarantees focus never lands somewhere the user can't see.
+            let follow = follow
+                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
+
+            let keyboard = self.seat.get_keyboard().unwrap();
+            let current_focus = keyboard.current_focus();
+            let no_keyboard_focus = current_focus.is_none();
+            let focus_on_this_toplevel = current_focus
+                .as_ref()
+                .is_some_and(|f| focus_belongs_to_toplevel(&f.0, &wl_surface));
+            let was_last_focused = self
+                .stage
+                .focus_history()
+                .first()
+                .is_some_and(|last_focused| last_focused == window);
+            // A focused suspended window holds no seat focus and isn't in
+            // history, so `no_keyboard_focus`/`was_last_focused` would otherwise
+            // fire and steal focus from it when any unrelated window is
+            // destroyed. The user is looking at the suspended window — leave it.
+            let focus_is_suspended = matches!(
+                self.window_focus,
+                Some(crate::state::FocusIntent::Suspended(_))
+            );
+            if !focus_is_suspended
+                && (focus_on_this_toplevel || was_last_focused || no_keyboard_focus)
+            {
+                if let Some(target) = follow {
+                    // Pan only if the follow target isn't already fully on
+                    // screen — set_focus alone is enough when the user can
+                    // already see where focus is going.
+                    if self.window_fully_in_viewport(&target) {
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        self.raise_and_focus(&target, serial);
+                    } else {
+                        self.navigate_to_window(&target, false);
+                    }
+                } else {
+                    // No follow target. Pick first MRU entry; if it's
+                    // completely off the destroyed window's home output, fall
+                    // back to the nearest visible window (by canvas distance
+                    // from the destroyed window's center). If nothing is
+                    // visible, clear focus rather than focus the void.
+                    //
+                    // Prefer the fullscreen output when the destroyed window
+                    // was fullscreen: after the camera restore above, the
+                    // window's location is still pinned to the old fullscreen
+                    // camera, so output_for_window may misroute to the
+                    // cursor's monitor.
+                    let home = fs_output
+                        .clone()
+                        .or_else(|| self.output_for_window(window))
+                        .or_else(|| self.active_output());
+                    let mru = self
+                        .stage
+                        .focus_history()
+                        .iter()
+                        .filter_map(|w| w.client())
+                        .find(|w| *w != window)
+                        .cloned();
+                    let target = match (home.as_ref(), mru) {
+                        (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
+                            Some(m)
+                        }
+                        (Some(out), _) => {
+                            let from = self.window_visual_center(window).unwrap_or_else(|| {
+                                let loc = self.stage.position_of(window).unwrap_or_default();
+                                let size = window.geometry().size;
+                                Point::from((
+                                    loc.x as f64 + size.w as f64 / 2.0,
+                                    loc.y as f64 + size.h as f64 / 2.0,
+                                ))
+                            });
+                            self.nearest_visible_window_on(from, out, Some(window))
+                        }
+                        (None, _) => None,
+                    };
+
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    if let Some(target) = target {
+                        self.raise_and_focus(&target, serial);
+                    } else {
+                        self.set_window_focus(None, serial);
+                    }
+                }
+            }
+            // Flatten the dying window into a fade-out snapshot before it leaves
+            // the stage (fullscreen closes fade screen-space on the home output).
+            // Skip when the surface is already dead — `destroyed` (which fires
+            // first on a client disconnect) then owns the snapshot, so this
+            // can't stack a second double-alpha fade for the same window.
+            if wl_surface.alive() {
+                self.snapshot_closing_window(window, &wl_surface, fs_output.as_ref(), false);
+            }
+            self.unmap_window(window);
+            // The window may have sat under the cursor; re-target pointer focus
+            // now that it's gone so clicks don't fall into the destroyed surface.
+            self.refresh_pointer_focus();
+        }
+        // Must run after the focus-follow block above: that derives the dying
+        // window's snap rect from stable_snap_rects (and, on a cache miss, live
+        // geometry reading its decorations/pinned entries), so clear last.
+        self.cleanup_surface_state(&wl_surface);
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, serial: Serial) {
@@ -294,13 +437,13 @@ impl XdgShellHandler for DriftWm {
             };
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
-            let grab = MoveSurfaceGrab::new(
+            self.arm_interactive_move(&window);
+            let grab = MoveGrab::new(
                 start_data,
                 window,
                 initial_window_location,
                 output,
                 Vec::new(),
-                HashSet::new(),
             );
             pointer.set_grab(self, grab, serial, Focus::Clear);
             return;
@@ -322,6 +465,7 @@ impl XdgShellHandler for DriftWm {
                 };
                 // Revoke the client's in-flight touch sequence (see the canvas branch below).
                 touch.cancel(self);
+                self.arm_interactive_move(&window);
                 touch.set_grab(self, grab, serial);
                 return;
             }
@@ -340,14 +484,14 @@ impl XdgShellHandler for DriftWm {
             touch.cancel(self);
             // Moving re-anchors the window, invalidating any fill restore point.
             self.stage.clear_fill(&window);
-            let grab = MoveSurfaceGrab::new_touch(
+            self.arm_interactive_move(&window);
+            let grab = MoveGrab::new_touch(
                 touch_start,
                 window,
                 initial_window_location,
                 output,
                 1,
                 Vec::new(),
-                HashSet::new(),
             );
             touch.set_grab(self, grab, serial);
         }
@@ -406,6 +550,7 @@ impl XdgShellHandler for DriftWm {
                     initial_window_location,
                     initial_window_size,
                     initial_screen_pos: pinned_initial_screen_pos,
+                    last_committed_size: initial_window_size,
                 });
         });
 
@@ -422,14 +567,15 @@ impl XdgShellHandler for DriftWm {
         // edge-drag propagation behaves identically for SSD and CSD windows.
         let cluster_resize =
             if self.config.decoration_resize_snapped && pinned_initial_screen_pos.is_none() {
-                self.cluster_snapshot_for_resize(&window, edges)
+                self.cluster_snapshot_for_resize(&StageWindow::Client(window.clone()), edges)
             } else {
                 crate::state::ClusterResizeSnapshot::empty()
             };
         let constraints = crate::grabs::SizeConstraints::for_window(&window);
-        let grab = ResizeSurfaceGrab {
+        let locked_ratio = crate::grabs::locked_ratio_for(&window, initial_window_size);
+        let grab = ResizeGrab {
             start_data,
-            window,
+            target: ClusterMember::Client(window),
             edges,
             initial_window_location,
             initial_window_size,
@@ -442,6 +588,7 @@ impl XdgShellHandler for DriftWm {
             pinned_initial_screen_pos,
             touch_start: None,
             touch_slots: 0,
+            locked_ratio,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
@@ -515,6 +662,40 @@ impl DriftWm {
         keyboard.current_focus().is_some_and(|f| &f.0 == root)
     }
 
+    /// Output a popup parent at `point` should be constrained against: the
+    /// active output when it shows the point, else any output that does, else
+    /// the active one. Popups are overwhelmingly pointer-triggered, and default
+    /// cameras make every viewport show the same canvas region, so preferring
+    /// the pointer's output avoids resolving by output registration order.
+    fn output_showing_parent(&self, point: Point<f64, Logical>) -> Option<Output> {
+        let active = self.active_output();
+        if let Some(output) = &active
+            && self.output_shows_canvas_point(output, point)
+        {
+            return active;
+        }
+        self.output_showing_canvas_point(point).or(active)
+    }
+
+    /// Canvas region currently shown by the output that displays a parent
+    /// centered at `center`. `None` when there are no outputs at all: nothing
+    /// to constrain against, so callers leave the popup's geometry alone.
+    fn parent_visible_canvas_rect(
+        &self,
+        center: Point<f64, Logical>,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let output = self.output_showing_parent(center)?;
+        let (camera, zoom) = {
+            let os = output_state(&output);
+            (os.camera, os.zoom)
+        };
+        Some(driftwm::canvas::visible_canvas_rect(
+            camera.to_i32_round(),
+            output_logical_size(&output),
+            zoom,
+        ))
+    }
+
     /// Apply xdg positioner constraint adjustments so the popup stays within
     /// the output bounds. Works for both xdg-toplevel and layer-shell parents.
     pub(crate) fn unconstrain_popup(&self, popup: &PopupKind) {
@@ -529,31 +710,40 @@ impl DriftWm {
         // The target rect for constraining, in parent-surface-relative coordinates.
         // We need to figure out where the root surface is on the output and express
         // the output bounds relative to the popup's toplevel.
-        let active_output = self.active_output();
         let target = if let Some(window) = self
             .stage
             .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&root))
         {
-            // Parent is an xdg window — target is the *visible canvas area* in
-            // window-relative coords. We must use visible_canvas_rect (not raw
-            // output_geo) because the screen is a (camera, zoom) viewport onto
-            // the canvas: when zoomed/panned, output_geo translated by window_loc
-            // describes a phantom screen far from the popup's anchor, and the
-            // positioner mis-flips the popup to "fit" it.
-            let window_loc = self.stage.position_of(window).unwrap_or_default();
-            let viewport_size = active_output
-                .as_ref()
-                .and_then(|o| self.space.output_geometry(o))
-                .map(|g| g.size)
-                .unwrap_or_default();
-
-            let mut target = driftwm::canvas::visible_canvas_rect(
-                self.camera().to_i32_round(),
-                viewport_size,
-                self.zoom(),
-            );
-            target.loc -= window_loc;
+            let mut target = if let Some(site) = self.stage.pin_of(window)
+                && let Some(pin_output) = self.output_by_name(&site.output)
+            {
+                // A pinned window is fixed to its output's screen space and
+                // renders at scale 1.0, so the target is the plain output rect
+                // relative to the pin site — no camera, no zoom. If the pin
+                // target is gone, fall through to the canvas path below.
+                let mut screen = Rectangle::from_size(output_logical_size(&pin_output));
+                screen.loc -= site.screen_pos;
+                screen
+            } else {
+                // Parent is an xdg window — target is the *visible canvas area* in
+                // window-relative coords. We must use visible_canvas_rect (not raw
+                // output_geo) because the screen is a (camera, zoom) viewport onto
+                // the canvas: when zoomed/panned, output_geo translated by window_loc
+                // describes a phantom screen far from the popup's anchor, and the
+                // positioner mis-flips the popup to "fit" it.
+                let window_loc = self.stage.position_of(window).unwrap_or_default();
+                let size = window.geometry().size;
+                let center = Point::from((
+                    window_loc.x as f64 + size.w as f64 / 2.0,
+                    window_loc.y as f64 + size.h as f64 / 2.0,
+                ));
+                let Some(mut visible) = self.parent_visible_canvas_rect(center) else {
+                    return;
+                };
+                visible.loc -= window_loc;
+                visible
+            };
             target.loc -= get_popup_toplevel_coords(popup);
             target
         } else if let Some(cl) = self
@@ -562,25 +752,40 @@ impl DriftWm {
             .find(|cl| cl.surface.wl_surface() == &root)
             && let Some(pos) = cl.position
         {
-            // Parent is a canvas-positioned layer surface
-            let output_geo = active_output
-                .as_ref()
-                .and_then(|o| self.space.output_geometry(o))
-                .unwrap_or_default();
+            // Parent is a canvas-positioned layer surface. Resolve its output from
+            // the widget's centre, not its origin, so a widget whose top-left has
+            // scrolled off every viewport still resolves to the output showing it.
+            // Uses bbox() rather than bbox_with_popups(): the latter would fold this
+            // popup (and any open sibling) into the point deciding its own output.
+            let mut widget_bbox = cl.surface.bbox();
+            widget_bbox.loc += pos;
+            let center = Point::from((
+                widget_bbox.loc.x as f64 + widget_bbox.size.w as f64 / 2.0,
+                widget_bbox.loc.y as f64 + widget_bbox.size.h as f64 / 2.0,
+            ));
             // Constrain to the visible canvas area (accounts for zoom)
-            let viewport_size = output_geo.size;
-            let mut target = driftwm::canvas::visible_canvas_rect(
-                self.camera().to_i32_round(),
-                viewport_size,
-                self.zoom(),
-            );
+            let Some(mut target) = self.parent_visible_canvas_rect(center) else {
+                return;
+            };
             // Translate to layer-surface-relative coordinates
             target.loc -= pos;
             target.loc -= get_popup_toplevel_coords(popup);
             target
         } else {
-            // Parent is a layer surface — find it in the layer map
-            let output = self.active_output();
+            // Parent is a layer surface — find the output whose map holds it.
+            // The search takes one guard per output and drops it before the
+            // next; re-locking the *same* output's map (as the lookup below
+            // does) while a guard is still alive would deadlock.
+            let output = self
+                .space
+                .outputs()
+                .find(|o| {
+                    layer_map_for_output(o)
+                        .layers()
+                        .any(|l| l.wl_surface() == &root)
+                })
+                .cloned()
+                .or_else(|| self.active_output());
             let output = match output {
                 Some(o) => o,
                 None => return,

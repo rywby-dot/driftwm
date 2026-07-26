@@ -14,14 +14,21 @@ pub mod persistence;
 mod placement;
 mod reload;
 mod render_cache;
+mod session_store;
+mod stage_window;
+mod suspended;
 mod viewport;
-mod window_animation;
-pub use cluster_snapshot::ClusterResizeSnapshot;
+pub(crate) mod window_animation;
+pub use cluster_snapshot::{ClusterMember, ClusterResizeSnapshot};
 pub use cursor::{CursorFrames, CursorState};
 pub use errors::ErrorSource;
-pub use focus::FocusTarget;
+pub use focus::{FocusIntent, FocusTarget};
+pub(crate) use navigation::CLICK_NAVIGATE_SLOP;
 pub use persistence::{read_all_per_output_state, remove_state_file};
 pub use render_cache::{BorderCacheEntry, RenderCache, ShadowCacheEntry};
+pub use session_store::SessionStore;
+pub use stage_window::{StageWindow, SuspendedId, SuspendedWindow};
+pub use suspended::{PendingRelaunch, RelaunchMarker, SuspendMark, UnmapSnapshot};
 
 use smithay::{
     desktop::{PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window},
@@ -84,10 +91,12 @@ use crate::input::gestures::GestureState;
 use crate::input::keyboard::TapTracker;
 use driftwm::canvas::MomentumState;
 use driftwm::config::{Config, HotCorner};
+use driftwm::stage::StageElement;
 use driftwm::window_ext::WindowExt;
 
-/// Min visible fraction of the focused window for auto-placement to anchor a
-/// new window to its cluster. Lower than the navigation/activation thresholds:
+/// Min visible fraction an element needs before auto-placement will anchor a
+/// new window to its cluster — of the focused window, and of every candidate
+/// the fallback picker considers. Lower than the navigation/activation thresholds:
 /// even a small sliver of the cluster on-screen is a stronger signal than the
 /// alternative (dropping the new window in the middle of an unrelated region).
 const AUTO_PLACE_CLUSTER_THRESHOLD: f64 = 0.33;
@@ -149,6 +158,25 @@ pub struct PendingClickNavigate {
     /// compositor's job, and a deferral there would put a dead beat on every
     /// click.
     pub defer: bool,
+}
+
+/// What a pick-mode press landed on: a canvas client window or a suspended
+/// stand-in. Below `zoom_interact_min` both are one uniform click/drag target.
+#[derive(Clone)]
+pub enum PickTarget {
+    Client(Window),
+    Suspended(SuspendedId),
+}
+
+/// A left click armed in pick mode (below `zoom_interact_min`). On release
+/// within the slop it centers the target; a drag past the slop promotes to a
+/// move (and cancels this). Mirrors `PendingClickNavigate` — press screen
+/// coords and output make the slop comparison zoom- and output-safe.
+pub struct PendingPick {
+    pub target: PickTarget,
+    pub press_screen_pos: Point<f64, Logical>,
+    pub button: u32,
+    pub output: Output,
 }
 
 /// Session lock state machine: Unlocked → Pending → Locked → Unlocked.
@@ -249,21 +277,42 @@ pub enum ModeIntent {
     Max,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ZoomAnimationAnchor {
-    pub canvas: Point<f64, Logical>,
-    pub screen: Point<f64, Logical>,
-}
-
+/// Per-output viewport state, stored on each `Output` via `UserDataMap`
+/// (wrapped in `Mutex` since `UserDataMap` requires `Sync`). !Send fields
+/// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
 #[derive(Clone, Copy)]
 pub(crate) struct EdgePanDelay {
     pub(crate) edges: u8,
     pub(crate) entered_at: Instant,
 }
 
-/// Per-output viewport state, stored on each `Output` via `UserDataMap`
-/// (wrapped in `Mutex` since `UserDataMap` requires `Sync`). !Send fields
-/// and non-Copy ownership types (fullscreen, lock_surface) stay on DriftWm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoomAnimationAnchor {
+    pub canvas: Point<f64, Logical>,
+    pub screen: Point<f64, Logical>,
+}
+
+/// A view move that belongs to a window transition and must not start before the
+/// window does. Fit pans the camera to centre the window it is resizing; starting
+/// that while the window is still frozen on its pre-fit picture reads as two
+/// motions instead of one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingView {
+    /// The output whose viewport this moves — resolved when the move was staged,
+    /// not when it lands, since the pointer (and so the active output) can move
+    /// while the window is frozen.
+    pub output: String,
+    pub camera: Point<f64, Logical>,
+    pub zoom: f64,
+    pub anchor: ZoomAnimationAnchor,
+    /// The viewport as the staging action left it. Anything that moves the camera
+    /// in the meantime — a pan gesture, momentum, a navigation action — takes
+    /// ownership of the view, and this move is dropped rather than yanking the
+    /// canvas back a third of a second later.
+    pub staged_camera: Point<f64, Logical>,
+    pub staged_zoom: f64,
+}
+
 #[derive(Clone)]
 pub struct OutputState {
     pub camera: Point<f64, Logical>,
@@ -292,6 +341,15 @@ pub struct OutputState {
     pub layout_position: Point<i32, Logical>,
     pub home_return: Option<HomeReturn>,
     pub fullscreen_return: Option<FullscreenReturn>,
+    /// This output's active bookmark: the visible bookmark nearest its usable
+    /// center, with hysteresis. Recomputed per frame by the ext-workspace
+    /// refresh; the focused output's value is what the protocol and IPC report.
+    pub active_bookmark: Option<String>,
+    /// The backend, not the config, owns this output's mode, scale and
+    /// transform — set for the nested output, whose host window drives size
+    /// and scale and whose transform is the renderer's Y-flip compensation.
+    /// Config reload skips those three here and applies position only.
+    pub backend_owned_mode: bool,
 }
 
 pub fn init_output_state(
@@ -324,6 +382,8 @@ pub fn init_output_state(
             layout_position,
             home_return: None,
             fullscreen_return: None,
+            active_bookmark: None,
+            backend_owned_mode: false,
         })
     });
 }
@@ -425,7 +485,7 @@ pub struct DriftWm {
     /// history / MRU cycle, fullscreen membership, and fit state. Mutate
     /// through [`Self::map_window`] / [`Self::raise_window`] /
     /// [`Self::unmap_window`] and the stage-backed methods.
-    pub stage: driftwm::stage::Stage<Window>,
+    pub stage: driftwm::stage::Stage<StageWindow>,
     /// Output registry only (`map_output` / `outputs` / `output_geometry`);
     /// holds no window elements. Per-window output membership
     /// (`wl_surface.enter`/`leave`) is driven by [`Self::refresh_window_outputs`],
@@ -456,18 +516,35 @@ pub struct DriftWm {
     /// snapshot when a dirty tick didn't change what subscribers see.
     pub ipc_last_event_hash: Option<u64>,
     // -- global: SSD decorations --
-    pub decorations: HashMap<
-        smithay::reexports::wayland_server::backend::ObjectId,
-        crate::decorations::WindowDecoration,
-    >,
+    pub decorations:
+        HashMap<crate::decorations::DecorationKey, crate::decorations::WindowDecoration>,
     pub pending_ssd: HashSet<smithay::reexports::wayland_server::backend::ObjectId>,
     /// Supersample factor for SSD decoration buffers: `ceil` of the largest
     /// output scale. One buffer rendered at this density serves every output
     /// (downscaling stays crisp; only upscaling blurs).
     pub decoration_scale: i32,
     pub render: RenderCache,
+    /// Per-window open/close/move/resize/fullscreen animation bookkeeping,
+    /// keyed by stable `ElementId`. Render-only; the stage stays authoritative.
     pub(crate) window_animations: window_animation::WindowAnimations,
+    /// Flattened textures of closed windows, faded out after teardown.
     pub(crate) closing_snapshots: Vec<crate::render::ClosingSnapshot>,
+    /// Departing stand-in chrome fading out — over the window that adopted its
+    /// slot, or in place when the stand-in was dismissed.
+    pub(crate) standin_fades: Vec<crate::render::StandInFade>,
+    /// Content textures captured at unmap/teardown, keyed by root surface id,
+    /// consumed when the close animation flattens.
+    pub(crate) close_pixels: std::collections::HashMap<
+        smithay::reexports::wayland_server::backend::ObjectId,
+        crate::render::ClosePixels,
+    >,
+    /// Content captured while a compositor resize is frozen, consumed when the
+    /// client's redraw releases the freeze.
+    pub(crate) resize_captures: crate::render::ResizeCaptures,
+    /// The old content of a resized window, fading out over the new content for
+    /// the length of its geometry leg.
+    pub(crate) resize_crossfades:
+        HashMap<driftwm::stage::ElementId, crate::render::ResizeCrossfade>,
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
@@ -513,6 +590,7 @@ pub struct DriftWm {
     pub foreign_toplevel_state: driftwm::protocols::foreign_toplevel::ForeignToplevelManagerState,
     pub foreign_toplevel_list_state:
         smithay::wayland::foreign_toplevel_list::ForeignToplevelListState,
+    pub ext_workspace_state: driftwm::protocols::ext_workspace::ExtWorkspaceManagerState,
     pub screencopy_state: driftwm::protocols::screencopy::ScreencopyManagerState,
     pub output_management_state: driftwm::protocols::output_management::OutputManagementState,
     pub output_power_state: driftwm::protocols::output_power::OutputPowerState,
@@ -557,10 +635,17 @@ pub struct DriftWm {
     /// mapped to the client-requested output (if any). Resolved against window
     /// rules + active output when the deferred fullscreen fires on first commit.
     pub pending_fullscreen: HashMap<WlSurface, Option<Output>>,
-    /// Keyboard focus snapshot captured at `new_toplevel` time, keyed by the
-    /// new surface. `Some(None)` means user had no focus (e.g. clicked empty
-    /// canvas); missing entry means snapshot was already consumed.
-    pub auto_anchor_snapshot: HashMap<WlSurface, Option<Window>>,
+    /// Focused-element snapshot captured at `new_toplevel` time, keyed by the
+    /// new surface: the live window or suspended stand-in the user was working
+    /// with, so a new window auto-places beside it. `Some(None)` means user had
+    /// no focus (e.g. clicked empty canvas); missing entry means the snapshot
+    /// was already consumed.
+    pub auto_anchor_snapshot: HashMap<WlSurface, Option<StageWindow>>,
+    /// Set only by a deliberate click on empty canvas, cleared by every focus
+    /// write. Lets auto placement tell "the user asked for a blank slate" (stay
+    /// centered) apart from "the anchor merely isn't usable" (fall back to the
+    /// nearest element in view).
+    pub suppress_auto_anchor: bool,
     /// After unfit, re-center around `target_center` once geometry actually
     /// shrinks from `pre_exit_size`. Waiting avoids firing while the client
     /// (Chromium) still reports the fit-era size.
@@ -575,15 +660,67 @@ pub struct DriftWm {
         driftwm::layout::snap::SnapRect,
     >,
 
+    /// Windows whose close was requested via `suspend-window`: their next
+    /// `toplevel_destroyed` converts into a suspended window. Keyed by surface
+    /// id; each carries the trigger-time identity + geometry and a deadline
+    /// (a refused close lets the mark lapse). Swept on the per-frame tick.
+    pub suspend_marks: HashMap<smithay::reexports::wayland_server::backend::ObjectId, SuspendMark>,
+    /// Windows whose close was requested by the compositor (close-window,
+    /// `msg close`, taskbar close): their destroy stays a real close even when
+    /// `suspend_on_close` is on. Deadline mirrors the suspend marks so a refused
+    /// close can't real-close a crash days later.
+    pub real_close_marks:
+        HashMap<smithay::reexports::wayland_server::backend::ObjectId, std::time::Instant>,
+    /// Markless-conversion inputs captured when a mapped toplevel unmaps, so a
+    /// client that unmaps before destroying (which resets its xdg role and wipes
+    /// app_id / title / geometry) still converts under `suspend_on_close`. Keyed
+    /// by surface id; consumed by the destroy and dropped on remap. See
+    /// [`UnmapSnapshot`].
+    pub unmap_snapshots:
+        HashMap<smithay::reexports::wayland_server::backend::ObjectId, UnmapSnapshot>,
+    /// Resolved desktop-entry database for identity + relaunch. Warmed on a
+    /// background thread at startup (delivered by ping); a suspend before the
+    /// warm lands builds it synchronously. `None` until either populates it.
+    pub desktop_entry_cache: Option<driftwm::desktop_entry::DesktopEntryCache>,
+    /// Monotonic source of per-process suspended-window ids. Durable session
+    /// keys are layered on top later (session restore).
+    pub next_suspended_id: u64,
+    /// In-flight relaunches, keyed by the suspended window being relaunched
+    /// (the suspended window itself holds no pending state). Drives the
+    /// "launching…" label ([`Self::is_suspended_launching`]) and both match
+    /// signals; see [`PendingRelaunch`].
+    pub pending_relaunches: BTreeMap<SuspendedId, PendingRelaunch>,
+    /// A relaunched surface that presented its activation token before its
+    /// first-commit placement, awaiting adoption into the suspended window it
+    /// names. Purged with the surface if the client dies before mapping.
+    pub pending_adoptions: HashMap<WlSurface, SuspendedId>,
+    /// Durable session store (session restore): the `session.json` path, dirty
+    /// timer, carried-forward entries, and fresh-boot camera seed.
+    pub session_store: SessionStore,
+    /// The bookmark registry: named canvas points (Y-up, window-center
+    /// convention). Seeded from `[navigation.bookmarks]` at startup, then the
+    /// live source of truth — set-bookmark, IPC, and reload mutate it.
+    pub bookmarks: BTreeMap<String, [f64; 2]>,
+
     /// Window-level keyboard-focus intent. The actual keyboard focus is
     /// derived from this plus any higher-priority owner (session lock,
-    /// exclusive / on-demand layer surface) in `update_keyboard_focus`.
-    pub window_focus: Option<FocusTarget>,
+    /// exclusive / on-demand layer surface) in `update_keyboard_focus`. A
+    /// `Suspended` intent derives to no seat keyboard focus.
+    pub window_focus: Option<FocusIntent>,
     /// Layer surface granted keyboard focus on click via `OnDemand`
     /// interactivity. Cleared when a window takes focus or it unmaps.
     pub on_demand_layer: Option<WlSurface>,
     /// The active popup keyboard/pointer grab, if any. See [`PopupGrabState`].
     pub popup_grab: Option<PopupGrabState>,
+    /// Stage elements under an active interactive `MoveGrab`, tracked so the
+    /// relaunch adopt path and the animation start path can tell whether *this*
+    /// element is being dragged right now — a plain "any grab active" check
+    /// would wrongly block them while something else is being moved. Stand-ins
+    /// are drag targets too, hence [`ClusterMember`] rather than `Window`. A
+    /// multiset (not an `Option`) because a pointer move and a touch move can
+    /// run on different elements at once; grabs push on install and remove on
+    /// unset.
+    pub interactive_move: Vec<ClusterMember>,
 
     pub held_action: Option<(u32, driftwm::config::Action, Instant)>,
 
@@ -607,6 +744,13 @@ pub struct DriftWm {
     /// Mouse buttons currently held down. Cleared on VT switch and session
     /// pause alongside `suppressed_keys`.
     pub held_buttons: HashSet<u32>,
+
+    /// Buttons whose press pick mode swallowed (below `zoom_interact_min`), so
+    /// their release is swallowed too rather than forwarded to a client that
+    /// never saw the press. Drained in `track_held_button` (not on the release
+    /// path) so a release missed while locked or after an output drop can't
+    /// leave a stale entry that suppresses a later real release.
+    pub pick_swallowed_buttons: HashSet<u32>,
 
     pub gesture_state: Option<GestureState>,
     pub pending_middle_click: Option<PendingMiddleClick>,
@@ -636,6 +780,12 @@ pub struct DriftWm {
     /// top-level camera and the snapshot's `active` flags follow the active
     /// output, so switching outputs must dirty them even when no camera moved.
     pub state_file_active_output: Option<String>,
+    /// Set by the per-frame ext-workspace refresh when any output's active
+    /// bookmark flipped. Broadcast-only (like a title change): forces a
+    /// subscription push without marking the state file dirty, since an
+    /// incumbent can flip with the camera still (set-bookmark under the current
+    /// viewport, delete of the active bookmark).
+    pub active_bookmark_dirty: bool,
 
     pub autostart: Vec<String>,
 
@@ -706,6 +856,9 @@ pub struct DriftWm {
 
     /// Click armed for auto-navigate on release (see `auto_navigate_on_click`).
     pub pending_click_navigate: Option<PendingClickNavigate>,
+
+    /// Left click armed in pick mode (see `PendingPick`, `arm_pick`).
+    pub pending_pick: Option<PendingPick>,
 
     /// Timer for the deferred click-navigate pan. The pan waits out the
     /// double-click window so a second click can cancel it; a fresh press clears
@@ -908,11 +1061,51 @@ impl DriftWm {
     }
 
     /// Replicates `Space`'s activate semantics: xdg Activated set on `target`,
-    /// cleared on every other window. Pending-only — the configure rides on the
-    /// next send.
-    fn set_activated_exclusive(&self, target: &Window) {
+    /// cleared on every other window, and delivered on the wire for any window
+    /// whose hint actually changed — so a focus change (click, raise) that
+    /// isn't followed by another configure still reaches the client. Idempotent:
+    /// a repeat call (hover, re-raise) changes nothing and sends nothing.
+    pub(crate) fn set_activated_exclusive<Q>(&self, target: &Q)
+    where
+        StageWindow: PartialEq<Q>,
+    {
+        self.activate_exclusive(target, true);
+    }
+
+    /// Like `set_activated_exclusive`, but for a `target` that is about to
+    /// receive a configure anyway — its batched first-commit or fullscreen
+    /// send. Staging the target's hint lets it ride that configure instead of a
+    /// premature standalone one; only the deactivated peers, which have no other
+    /// configure coming, are flushed here.
+    pub(crate) fn activate_riding_batch<Q>(&self, target: &Q)
+    where
+        StageWindow: PartialEq<Q>,
+    {
+        self.activate_exclusive(target, false);
+    }
+
+    /// Set xdg Activated on `target`, clear it elsewhere, and flush the hint for
+    /// windows whose state changed and already had their initial configure sent
+    /// — flushing a still-pending toplevel would force that configure out early,
+    /// splitting the batched first-commit send. `flush_target` is false when a
+    /// following send will carry the target's hint itself. Stand-ins never
+    /// activate (`set_activated` no-ops, no toplevel), so they stay quiet.
+    fn activate_exclusive<Q>(&self, target: &Q, flush_target: bool)
+    where
+        StageWindow: PartialEq<Q>,
+    {
         for w in self.stage.windows() {
-            w.set_activated(w == target);
+            if !w.set_activated(w == target) {
+                continue;
+            }
+            if w == target && !flush_target {
+                continue;
+            }
+            if let Some(toplevel) = w.toplevel()
+                && toplevel.is_initial_configure_sent()
+            {
+                toplevel.send_pending_configure();
+            }
         }
     }
 
@@ -926,15 +1119,28 @@ impl DriftWm {
     /// Raise `window`, then its child windows, so a child/modal dialog stays
     /// directly above its own parent without jumping over unrelated windows
     /// that sit higher in the stack.
-    pub fn raise_with_children(&mut self, window: &Window) {
-        for w in self.stage.raise_with_children(window) {
-            self.set_activated_exclusive(&w);
+    pub fn raise_with_children(&mut self, window: &StageWindow) {
+        // The stage does the raising and returns the raise order; activation is
+        // exclusive to the topmost of it (the order's last element). Toggling it
+        // per raised window instead would ping-pong the hint and flush a burst
+        // of configures between a parent and its modal child. A stand-in target
+        // no-ops its own `set_activated`, but exclusivity still clears the
+        // previously-active client's hint — so focusing a stand-in deactivates
+        // the client that had focus.
+        if let Some(top) = self.stage.raise_with_children(window).last().cloned() {
+            self.set_activated_exclusive(&top);
         }
     }
 
     /// Map (or move) `window` at `pos`, exclusively activating it if
     /// `activate` is set.
-    pub fn map_window(&mut self, window: Window, pos: Point<i32, Logical>, activate: bool) {
+    pub fn map_window(
+        &mut self,
+        window: impl Into<StageWindow>,
+        pos: Point<i32, Logical>,
+        activate: bool,
+    ) {
+        let window = window.into();
         self.stage.map(window.clone(), pos);
         if activate {
             self.set_activated_exclusive(&window);
@@ -954,8 +1160,12 @@ impl DriftWm {
     /// half (camera restore) is NOT handled here — a caller unmapping a
     /// fullscreen window must tear that down first, as `toplevel_destroyed` does.
     pub fn unmap_window(&mut self, window: &Window) {
-        if let Some(surface) = window.wl_surface() {
-            self.window_animations.remove(&surface.id());
+        // Belt and braces: the dead-id sweep in `refresh_and_flush_clients` also
+        // covers this, but drop eagerly so a re-map can't briefly resolve a
+        // stale animation entry.
+        if let Some(id) = self.stage.id_of(window) {
+            self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
         }
         self.stage.remove(window);
         membership::send_output_leaves(window);
@@ -973,36 +1183,48 @@ impl DriftWm {
     /// non-toplevel surfaces: the extra lookups just miss.
     pub fn cleanup_surface_state(&mut self, surface: &WlSurface) {
         let id = surface.id();
-        self.decorations.remove(&id);
+        self.decorations
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
         self.pending_ssd.remove(&id);
         self.pending_recenter.remove(&id);
         self.stable_snap_rects.remove(&id);
+        // `resolve_suspend_conversion` consumes the unmap snapshot on the normal
+        // destroy path; drop it here too so a surface torn down through a path
+        // that never reached that consume (the wl_surface-level cleanup safety
+        // net) can't strand a snapshot past its surface.
+        self.unmap_snapshots.remove(&id);
+        // Captured close pixels are consumed at teardown; drop any that outlive
+        // their surface (never-closed hide-to-tray captures, skipped animations).
+        self.close_pixels.remove(&id);
         self.pending_center.remove(surface);
         self.pending_size.remove(surface);
         self.pending_fit.remove(surface);
         self.pending_fullscreen.remove(surface);
         // blur_cache is keyed per output, so drop every output's entry for this surface.
         self.render.blur_cache.retain(|(_, sid), _| sid != &id);
-        self.render.shadow_cache.remove(&id);
-        self.render.border_cache.remove(&id);
         self.render
-            .close_snapshot_cache
-            .retain(|(_, surface_id), _| surface_id != &id);
+            .shadow_cache
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
         self.render
-            .close_snapshot_dirty
-            .retain(|(_, surface_id)| surface_id != &id);
+            .border_cache
+            .remove(&crate::decorations::DecorationKey::Surface(id.clone()));
         // capture_state keys this surface's texture/damage tracker under "cap-tl:".
         self.render
             .capture_state
             .remove(&format!("cap-tl:{:?}", id));
         self.image_copy_capture_state.remove_toplevel(surface);
+        // A relaunched surface that died before adoption must not leave its
+        // stash behind (the pending relaunch itself is keyed by suspended id and
+        // GC'd on its own deadline).
+        self.pending_adoptions.remove(surface);
         self.auto_anchor_snapshot.remove(surface);
         // Drop snapshots pointing at the destroyed surface as their anchor.
-        // Keep `None`-anchor entries (user had no focus — unrelated).
+        // Keep `None`-anchor entries (user had no focus) and stand-in anchors
+        // (no surface — never the destroyed one).
         self.auto_anchor_snapshot
             .retain(|_, anchor| match anchor.as_ref() {
                 None => true,
-                Some(w) => w.wl_surface().is_some_and(|s| &*s != surface),
+                Some(w) => w.wl_surface().is_none_or(|s| &*s != surface),
             });
     }
 
@@ -1010,7 +1232,24 @@ impl DriftWm {
         self.stage
             .windows()
             .find(|w| w.wl_surface().as_deref() == Some(surface))
+            .and_then(|w| w.client())
             .cloned()
+    }
+
+    /// Record `target` as under a fresh interactive move grab. Called at grab
+    /// install (not first motion) so a press-and-hold with no motion is still
+    /// guarded; balanced by `disarm_interactive_move` on grab unset.
+    pub fn arm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
+        self.interactive_move.push(target.clone().into());
+    }
+
+    /// Drop one `target` entry armed by `arm_interactive_move`. Removes a single
+    /// occurrence so overlapping pointer/touch moves stay balanced.
+    pub fn disarm_interactive_move<T: Clone + Into<ClusterMember>>(&mut self, target: &T) {
+        let target = target.clone().into();
+        if let Some(i) = self.interactive_move.iter().position(|m| *m == target) {
+            self.interactive_move.remove(i);
+        }
     }
 
     /// Innermost modal descendant for focus redirect. Chases modal chains
@@ -1022,6 +1261,7 @@ impl DriftWm {
             .stage
             .windows()
             .rfind(|w| w.parent_surface().as_ref() == Some(&*parent_surface) && w.is_modal())
+            .and_then(|w| w.client())
             .cloned()?;
         self.topmost_modal_child_inner(&child, 9).or(Some(child))
     }
@@ -1035,6 +1275,7 @@ impl DriftWm {
             .stage
             .windows()
             .rfind(|w| w.parent_surface().as_ref() == Some(&*parent_surface) && w.is_modal())
+            .and_then(|w| w.client())
             .cloned()?;
         self.topmost_modal_child_inner(&child, depth - 1)
             .or(Some(child))
@@ -1042,7 +1283,7 @@ impl DriftWm {
 
     /// Raise a window and focus it (or its innermost modal child).
     pub fn raise_and_focus(&mut self, window: &Window, serial: smithay::utils::Serial) {
-        self.raise_with_children(window);
+        self.raise_with_children(&StageWindow::Client(window.clone()));
         self.enforce_below_windows();
 
         let focus_surface = self
@@ -1051,6 +1292,19 @@ impl DriftWm {
             .and_then(|w| w.wl_surface().map(|s| FocusTarget(s.into_owned())));
 
         self.set_window_focus(focus_surface, serial);
+    }
+
+    /// Raise + focus a stage element — the element-generic form of
+    /// `raise_and_focus` / `focus_and_raise_suspended`.
+    pub fn raise_and_focus_element(
+        &mut self,
+        element: &StageWindow,
+        serial: smithay::utils::Serial,
+    ) {
+        match element {
+            StageWindow::Client(w) => self.raise_and_focus(w, serial),
+            StageWindow::Suspended(s) => self.focus_and_raise_suspended(s.id),
+        }
     }
 
     /// Record a window-level keyboard-focus intent and recompute the actual
@@ -1062,10 +1316,74 @@ impl DriftWm {
         target: Option<FocusTarget>,
         serial: smithay::utils::Serial,
     ) {
-        self.window_focus = target;
+        self.window_focus = target.map(FocusIntent::Surface);
+        // Unconditional, `None` included: only `clear_focus_to_empty_canvas` means
+        // "blank slate" — a flag surviving an incidental clear would silently kill
+        // the fallback for the rest of the session.
+        self.suppress_auto_anchor = false;
         // An explicit window focus supersedes any on-demand layer focus.
         self.on_demand_layer = None;
         self.update_keyboard_focus(serial);
+    }
+
+    /// Clear focus because the user clicked bare canvas — a deliberate blank
+    /// slate, distinct from the incidental focus loss `set_window_focus(None)`
+    /// also expresses. A named entry point keeps the two from re-merging:
+    /// without it, a dying surface or closing window would read as "nothing
+    /// anchored".
+    pub fn clear_focus_to_empty_canvas(&mut self, serial: smithay::utils::Serial) {
+        self.set_window_focus(None, serial);
+        // After, not before: the setter clears the flag.
+        self.suppress_auto_anchor = true;
+    }
+
+    /// Focus a suspended window: record the intent and clear seat keyboard
+    /// focus (a suspended window has no surface to hold it). Higher-priority
+    /// owners (lock / exclusive-or-on-demand layer) still win via
+    /// `update_keyboard_focus`, which is THE GATE for every suspended-focus
+    /// behavior.
+    pub fn set_suspended_focus(&mut self, id: SuspendedId, serial: smithay::utils::Serial) {
+        self.window_focus = Some(FocusIntent::Suspended(id));
+        self.suppress_auto_anchor = false;
+        self.on_demand_layer = None;
+        self.update_keyboard_focus(serial);
+    }
+
+    /// The surface-focus intent, if any (`None` while a suspended window is the
+    /// intended focus).
+    pub fn window_focus_surface(&self) -> Option<&FocusTarget> {
+        match &self.window_focus {
+            Some(FocusIntent::Surface(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The focus *intent* resolved to a stage element, for auto-placement
+    /// anchoring: a live window for a `Surface` intent, the stand-in for a
+    /// `Suspended` one. Reads intent (not the derived seat focus) so it survives
+    /// a launcher's transient keyboard focus, matching `window_focus_surface`.
+    /// `None` when the user had no focused window (empty-canvas click) or the
+    /// intended target is already gone.
+    pub fn focused_anchor_element(&self) -> Option<StageWindow> {
+        match self.window_focus.as_ref()? {
+            FocusIntent::Surface(t) => self.window_for_surface(&t.0).map(StageWindow::Client),
+            FocusIntent::Suspended(id) => self.find_suspended(*id).map(StageWindow::Suspended),
+        }
+    }
+
+    /// The suspended window that currently holds focus *under THE GATE*: intent
+    /// is `Suspended` AND no higher-priority owner holds the derived seat
+    /// keyboard focus (lock / exclusive-or-on-demand layer / keyboard grab all
+    /// surface as a non-`None` seat focus). Intent alone is not authority.
+    pub fn gated_suspended_focus(&self) -> Option<SuspendedId> {
+        let FocusIntent::Suspended(id) = self.window_focus.as_ref()? else {
+            return None;
+        };
+        let seat_focus_empty = self
+            .seat
+            .get_keyboard()
+            .is_none_or(|kb| kb.current_focus().is_none());
+        seat_focus_empty.then_some(*id)
     }
 
     /// Derive and apply the authoritative keyboard focus from the current
@@ -1128,8 +1446,10 @@ impl DriftWm {
     fn focused_window_target(&self) -> Option<FocusTarget> {
         use smithay::utils::IsAlive;
         match &self.window_focus {
-            Some(t) if t.0.alive() => Some(t.clone()),
-            Some(_) => self
+            // A suspended window holds no seat keyboard focus.
+            Some(FocusIntent::Suspended(_)) => None,
+            Some(FocusIntent::Surface(t)) if t.0.alive() => Some(t.clone()),
+            Some(FocusIntent::Surface(_)) => self
                 .stage
                 .focus_history()
                 .iter()
@@ -1247,7 +1567,12 @@ impl DriftWm {
             for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
                 for (surface, _) in self.layers_on_sorted(output, layer) {
                     let s = surface.wl_surface();
-                    if s.alive()
+                    // Role aliveness, not just the wl_surface: a launcher destroys the
+                    // role first, and smithay resets the cached interactivity only
+                    // after `layer_destroyed` returns — so the recompute that call
+                    // makes would otherwise hand focus back to the dying launcher.
+                    if surface.alive()
+                        && s.alive()
                         && surface.cached_state().keyboard_interactivity
                             == KeyboardInteractivity::Exclusive
                     {
@@ -1506,21 +1831,112 @@ impl DriftWm {
     }
 
     pub fn output_has_active_animations(&self, output: &Output) -> bool {
-        let os = output_state(output);
-        os.camera_target.is_some()
-            || os.zoom_target.is_some()
-            || os.edge_pan_velocity.is_some()
-            || os.momentum.velocity.x != 0.0
-            || os.momentum.velocity.y != 0.0
+        // Read camera/zoom and drop the guard before any rect math: the window
+        // animation scoping below re-reads no output_state, but the guard would
+        // otherwise deadlock if it did (output_state panics on re-entrant lock).
+        let (camera_active, camera, zoom) = {
+            let os = output_state(output);
+            (
+                os.camera_target.is_some()
+                    || os.zoom_target.is_some()
+                    || os.edge_pan_velocity.is_some()
+                    || os.momentum.velocity.x != 0.0
+                    || os.momentum.velocity.y != 0.0,
+                os.camera,
+                os.zoom,
+            )
+        };
+        // No cutoff: a frozen entry draws nothing new, but its deadline can only
+        // fire from a tick, so it has to keep the loop awake.
+        camera_active || self.output_shows_window_animations(output, camera, zoom, None)
     }
 
-    /// Visual animations which are not owned by a single output.
+    /// Whether any window animation, closing snapshot, or adoption fade has a
+    /// visual rect intersecting `output`'s viewport. Caller passes the output's
+    /// already-read camera/zoom so this never re-locks `output_state`.
     ///
-    /// These currently include windows that may span outputs and closing
-    /// snapshots. Keeping this separate from timers such as key repeat makes
-    /// the render scheduler's "draw one final frame" rule explicit.
-    pub(crate) fn has_global_visual_animations(&self) -> bool {
-        self.window_animations.is_active() || !self.closing_snapshots.is_empty()
+    /// `frozen_cutoff` is `Some(now)` for the redraw side: an entry still frozen
+    /// at `now` repaints the identical picture every frame, so it is not a reason
+    /// to compose one.
+    fn output_shows_window_animations(
+        &self,
+        output: &Output,
+        camera: Point<f64, Logical>,
+        zoom: f64,
+        frozen_cutoff: Option<Instant>,
+    ) -> bool {
+        let name = output.name();
+        let viewport = output_logical_size(output);
+        let visible = driftwm::canvas::visible_canvas_rect(camera.to_i32_round(), viewport, zoom);
+
+        for snapshot in &self.closing_snapshots {
+            match snapshot.pinned_output() {
+                Some(o) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                None => {
+                    if visible.overlaps(snapshot.canvas_rect().to_i32_round()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for fade in &self.standin_fades {
+            let rect = Rectangle::new(fade.loc, fade.suspended.size.get());
+            if visible.overlaps(rect) {
+                return true;
+            }
+        }
+        // A crossfade outlives its leg only by a tick or two, but it rides the
+        // window's live rect for scoping either way.
+        for id in self.resize_crossfades.keys() {
+            if let Some(rect) = self.animation_open_canvas_rect(*id)
+                && visible.overlaps(rect)
+            {
+                return true;
+            }
+        }
+        for (id, geo) in self.window_animations.scoping_entries() {
+            if frozen_cutoff.is_some_and(|now| self.window_animations.frozen_at(id, now)) {
+                continue;
+            }
+            match geo {
+                Some((window_animation::AnimSpace::Screen(o), _)) => {
+                    if o == name {
+                        return true;
+                    }
+                }
+                Some((window_animation::AnimSpace::Canvas, rect)) => {
+                    if visible.overlaps(rect.to_i32_round()) {
+                        return true;
+                    }
+                }
+                None => {
+                    if let Some(rect) = self.animation_open_canvas_rect(id)
+                        && visible.overlaps(rect)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Live canvas rect of a window whose effect has no rect of its own — an
+    /// open entry, a resize crossfade (used for scoping only).
+    fn animation_open_canvas_rect(
+        &self,
+        id: driftwm::stage::ElementId,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let window = self.stage.window_by_id(id)?;
+        let loc = self.stage.position_of(window)?;
+        Some(Rectangle::new(
+            loc,
+            driftwm::stage::StageElement::size(window),
+        ))
     }
 
     /// True when `output_name`'s animated background is due for its next tick
@@ -1544,9 +1960,15 @@ impl DriftWm {
     }
 
     /// Outputs whose animated background can actually render: active, not
-    /// visually fullscreen, not DPMS-off. A fullscreen-entry transition keeps
-    /// its canvas visible until the window covers it, so its background remains
-    /// eligible for that short interval.
+    /// visually fullscreen, not DPMS-off. Fullscreen and DPMS-off outputs stop
+    /// rendering the background, so their `background_last_animate` stamps
+    /// go stale and would otherwise read as permanently due. A fullscreen-entry
+    /// transition keeps its canvas visible until the window covers it, so its
+    /// background stays eligible for that short interval — unless the fullscreen
+    /// it is growing into is being handed over by a window whose exit freeze is
+    /// still hiding the output, in which case nothing was uncovered. Shared by the idle
+    /// due-check, the tick-timer arming wait, and the per-frame dirty-marking so
+    /// all three agree on which outputs count.
     pub(crate) fn background_render_eligible_outputs(&self) -> impl Iterator<Item = &Output> {
         self.active_outputs.iter().filter(|o| {
             !self.is_output_visually_fullscreen(o) && !self.dpms_off_outputs.contains(o)
@@ -1579,7 +2001,10 @@ impl DriftWm {
             || self.cursor.exec_cursor_show_at.is_some()
             || self.cursor.exec_cursor_deadline.is_some()
             || self.cursor.is_animated()
-            || self.has_global_visual_animations()
+            || self.window_animations.is_active()
+            || !self.closing_snapshots.is_empty()
+            || !self.standin_fades.is_empty()
+            || !self.resize_crossfades.is_empty()
     }
 
     pub fn flush_middle_click(&mut self, press_time: u32, release_time: Option<u32>) {
@@ -1634,32 +2059,53 @@ impl DriftWm {
         self.stage.fullscreen_on(&output.name()).is_some()
     }
 
-    /// Output whose viewport contains the window's center, or the active
-    /// output if the window isn't visible on any.
-    pub fn output_for_window(&self, window: &smithay::desktop::Window) -> Option<Output> {
+    /// Output whose viewport contains the element's center, or the active
+    /// output if it isn't visible on any. Element-generic: a stand-in resolves
+    /// by center containment exactly like a client (it never pins, so the
+    /// pin short-circuit is simply inert for it).
+    pub fn output_for_window<Q>(&self, window: &Q) -> Option<Output>
+    where
+        StageWindow: PartialEq<Q>,
+        Q: StageElement,
+    {
         // A pinned window is fixed to one output regardless of canvas geometry.
         if let Some(site) = self.stage.pin_of(window) {
             return self.output_by_name(&site.output);
         }
         let loc = self.stage.position_of(window)?;
-        let geo = window.geometry();
+        let size = window.size();
         let center: Point<f64, Logical> = Point::from((
-            loc.x as f64 + geo.size.w as f64 / 2.0,
-            loc.y as f64 + geo.size.h as f64 / 2.0,
+            loc.x as f64 + size.w as f64 / 2.0,
+            loc.y as f64 + size.h as f64 / 2.0,
         ));
-        let found = self
-            .space
+        self.output_showing_canvas_point(center)
+            .or_else(|| self.active_output())
+    }
+
+    /// True if `output`'s viewport currently shows the canvas point.
+    pub fn output_shows_canvas_point(&self, output: &Output, point: Point<f64, Logical>) -> bool {
+        let (camera, zoom) = {
+            let os = output_state(output);
+            (os.camera, os.zoom)
+        };
+        let visible = driftwm::canvas::visible_canvas_rect(
+            camera.to_i32_round(),
+            output_logical_size(output),
+            zoom,
+        );
+        visible.contains(Point::from((point.x as i32, point.y as i32)))
+    }
+
+    /// First output whose viewport shows the canvas point. Callers that have a
+    /// preferred output (the pointer's, say) should test it with
+    /// `output_shows_canvas_point` first: viewports overlap by default — every
+    /// output starts centered on the canvas origin — so the first match is
+    /// registration order, not proximity.
+    pub fn output_showing_canvas_point(&self, point: Point<f64, Logical>) -> Option<Output> {
+        self.space
             .outputs()
-            .find(|output| {
-                let os = output_state(output);
-                let size = output_logical_size(output);
-                let visible =
-                    driftwm::canvas::visible_canvas_rect(os.camera.to_i32_round(), size, os.zoom);
-                drop(os);
-                visible.contains(Point::from((center.x as i32, center.y as i32)))
-            })
-            .cloned();
-        found.or_else(|| self.active_output())
+            .find(|output| self.output_shows_canvas_point(output, point))
+            .cloned()
     }
 
     /// Bounding box of a mapped window in canvas coordinates: `window.bbox_with_popups()`
@@ -1676,12 +2122,18 @@ impl DriftWm {
     }
 
     /// True if `window` is pinned to an output's screen space.
-    pub fn is_pinned(&self, window: &Window) -> bool {
+    pub fn is_pinned<Q>(&self, window: &Q) -> bool
+    where
+        StageWindow: PartialEq<Q>,
+    {
         self.stage.is_pinned(window)
     }
 
     /// True if `window` is currently fullscreen on some output.
-    pub fn is_window_fullscreen(&self, window: &Window) -> bool {
+    pub fn is_window_fullscreen<Q>(&self, window: &Q) -> bool
+    where
+        StageWindow: PartialEq<Q>,
+    {
         self.stage.is_fullscreen(window)
     }
 
@@ -1689,7 +2141,8 @@ impl DriftWm {
     pub fn fullscreen_window_on(&self, output: &Output) -> Option<Window> {
         self.stage
             .fullscreen_on(&output.name())
-            .map(|fs| fs.window.clone())
+            .and_then(|fs| fs.window.client())
+            .cloned()
     }
 
     /// The fullscreen window on the active output, if any.
@@ -1704,7 +2157,11 @@ impl DriftWm {
     /// zoom-to-fit, etc. A fullscreen window fills its own output and is parked
     /// at that output's camera origin, so it must never join another output's
     /// snap/cluster/fit geometry.
-    pub fn is_canvas_window(&self, window: &Window) -> bool {
+    pub fn is_canvas_window<Q>(&self, window: &Q) -> bool
+    where
+        Q: WindowExt,
+        StageWindow: PartialEq<Q>,
+    {
         !window.is_widget() && !self.is_pinned(window) && !self.is_window_fullscreen(window)
     }
 
@@ -1887,20 +2344,20 @@ impl DriftWm {
         }
     }
 
-    /// Re-anchor each pinned window's `Space` location to the canvas point its
-    /// fixed `screen_pos` currently maps to. Without this the loc freezes at
-    /// placement and `Space::refresh` drifts it off its output as the camera
-    /// pans — triggering spurious `output_leave` and the visibility culls, which
-    /// would freeze the pinned window at 0 FPS. Re-mapped bottom-to-top in the
-    /// current z-order because `Space::map_element` raises the element to the
-    /// top of its z-class, so order-preserving re-map keeps multi-pinned
-    /// stacking and focus-raise intact. Only the canvas loc is touched —
-    /// rendering and hit-testing still read `screen_pos`.
+    /// Re-anchor each pinned window's canvas location to the point its fixed
+    /// `screen_pos` currently maps to. Without this the loc freezes at placement
+    /// and drifts off its output as the camera pans — triggering spurious
+    /// `output_leave` and the visibility culls, which would freeze the pinned
+    /// window at 0 FPS. Only the position is touched: this runs on every camera
+    /// move, and a re-map would raise each pinned window to the top of the
+    /// z-order every time, above windows the user put there — including one
+    /// growing into the fullscreen a pinned window is on its way out of.
+    /// Rendering and hit-testing still read `screen_pos`.
     fn sync_pinned_locs(&mut self) {
         if !self.stage.has_pinned() {
             return;
         }
-        let pinned: Vec<(Window, driftwm::stage::PinnedSite)> = self
+        let pinned: Vec<(StageWindow, driftwm::stage::PinnedSite)> = self
             .stage
             .pinned_windows()
             .map(|(w, site)| (w.clone(), site.clone()))
@@ -1920,7 +2377,7 @@ impl DriftWm {
             )
             .0
             .to_i32_round();
-            self.map_window(window, canvas, false);
+            self.stage.set_position(&window, canvas);
         }
     }
 
@@ -1961,7 +2418,7 @@ impl DriftWm {
     pub fn reassign_orphaned_pinned(&mut self, to: &Output) {
         let live: Vec<String> = self.space.outputs().map(|o| o.name()).collect();
         let to_size = output_logical_size(to);
-        let orphans: Vec<(Window, driftwm::stage::PinnedSite)> = self
+        let orphans: Vec<(StageWindow, driftwm::stage::PinnedSite)> = self
             .stage
             .pinned_windows()
             .filter(|(_, site)| !live.contains(&site.output))
@@ -2064,14 +2521,57 @@ impl DriftWm {
         self.stage
             .windows()
             .find(|w| w.wl_surface().as_deref() == Some(&focus.0))
+            .and_then(|w| w.client())
             .cloned()
     }
 
-    pub fn window_ssd_bar(&self, window: &Window) -> i32 {
+    /// The element action dispatch should treat as focused: the keyboard-focused
+    /// client window, else the stand-in holding gated suspended focus. The two
+    /// sources are mutually exclusive (a stand-in holds no seat keyboard focus),
+    /// so the client-first order changes no reachable outcome. Contrast
+    /// `focused_anchor_element`, which reads raw focus *intent* without the gate.
+    pub fn focused_element(&self) -> Option<StageWindow> {
+        if let Some(window) = self.focused_window() {
+            return Some(StageWindow::Client(window));
+        }
+        self.gated_suspended_focus()
+            .and_then(|id| self.find_suspended(id))
+            .map(StageWindow::Suspended)
+    }
+
+    pub fn window_ssd_bar<W: WaylandFocus + WindowExt>(&self, window: &W) -> i32 {
+        // Every stand-in draws the same textless bar (a CSD-origin one shrinks
+        // its body under it), so a suspended element always carries the bar
+        // height regardless of origin.
+        if window.is_suspended() {
+            return self.config.decorations.title_bar_height;
+        }
         window
             .wl_surface()
-            .filter(|s| self.decorations.contains_key(&s.id()))
+            .filter(|s| {
+                self.decorations
+                    .contains_key(&crate::decorations::DecorationKey::Surface(s.id()))
+            })
             .map_or(0, |_| self.config.decorations.title_bar_height)
+    }
+
+    /// Border width for an element with no surface to resolve a per-rule
+    /// override against — a suspended window. Uses the global default mode's
+    /// width, matching what a relaunched client would get before its rule
+    /// re-applies.
+    pub fn default_border_width(&self) -> i32 {
+        let mode =
+            driftwm::config::effective_decoration_mode(None, &self.config.decorations.default_mode);
+        driftwm::config::effective_border_width(None, mode, &self.config.decorations)
+    }
+
+    /// Border width for any stage element: the per-rule width for a client, the
+    /// global default for a surfaceless stand-in.
+    pub fn element_border_width(&self, w: &StageWindow) -> i32 {
+        match w {
+            StageWindow::Client(c) => c.wl_surface().map_or(0, |s| self.window_border_width(&s)),
+            StageWindow::Suspended(_) => self.default_border_width(),
+        }
     }
 
     /// Recompute `decoration_scale` from current outputs. Call after output
@@ -2097,39 +2597,42 @@ impl DriftWm {
         driftwm::config::effective_border_width(applied.as_ref(), mode, &self.config.decorations)
     }
 
-    /// Visual center accounting for SSD title bar above content.
+    /// Visual center accounting for SSD title bar above content. Sized from
+    /// [`configured_window_size`], so a center taken right after a fullscreen
+    /// exit describes the restored window rather than the viewport the client is
+    /// still reporting.
     pub fn window_visual_center(&self, window: &Window) -> Option<Point<f64, Logical>> {
         let loc = self.stage.position_of(window)?;
-        let size = window.geometry().size;
+        let size = configured_window_size(window);
         let bar = self.window_ssd_bar(window) as f64;
-        Some(Point::from((
-            loc.x as f64 + size.w as f64 / 2.0,
-            loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
-        )))
+        Some(visual_frame_center(loc, size, bar))
     }
 
     /// True if at least `threshold` of the window's area is inside the active
     /// output's viewport.
-    pub fn window_visible_at_least(&self, window: &Window, threshold: f64) -> bool {
+    pub fn window_visible_at_least<W>(&self, window: &W, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
         self.active_output()
             .is_some_and(|o| self.window_visible_at_least_on(window, &o, threshold))
     }
 
     /// As `window_visible_at_least`, but against `output`'s viewport instead
     /// of the active one.
-    pub fn window_visible_at_least_on(
-        &self,
-        window: &Window,
-        output: &Output,
-        threshold: f64,
-    ) -> bool {
+    pub fn window_visible_at_least_on<W>(&self, window: &W, output: &Output, threshold: f64) -> bool
+    where
+        W: StageElement,
+        StageWindow: PartialEq<W>,
+    {
         let Some(loc) = self.stage.position_of(window) else {
             return false;
         };
         let os = output_state(output);
         driftwm::canvas::visible_fraction(
             loc,
-            window.geometry().size,
+            StageElement::size(window),
             os.camera,
             output_logical_size(output),
             os.zoom,
@@ -2143,6 +2646,54 @@ impl DriftWm {
     }
 }
 
+/// Center of the visual frame (content plus the SSD title-bar strip above it)
+/// from a content top-left, content size, and bar height. Inverse of
+/// [`frame_loc_for_center`]. Shared by `window_visual_center`, `nav_center`, and
+/// the fit/fill/fullscreen exit settles so the formula can't drift.
+pub(crate) fn visual_frame_center(
+    loc: Point<i32, Logical>,
+    size: Size<i32, Logical>,
+    bar: f64,
+) -> Point<f64, Logical> {
+    Point::from((
+        loc.x as f64 + size.w as f64 / 2.0,
+        loc.y as f64 - bar + (size.h as f64 + bar) / 2.0,
+    ))
+}
+
+/// The size a window will have once it acks everything already configured: the
+/// last size we sent, else its committed geometry.
+///
+/// `Window::geometry()` reports the last *committed* buffer, which lags a
+/// configure round-trip. That lag is invisible most of the time but not after a
+/// fullscreen exit: the exit only sends the smaller configure, so a geometry
+/// action dispatched right behind it (the `execute_action` guard exits first)
+/// would size and center against the still-reported viewport. The server's
+/// pending state is what the window is becoming, so prefer it.
+pub(crate) fn configured_window_size(window: &Window) -> Size<i32, Logical> {
+    window
+        .toplevel()
+        .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+        .filter(|size| size.w > 0 && size.h > 0)
+        .unwrap_or_else(|| window.geometry().size)
+}
+
+/// Content top-left that places a frame of `size` (plus its `bar` strip) so its
+/// visual center lands on `center`. Inverse of [`visual_frame_center`]; used by
+/// the fit exit and the pending-recenter completion to re-place a window around
+/// a preserved center.
+pub(crate) fn frame_loc_for_center(
+    center: Point<f64, Logical>,
+    size: Size<i32, Logical>,
+    bar: i32,
+) -> Point<i32, Logical> {
+    let total_h = size.h + bar;
+    Point::from((
+        (center.x - size.w as f64 / 2.0) as i32,
+        (center.y - total_h as f64 / 2.0) as i32 + bar,
+    ))
+}
+
 impl DriftWm {
     /// Cull dead windows and refresh output membership even on idle
     /// (no-render) turns, or a client that died without a clean unmap lingers
@@ -2150,6 +2701,19 @@ impl DriftWm {
     /// main loop and the test server pump so the two can't drift apart.
     pub fn refresh_and_flush_clients(&mut self) {
         self.stage.retain_alive();
+        // Prune animation entries whose window left the stage — covers crash
+        // paths (no `unmap_window`) and lets the fixture baseline drain without
+        // a tick source.
+        let stage = &self.stage;
+        self.window_animations
+            .retain_ids(|id| stage.window_by_id(id).is_some());
+        // Same sweep for the crossfade halves. It covers teardown only: the id
+        // survives `Stage::replace`, so conversion and adoption drop theirs at
+        // the replace itself.
+        self.resize_captures
+            .retain_ids(|id| stage.window_by_id(id).is_some());
+        self.resize_crossfades
+            .retain(|id, _| stage.window_by_id(*id).is_some());
         self.refresh_window_outputs();
         self.popups.cleanup();
         self.display_handle.flush_clients().ok();
@@ -2178,7 +2742,17 @@ impl DriftWm {
             ("auto_anchor_snapshot", self.auto_anchor_snapshot.len()),
             ("pending_recenter", self.pending_recenter.len()),
             ("stable_snap_rects", self.stable_snap_rects.len()),
+            ("suspend_marks", self.suspend_marks.len()),
+            ("real_close_marks", self.real_close_marks.len()),
+            ("window_animations", self.window_animations.len()),
             ("closing_snapshots", self.closing_snapshots.len()),
+            ("standin_fades", self.standin_fades.len()),
+            ("close_pixels", self.close_pixels.len()),
+            ("resize_captures", self.resize_captures.len()),
+            ("resize_crossfades", self.resize_crossfades.len()),
+            ("unmap_snapshots", self.unmap_snapshots.len()),
+            ("pending_relaunches", self.pending_relaunches.len()),
+            ("pending_adoptions", self.pending_adoptions.len()),
             (
                 "idle_inhibiting_surfaces",
                 self.idle_inhibiting_surfaces.len(),
@@ -2266,13 +2840,18 @@ impl DriftWm {
             }
         }
 
-        for id in self.decorations.keys() {
-            assert!(
-                self.stage
+        for key in self.decorations.keys() {
+            let present = match key {
+                crate::decorations::DecorationKey::Surface(id) => self
+                    .stage
                     .windows()
                     .any(|w| w.wl_surface().is_some_and(|s| s.id() == *id)),
-                "decoration entry for a window not on the stage"
-            );
+                crate::decorations::DecorationKey::Suspended(sid) => self
+                    .stage
+                    .windows()
+                    .any(|w| w.suspended().is_some_and(|s| s.id == *sid)),
+            };
+            assert!(present, "decoration entry for a window not on the stage");
         }
     }
 }
@@ -2306,6 +2885,8 @@ mod tests {
             layout_position: Point::from(layout_position),
             home_return: None,
             fullscreen_return: None,
+            active_bookmark: None,
+            backend_owned_mode: false,
         }
     }
 

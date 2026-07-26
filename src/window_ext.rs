@@ -61,6 +61,10 @@ pub trait WindowExt {
     /// Widgets are persistent canvas furniture (excluded from close, nudge,
     /// focus-cycle, etc).
     fn is_widget(&self) -> bool;
+    /// True only for a compositor-drawn suspended window (no client surface).
+    fn is_suspended(&self) -> bool {
+        false
+    }
 }
 
 impl WindowExt for Window {

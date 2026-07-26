@@ -11,7 +11,8 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::seat::WaylandFocus;
 
-use crate::state::DriftWm;
+use crate::decorations::DecorationKey;
+use crate::state::{DriftWm, SuspendedId};
 use driftwm::window_ext::WindowExt;
 
 pub mod client;
@@ -200,7 +201,10 @@ pub(crate) fn dispatch(request: Request, state: &mut DriftWm) -> Reply {
         Request::Move { window, to } => cmd_move(window, to, state),
         Request::Opacity { window, value } => cmd_opacity(window, value, state),
         Request::Close(sel) => cmd_close(sel, state),
+        Request::Suspend(sel) => cmd_suspend(sel, state),
+        Request::Relaunch(sel) => cmd_relaunch(sel, state),
         Request::Action(spec) => cmd_action(&spec, state),
+        Request::Bookmark { name, to, delete } => cmd_bookmark(name, to, delete, state),
         Request::Screenshot {
             target,
             scale,
@@ -218,7 +222,14 @@ fn is_mutating(request: &Request) -> bool {
             | Request::Move { to: Some(_), .. }
             | Request::Opacity { value: Some(_), .. }
             | Request::Close(_)
+            | Request::Suspend(_)
+            | Request::Relaunch(_)
             | Request::Action(_)
+            // Setting or deleting a bookmark can flip an active-bookmark incumbent
+            // without moving the camera; the per-frame refresh needs a render to
+            // pick it up. Bare get/list (no `to`, no `delete`) stays a pure query.
+            | Request::Bookmark { to: Some(_), .. }
+            | Request::Bookmark { delete: true, .. }
     )
 }
 
@@ -291,7 +302,7 @@ fn layout_code(layout_list: &str, index: usize) -> Option<String> {
 }
 
 fn cmd_state(state: &mut DriftWm) -> Response {
-    Response::State(state_info(state))
+    Response::State(Box::new(state_info(state)))
 }
 
 /// Build the full state snapshot shared by the `state` reply and subscription
@@ -310,9 +321,9 @@ pub(crate) fn state_info(state: &mut DriftWm) -> StateInfo {
         .space
         .outputs()
         .map(|output| {
-            let (cam, z) = {
+            let (cam, z, active_bookmark) = {
                 let os = crate::state::output_state(output);
-                (os.camera, os.zoom)
+                (os.camera, os.zoom, os.active_bookmark.clone())
             };
             let logical = crate::state::output_logical_size(output);
             OutputInfo {
@@ -321,9 +332,14 @@ pub(crate) fn state_info(state: &mut DriftWm) -> StateInfo {
                 zoom: z,
                 size: [logical.w, logical.h],
                 active: active.as_ref() == Some(output),
+                active_bookmark,
             }
         })
         .collect();
+
+    // The focused output's incumbent — the value ext-workspace advertises.
+    let active_bookmark =
+        active.and_then(|o| crate::state::output_state(&o).active_bookmark.clone());
 
     StateInfo {
         camera,
@@ -336,6 +352,7 @@ pub(crate) fn state_info(state: &mut DriftWm) -> StateInfo {
         layers,
         canvas_layers,
         outputs,
+        active_bookmark,
     }
 }
 
@@ -353,6 +370,7 @@ fn window_by_selector(
         Some(WindowSelector::Id(n)) => state
             .stage
             .window_by_id(driftwm::stage::ElementId(*n))
+            .and_then(|w| w.client())
             .cloned()
             .ok_or_else(|| format!("no window with id {n}")),
         Some(WindowSelector::AppId(s)) => {
@@ -360,6 +378,7 @@ fn window_by_selector(
             state
                 .stage
                 .windows()
+                .filter_map(|w| w.client())
                 .find(|w| {
                     !w.is_widget()
                         && w.app_id_or_class()
@@ -371,15 +390,71 @@ fn window_by_selector(
     }
 }
 
+/// Resolve a selector to a suspended window's [`SuspendedId`], if it names one.
+/// `None` selector resolves to the gated-focused suspended window. Id matches
+/// the stage `ElementId` (the IPC handle, stable across suspend/relaunch);
+/// AppId is a case-insensitive substring match on the original app_id.
+fn suspended_by_selector(
+    state: &DriftWm,
+    selector: Option<&WindowSelector>,
+) -> Option<SuspendedId> {
+    match selector {
+        None => state.gated_suspended_focus(),
+        Some(WindowSelector::Id(n)) => state
+            .stage
+            .window_by_id(driftwm::stage::ElementId(*n))
+            .and_then(|w| w.suspended())
+            .map(|s| s.id),
+        Some(WindowSelector::AppId(s)) => {
+            let needle = s.to_lowercase();
+            state
+                .stage
+                .windows()
+                .filter_map(|w| w.suspended())
+                .find(|s| s.identity.app_id.to_lowercase().contains(&needle))
+                .map(|s| s.id)
+        }
+    }
+}
+
+/// IPC handle + app_id for a suspended window (its stage `ElementId`), for the
+/// `Focused` reply.
+fn suspended_focused_info(state: &DriftWm, id: SuspendedId) -> Option<protocol::FocusedWindow> {
+    let element = state
+        .stage
+        .windows()
+        .find(|w| w.suspended().is_some_and(|s| s.id == id))?;
+    Some(protocol::FocusedWindow {
+        id: state.stage.id_of(element)?.0,
+        app_id: element.app_id_or_class(),
+    })
+}
+
 fn cmd_focus(arg: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
     let Some(selector) = arg else {
-        return Ok(Response::Focused(
-            state
-                .focused_window()
-                .map(|w| focused_window_info(state, &w)),
-        ));
+        // Report the focused window, preferring a live client and falling back
+        // to a focused suspended stand-in.
+        if let Some(w) = state.focused_window() {
+            return Ok(Response::Focused(Some(focused_window_info(state, &w))));
+        }
+        let info = state
+            .gated_suspended_focus()
+            .and_then(|id| suspended_focused_info(state, id));
+        return Ok(Response::Focused(info));
     };
-    let window = window_by_selector(state, Some(&selector))?;
+    // A live client wins over a same-named suspended stand-in; a selector that
+    // resolves only to a stand-in navigates to it (focus + raise + pan).
+    let window = match window_by_selector(state, Some(&selector)) {
+        Ok(window) => window,
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, Some(&selector)) else {
+                return Err(e);
+            };
+            let info = suspended_focused_info(state, id);
+            state.reveal_suspended(id);
+            return Ok(Response::Focused(info));
+        }
+    };
     // Widgets are only reachable by id (the app_id search skips them) and can't
     // take focus.
     if window.is_widget() {
@@ -419,8 +494,80 @@ fn cmd_action(spec: &str, state: &mut DriftWm) -> Reply {
     Ok(Response::Ok)
 }
 
+/// List / get / set / delete bookmarks. The registry is a flat name → [x, y]
+/// (Y-up) map that the config seeds and set-bookmark/reload also mutate; every
+/// change here marks the durable session dirty. Never touches zoom.
+fn cmd_bookmark(
+    name: Option<String>,
+    to: Option<(f64, f64)>,
+    delete: bool,
+    state: &mut DriftWm,
+) -> Reply {
+    if delete {
+        let name = name.ok_or_else(|| "bookmark delete requires a name".to_string())?;
+        if to.is_some() {
+            return Err("bookmark delete does not take coordinates".to_string());
+        }
+        if state.bookmarks.remove(&name).is_none() {
+            return Err(format!("no bookmark named '{name}'"));
+        }
+        state.session_store_mark_dirty();
+        return Ok(Response::Ok);
+    }
+    match (name, to) {
+        // No name and no coordinates → list everything (BTreeMap sorts by name).
+        (None, None) => Ok(Response::Bookmarks(state.bookmarks.clone())),
+        // Coordinates without a name can't identify a bookmark to set.
+        (None, Some(_)) => Err("bookmark coordinates require a name".to_string()),
+        (Some(name), None) => {
+            let &[x, y] = state
+                .bookmarks
+                .get(&name)
+                .ok_or_else(|| format!("no bookmark named '{name}'"))?;
+            Ok(Response::Bookmark { x, y })
+        }
+        (Some(name), Some((x, y))) => {
+            if !x.is_finite() || !y.is_finite() {
+                return Err("bookmark coordinates must be finite".to_string());
+            }
+            state.bookmarks.insert(name, [x, y]);
+            state.session_store_mark_dirty();
+            Ok(Response::Bookmark { x, y })
+        }
+    }
+}
+
 fn cmd_move(window: Option<WindowSelector>, to: Option<(i32, i32)>, state: &mut DriftWm) -> Reply {
-    let window = window_by_selector(state, window.as_ref())?;
+    // A live client wins; a selector resolving only to a suspended stand-in
+    // reads or sets its canvas position in place (no client to reconfigure).
+    let window = match window_by_selector(state, window.as_ref()) {
+        Ok(window) => window,
+        Err(e) => {
+            let Some(id) = suspended_by_selector(state, window.as_ref()) else {
+                return Err(e);
+            };
+            let s = state
+                .find_suspended(id)
+                .ok_or_else(|| "suspended window is gone".to_string())?;
+            let element = crate::state::StageWindow::Suspended(s.clone());
+            let size = s.size.get();
+            return match to {
+                None => {
+                    let loc = state.stage.position_of(&element).unwrap_or_default();
+                    let (x, y) = driftwm::canvas::internal_to_rule(loc, size);
+                    Ok(Response::Position { x, y })
+                }
+                Some((x, y)) => {
+                    let loc = driftwm::canvas::rule_to_internal(x, y, size);
+                    state.stage.set_position(&element, loc);
+                    // A stand-in's canvas position is durable — coalesce the
+                    // write like a pointer/touch drag does.
+                    state.session_store_mark_dirty();
+                    Ok(Response::Position { x, y })
+                }
+            };
+        }
+    };
     let size = window.geometry().size;
     match to {
         None => {
@@ -484,9 +631,73 @@ fn cmd_opacity(window: Option<WindowSelector>, value: Option<f64>, state: &mut D
 }
 
 fn cmd_close(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
-    let window = window_by_selector(state, sel.as_ref())?;
-    state.request_window_close(&window);
-    Ok(Response::Ok)
+    match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => {
+            // An explicit `msg close` is a real close — it must not convert
+            // under `suspend_on_close`.
+            state.mark_real_close(&window);
+            window.send_close();
+            Ok(Response::Ok)
+        }
+        // No live client — a suspended stand-in has none to close, so `msg
+        // close` dismisses it.
+        Err(e) => match suspended_by_selector(state, sel.as_ref()) {
+            Some(id) => {
+                state.dismiss_suspended(id);
+                Ok(Response::Ok)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Suspend a window by selector: focus it (without moving the camera) if it
+/// isn't already focused, then run it through the `suspend-window` action
+/// path — the same one a keybinding hits, so fullscreen/pin handling and mark
+/// bookkeeping stay in one place.
+fn cmd_suspend(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let window = match window_by_selector(state, sel.as_ref()) {
+        Ok(window) => window,
+        Err(e) => {
+            return match suspended_by_selector(state, sel.as_ref()) {
+                Some(_) => Err("window is already suspended".to_string()),
+                None => Err(e),
+            };
+        }
+    };
+    if window.is_widget() {
+        return Err("widgets cannot be suspended".to_string());
+    }
+    // The window itself must not be a dialog/modal (same restriction as the
+    // `suspend-window` action).
+    if window.parent_surface().is_some() || window.is_modal() {
+        return Err("cannot suspend a dialog".to_string());
+    }
+    // A window with an open modal child is ineligible too — raise_and_focus
+    // would silently redirect to the child instead.
+    if state.topmost_modal_child(&window).is_some() {
+        return Err("window has an open modal dialog".to_string());
+    }
+    if state.focused_window().as_ref() != Some(&window) {
+        state.raise_and_focus(&window, SERIAL_COUNTER.next_serial());
+    }
+    cmd_action("suspend-window", state)
+}
+
+/// Relaunch a suspended window by selector (the focused stand-in when `None`).
+fn cmd_relaunch(sel: Option<WindowSelector>, state: &mut DriftWm) -> Reply {
+    let id = suspended_by_selector(state, sel.as_ref())
+        .ok_or_else(|| "no suspended window matching selector".to_string())?;
+    // Captured before the call, so a failed relaunch can name the app in the error.
+    let name = state
+        .find_suspended(id)
+        .map(|s| s.identity.display_name.clone());
+    if state.relaunch_suspended(id) {
+        Ok(Response::Ok)
+    } else {
+        let name = name.unwrap_or_else(|| "the app".to_string());
+        Err(format!("{name} is no longer installed"))
+    }
 }
 
 /// Capture a screenshot synchronously to `path`.
@@ -529,30 +740,61 @@ fn cmd_screenshot(target: &ScreenshotTarget, scale: f64, path: &str, state: &mut
 }
 
 /// Resolve a screenshot target to an internal canvas rect (top-left, Y-down)
-/// and, for a `window` target, the window to compose in isolation (`None` for
+/// and, for a `window` target, the element to compose in isolation (`None` for
 /// scene targets, which render every window).
-fn resolve_screenshot_region(
+pub(crate) fn resolve_screenshot_region(
     target: &ScreenshotTarget,
     state: &DriftWm,
-) -> Result<(Rectangle<i32, Logical>, Option<smithay::desktop::Window>), String> {
+) -> Result<(Rectangle<i32, Logical>, Option<crate::state::StageWindow>), String> {
+    use crate::state::StageWindow;
     match target {
         ScreenshotTarget::Viewport => {
             let output = state.active_output().ok_or("no active output to capture")?;
             Ok((crate::state::output_viewport_rect(&output), None))
         }
         ScreenshotTarget::Window { window } => {
-            // Isolation composes only this window, so pinned and fullscreen
-            // capture fine — `window_visual_rect` already returns the right
-            // rect for both (camera park / dormant canvas slot).
-            let window = window_by_selector(state, window.as_ref())?;
-            let rect = window_visual_rect(state, &window)
-                .ok_or_else(|| "window has no capturable area".to_string())?;
-            Ok((rect, Some(window)))
+            // A live client wins; a selector resolving only to a stand-in
+            // captures its chrome in isolation (docs promise suspended ids
+            // screenshot). Pinned and fullscreen clients capture fine too —
+            // `window_visual_rect` returns the right rect for both.
+            match window_by_selector(state, window.as_ref()) {
+                Ok(w) => {
+                    let rect = window_visual_rect(state, &w)
+                        .ok_or_else(|| "window has no capturable area".to_string())?;
+                    Ok((rect, Some(StageWindow::Client(w))))
+                }
+                Err(e) => {
+                    let Some(id) = suspended_by_selector(state, window.as_ref()) else {
+                        return Err(e);
+                    };
+                    let s = state
+                        .find_suspended(id)
+                        .ok_or_else(|| "suspended window is gone".to_string())?;
+                    let element = StageWindow::Suspended(s);
+                    let rect = state
+                        .visual_frame_rect(&element)
+                        .map(snap_rect_to_rect)
+                        .ok_or_else(|| "suspended window has no capturable area".to_string())?;
+                    Ok((rect, Some(element)))
+                }
+            }
         }
         ScreenshotTarget::All => {
+            // Union over every canvas element, stand-ins included — the capture
+            // renders their chrome, so an all-suspended canvas must frame them,
+            // not error "no windows to capture".
             let mut acc: Option<Rectangle<i32, Logical>> = None;
-            for w in state.stage.windows().filter(|w| state.is_canvas_window(w)) {
-                let Some(r) = window_visual_rect(state, w) else {
+            for element in state.stage.windows() {
+                let r = match element {
+                    StageWindow::Client(w) if state.is_canvas_window(w) => {
+                        window_visual_rect(state, w)
+                    }
+                    StageWindow::Suspended(_) => {
+                        state.visual_frame_rect(element).map(snap_rect_to_rect)
+                    }
+                    _ => None,
+                };
+                let Some(r) = r else {
                     continue;
                 };
                 acc = Some(match acc {
@@ -637,7 +879,10 @@ fn window_visual_rect(
     let wl_surface = window.wl_surface()?;
 
     let is_fullscreen = state.stage.is_fullscreen(window);
-    let has_ssd = !is_fullscreen && state.decorations.contains_key(&wl_surface.id());
+    let has_ssd = !is_fullscreen
+        && state
+            .decorations
+            .contains_key(&DecorationKey::Surface(wl_surface.id()));
     let applied = driftwm::config::applied_rule(&wl_surface);
     let mode = driftwm::config::effective_decoration_mode(
         applied.as_ref().and_then(|r| r.decoration.as_ref()),
@@ -669,6 +914,18 @@ fn window_visual_rect(
         Point::<i32, Logical>::from((loc.x - edge, loc.y - bar - edge)),
         Size::<i32, Logical>::from((size.w + 2 * edge, size.h + bar + 2 * edge)),
     ))
+}
+
+/// A `SnapRect` (f64 canvas bounds) as an integer `Rectangle`, for framing a
+/// suspended stand-in in a screenshot region.
+fn snap_rect_to_rect(r: driftwm::layout::snap::SnapRect) -> Rectangle<i32, Logical> {
+    let x = r.x_low.floor() as i32;
+    let y = r.y_low.floor() as i32;
+    // Anchor and extent round outward independently so fractional bounds stay
+    // covered (ceil of the difference can end short of x_high).
+    let w = (r.x_high.ceil() as i32 - x).max(1);
+    let h = (r.y_high.ceil() as i32 - y).max(1);
+    Rectangle::new((x, y).into(), (w, h).into())
 }
 
 fn union_rect(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
