@@ -485,6 +485,51 @@ impl Default for GestureThresholds {
     }
 }
 
+/// Every threshold the touch recognizer arbitrates on. The first three are the
+/// touch equivalents of [`GestureThresholds`], kept separate because a
+/// touchscreen is a display: swipe travel is measured in millimetres and scaled
+/// by the panel's `px_per_mm`, so a command gesture feels the same on a phone
+/// panel and a 15" tablet. A trackpad has no such physical anchor and measures
+/// its swipe in px, so the two knobs cannot share a value. The rest are the
+/// tap/hold timings, which a trackpad has no counterpart for at all — a
+/// touchscreen tap is a whole finger landing on glass, not a pad click.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchThresholds {
+    pub swipe_distance_mm: f64,
+    pub pinch_in_scale: f64,
+    pub pinch_out_scale: f64,
+    /// Max duration of a tap (center / fit trigger). A lift later than this is a
+    /// slow press, not a tap, and fires nothing.
+    pub tap_max_ms: u32,
+    /// Window for a second tap to count as a double-tap. Also how long a single
+    /// tap's action is *deferred*, since the recognizer can't know a second tap
+    /// isn't coming until the window closes.
+    pub double_tap_ms: u32,
+    /// Dwell before a drag commits that turns it into a hold gesture: hold-swipe
+    /// (no prior tap) or doubletap-hold-swipe (after a double-tap). Long enough
+    /// that a normal pan, which drags promptly, never trips it.
+    pub hold_ms: u32,
+    /// Finger travel before a pan/zoom gesture leaves the dead zone and starts to
+    /// pan, in millimetres (converted to px per panel via `px_per_mm` so the feel
+    /// is the same on any touchscreen). Below this — and below the zoom slop — a
+    /// contact stays a candidate tap.
+    pub dead_zone_mm: f64,
+}
+
+impl Default for TouchThresholds {
+    fn default() -> Self {
+        Self {
+            swipe_distance_mm: 15.0,
+            pinch_in_scale: 0.85,
+            pinch_out_scale: 1.15,
+            tap_max_ms: 250,
+            double_tap_ms: 300,
+            hold_ms: 350,
+            dead_zone_mm: 2.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyboardLayout {
     pub layout: String,
@@ -677,6 +722,10 @@ pub struct WindowRule {
     /// Override the global `suspend_on_close` for matched windows. `None`
     /// inherits the global setting.
     pub suspend_on_close: Option<bool>,
+    /// Override the global `restore_windows` for matched windows. `None`
+    /// inherits the global setting. Independent of `suspend_on_close`; an
+    /// explicitly suspended stand-in always comes back regardless of this.
+    pub restore_windows: Option<bool>,
     /// Preserve the window's aspect ratio during interactive resizes. The
     /// locked ratio is snapshotted from the window's size at each resize start.
     pub preserve_aspect_ratio: bool,
@@ -735,6 +784,7 @@ pub struct AppliedWindowRule {
     pub widget: bool,
     pub pinned_to_screen: bool,
     pub suspend_on_close: Option<bool>,
+    pub restore_windows: Option<bool>,
     pub preserve_aspect_ratio: bool,
     pub decoration: Option<DecorationMode>,
     pub blur: bool,
@@ -767,6 +817,9 @@ impl AppliedWindowRule {
         }
         if let Some(soc) = rule.suspend_on_close {
             self.suspend_on_close = Some(soc);
+        }
+        if let Some(rw) = rule.restore_windows {
+            self.restore_windows = Some(rw);
         }
         if rule.preserve_aspect_ratio {
             self.preserve_aspect_ratio = true;
@@ -824,6 +877,7 @@ impl From<&WindowRule> for AppliedWindowRule {
             widget: rule.widget,
             pinned_to_screen: rule.pinned_to_screen,
             suspend_on_close: rule.suspend_on_close,
+            restore_windows: rule.restore_windows,
             preserve_aspect_ratio: rule.preserve_aspect_ratio,
             decoration: rule.decoration.clone(),
             blur: rule.blur,
@@ -875,6 +929,12 @@ pub struct EffectsConfig {
     /// wallpapers evolve slowly; re-blurring at a fraction of the output
     /// rate looks continuous through frosted glass at a fraction of the cost.
     pub animate_blur_fps: u32,
+    /// Base lerp factor for window open/close/move/resize animations
+    /// (frame-rate independent), in (0, 1]. Lower = smoother; 1 = instant.
+    pub animation_speed: f64,
+    /// Open/close scale amplitude: windows grow in from this scale and shrink
+    /// out to it, in (0, 1]. 1 = pure fade, no scaling.
+    pub animation_scale: f64,
 }
 
 impl Default for EffectsConfig {
@@ -883,6 +943,8 @@ impl Default for EffectsConfig {
             blur_radius: 2,
             blur_strength: 1.1,
             animate_blur_fps: 20,
+            animation_speed: 0.5,
+            animation_scale: 0.95,
         }
     }
 }

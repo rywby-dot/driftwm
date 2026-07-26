@@ -120,6 +120,22 @@ pub(crate) fn ensure_body(
     chrome.body_key = Some(key);
 }
 
+/// Push one stand-in chrome buffer, wrapped in the fade transform when the
+/// caller supplied one (a dismiss shrinks; the adoption crossfade passes `None`
+/// so its elements stay exactly what they were).
+fn push_chrome(
+    target: &mut Vec<OutputRenderElements>,
+    elem: PixelSnapRescaleElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    animation: Option<super::WindowRenderAnimation>,
+) {
+    match animation {
+        Some(a) => target.push(OutputRenderElements::AnimatedDecoration(
+            super::WindowTransformElement::new(elem, a.origin, a.offset, a.scale),
+        )),
+        None => target.push(OutputRenderElements::Decoration(elem)),
+    }
+}
+
 /// Emit the render elements for a suspended window into `target` (the
 /// non-widget canvas bucket). Takes the chrome caches as disjoint borrows so
 /// the caller can keep the stage iterator alive.
@@ -130,6 +146,8 @@ pub(super) fn push_suspended_element(
     loc: Point<i32, Logical>,
     focused: bool,
     launching: bool,
+    alpha: f32,
+    animation: Option<super::WindowRenderAnimation>,
     config: &DecorationConfig,
     decoration_scale: i32,
     decorations: &mut HashMap<DecorationKey, WindowDecoration>,
@@ -153,6 +171,9 @@ pub(super) fn push_suspended_element(
     let render_loc: Point<f64, Logical> =
         Point::from((loc.x as f64 - camera.x, loc.y as f64 - camera.y));
     let loc_phys: Point<i32, Physical> = render_loc.to_physical_precise_round(scale);
+    // `None` keeps the opaque fast path when fully drawn; the adoption crossfade
+    // passes alpha < 1 so the departing stand-in fades over the live window.
+    let elem_alpha = (alpha < 1.0).then_some(alpha);
 
     let bar_h_phys = (bar_height as f64 * scale.y).round();
     let bar_h_logical = bar_h_phys / scale.y;
@@ -179,18 +200,20 @@ pub(super) fn push_suspended_element(
                 renderer,
                 label_phys,
                 buf,
-                None,
+                elem_alpha,
                 None,
                 None,
                 Kind::Unspecified,
             ) {
-                target.push(OutputRenderElements::Decoration(
+                push_chrome(
+                    target,
                     PixelSnapRescaleElement::from_element(
                         elem,
                         Point::<i32, Physical>::from((0, 0)),
                         zoom,
                     ),
-                ));
+                    animation,
+                );
             }
         }
     }
@@ -206,18 +229,20 @@ pub(super) fn push_suspended_element(
                 renderer,
                 body_phys,
                 buf,
-                None,
+                elem_alpha,
                 None,
                 None,
                 Kind::Unspecified,
             ) {
-                target.push(OutputRenderElements::Decoration(
+                push_chrome(
+                    target,
                     PixelSnapRescaleElement::from_element(
                         body_elem,
                         Point::<i32, Physical>::from((0, 0)),
                         zoom,
                     ),
-                ));
+                    animation,
+                );
             }
         }
     }
@@ -235,18 +260,20 @@ pub(super) fn push_suspended_element(
         renderer,
         bar_physical,
         &deco.title_bar,
-        None,
+        elem_alpha,
         None,
         None,
         Kind::Unspecified,
     ) {
-        target.push(OutputRenderElements::Decoration(
+        push_chrome(
+            target,
             PixelSnapRescaleElement::from_element(
                 bar_elem,
                 Point::<i32, Physical>::from((0, 0)),
                 zoom,
             ),
-        ));
+            animation,
+        );
     }
 
     // Border + shadow around title bar + body, keyed by the suspended id.
@@ -276,9 +303,10 @@ pub(super) fn push_suspended_element(
             border_width,
             border_color,
             focused,
-            1.0,
+            alpha as f64,
             scale,
             zoom,
+            animation,
         );
     }
 
@@ -301,9 +329,10 @@ pub(super) fn push_suspended_element(
             shader,
             body_logical,
             (corner_radius + border_width) as f32,
-            1.0,
+            alpha as f64,
             scale,
             zoom,
+            animation,
         );
     }
 }

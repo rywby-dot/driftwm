@@ -5,20 +5,20 @@
 //! post-`run()` wiring itself (Quit + signalfd both reaching it) is hardware
 //! smoke, not covered here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use driftwm::config::Config;
 use driftwm::desktop_entry::DesktopEntryCache;
 use driftwm::session::{self, Origin, SessionEntry, SessionEnvelope, SessionOutput};
-use smithay::utils::{Point, Rectangle, Size};
+use smithay::utils::{Point, Rectangle, SERIAL_COUNTER, Size};
 
 use crate::decorations::DecorationHit;
 use crate::input::DecoTarget;
-use crate::state::{StageWindow, SuspendedWindow};
+use crate::state::{CameraSeed, FocusTarget, StageWindow, SuspendedWindow};
 
 use super::real::TempDir;
-use super::{Fixture, map_window, window_by_app_id};
+use super::{Fixture, map_window, server_surface, window_by_app_id};
 
 /// SSD-on config with `[session].restore_windows` set as asked.
 fn config_restore(on: bool) -> Config {
@@ -26,6 +26,19 @@ fn config_restore(on: bool) -> Config {
         "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n"
     ))
     .unwrap()
+}
+
+/// `config_restore`'s TOML plus an extra `[[window_rules]]` block appended
+/// verbatim — as text, so a hot-reload can feed the compositor the same shape.
+fn restore_toml(on: bool, rules_toml: &str) -> String {
+    format!(
+        "[session]\nrestore_windows = {on}\n[decorations]\ndefault_mode = \"server\"\n{rules_toml}"
+    )
+}
+
+/// `config_restore` plus an extra `[[window_rules]]` block appended verbatim.
+fn config_restore_with_rule(on: bool, rules_toml: &str) -> Config {
+    Config::from_toml(&restore_toml(on, rules_toml)).unwrap()
 }
 
 /// Seat a desktop-entry cache resolving each `stem` to a launchable identity.
@@ -37,18 +50,38 @@ fn inject_cache(f: &mut Fixture, tmp: &TempDir, stems: &[&str]) {
     f.state().desktop_entry_cache = Some(DesktopEntryCache::new(vec![tmp.path().to_path_buf()]));
 }
 
-/// Map a client at `app_id`/`size` parked at a known canvas position.
+/// Map a client at `app_id`/`size` parked at a known canvas position. Returns
+/// the client-side surface for later lookups.
 fn map_at(
     f: &mut Fixture,
     id: super::client::ClientId,
     app_id: &str,
     size: (u16, u16),
     pos: (i32, i32),
-) {
-    map_window(f, id, app_id, size);
+) -> wayland_client::protocol::wl_surface::WlSurface {
+    let surface = map_window(f, id, app_id, size);
     let window = window_by_app_id(f, app_id).unwrap();
     f.state()
         .map_window(StageWindow::Client(window), Point::from(pos), true);
+    surface
+}
+
+/// Like `map_at`, but also sets a client-side title — for rules that match on
+/// `title` as well as `app_id`. The title lands after the map, as a real
+/// client's retitle does.
+fn map_titled_at(
+    f: &mut Fixture,
+    id: super::client::ClientId,
+    app_id: &str,
+    title: &str,
+    size: (u16, u16),
+    pos: (i32, i32),
+) {
+    let surface = map_at(f, id, app_id, size, pos);
+    let window = f.client(id).window(&surface);
+    window.set_title(title);
+    window.commit();
+    f.roundtrip(id);
 }
 
 /// The suspended stand-ins on the stage, in z-order (bottom→top), each with its
@@ -77,6 +110,7 @@ fn entry(id: u64, app: &str, origin: Origin) -> SessionEntry {
         size: [400, 300],
         origin,
         csd: false,
+        focused: false,
     }
 }
 
@@ -198,6 +232,293 @@ fn restored_stand_in_has_clickable_label() {
     );
 
     f.state().dismiss_suspended(sid);
+}
+
+/// The window focused at quit comes back as focus on its stand-in, so the first
+/// window opened after a restart has an auto-placement anchor instead of landing
+/// in the middle of the viewport.
+#[test]
+fn focus_round_trips_onto_the_restored_stand_in() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    {
+        let cache = TempDir::new();
+        let mut f = Fixture::with_config(config_restore(true));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["alpha", "beta"]);
+        f.state().session_store.path = Some(path.clone());
+
+        let a = f.add_client();
+        map_at(&mut f, a, "alpha", (400, 300), (-500, -200));
+        let b = f.add_client();
+        map_at(&mut f, b, "beta", (200, 200), (100, -200));
+
+        // Focus alpha, the window *under* the last-mapped one, so the flag can't
+        // be z-order in disguise.
+        let alpha = window_by_app_id(&mut f, "alpha").unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state()
+            .set_window_focus(Some(FocusTarget(server_surface(&alpha))), serial);
+
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let saved = session::read(&path);
+    let flagged: Vec<&str> = saved
+        .entries
+        .iter()
+        .filter(|e| e.focused)
+        .map(|e| e.app_id.as_str())
+        .collect();
+    assert_eq!(flagged, vec!["alpha"], "only the focused window is flagged");
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    let alpha = restored
+        .iter()
+        .find(|(s, _)| s.identity.app_id == "alpha")
+        .expect("alpha came back")
+        .0
+        .clone();
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        Some(alpha.id),
+        "the focused window's stand-in holds the focus"
+    );
+    assert!(
+        matches!(
+            f.state().focused_anchor_element(),
+            Some(StageWindow::Suspended(s)) if s.id == alpha.id
+        ),
+        "the restored focus is the auto-placement anchor"
+    );
+    let order: Vec<&str> = restored
+        .iter()
+        .map(|(s, _)| s.identity.app_id.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["alpha", "beta"],
+        "granting the focus does not raise the stand-in — the saved z-order stands"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A canvas left unfocused (the deliberate escape hatch for placing a window
+/// wherever you like) comes back unfocused.
+#[test]
+fn an_unfocused_session_restores_unfocused() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    {
+        let cache = TempDir::new();
+        let mut f = Fixture::with_config(config_restore(true));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["alpha"]);
+        f.state().session_store.path = Some(path.clone());
+
+        let a = f.add_client();
+        map_at(&mut f, a, "alpha", (400, 300), (-500, -200));
+        let serial = SERIAL_COUNTER.next_serial();
+        f.state().set_window_focus(None, serial);
+
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().all(|e| !e.focused),
+        "nothing is flagged when nothing was focused"
+    );
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    assert_eq!(f.state().gated_suspended_focus(), None);
+    for (s, _) in suspended_in_order(&mut f) {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A restored focus lands only on a stand-in you can actually see. Off-screen —
+/// the camera didn't come back with it, or you quit panned away — the canvas
+/// starts unfocused rather than pointing relaunch and dismiss at a window
+/// nothing on screen shows.
+#[test]
+fn an_off_screen_restored_focus_is_withheld() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut far = entry(1, "faraway", Origin::Explicit);
+    far.position = [40_000, 40_000];
+    far.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![far],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1, "the stand-in itself still comes back");
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        None,
+        "focus is not handed to a stand-in outside the viewport"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A withheld hand-over must not destroy the record. Every write re-emits the
+/// flag while nothing else has taken focus, so the boot after — one whose camera
+/// actually frames the stand-in — still finds it. Without this, the ordinary
+/// `restore_camera = false` boot erases the flag on its first write and the
+/// feature silently self-destructs.
+#[test]
+fn a_withheld_restored_focus_survives_to_the_next_boot() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut far = entry(1, "faraway", Origin::Explicit);
+    far.position = [40_000, 40_000];
+    far.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![far],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Boot one: the default camera leaves the stand-in off screen, so the focus
+    // is withheld — and then the session is written straight back out.
+    {
+        let mut f = Fixture::with_config(config_restore(true));
+        // This boot quits with its stand-in still on the canvas, as a real one
+        // does — dismissing it to reach the baseline would rewrite the file the
+        // second boot reads.
+        f.skip_baseline_check();
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        f.state().apply_restored_focus();
+        assert_eq!(
+            f.state().gated_suspended_focus(),
+            None,
+            "the off-screen stand-in is not focused"
+        );
+        f.state().serialize_session_on_shutdown();
+    }
+
+    let rewritten = session::read(&path);
+    let flagged: Vec<&str> = rewritten
+        .entries
+        .iter()
+        .filter(|e| e.focused)
+        .map(|e| e.app_id.as_str())
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["faraway"],
+        "the rewrite keeps the record a withheld hand-over left pending"
+    );
+
+    // Boot two, camera parked on the stand-in: the surviving flag is what the
+    // focus is granted from.
+    let mut f = Fixture::with_config(config_restore(true));
+    // Canvas coords are center-based and y-up, so the entry's [40_000, 40_000]
+    // sits at internal (39_800, -40_150): frame it from a little up-left of that.
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Camera(Point::from((39_600.0, -40_350.0))), 1.0),
+    )]);
+    super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        Some(restored[0].0.id),
+        "the next boot that can see the stand-in grants the focus"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A carried-forward entry's focus flag belongs to a boot that's over: it's
+/// cleared on the rewrite, so flipping `restore_windows` on later can't restore
+/// focus onto a window from two sessions ago.
+#[test]
+fn a_carried_entry_loses_its_stale_focus_flag() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let mut stale = entry(2, "onlyquit", Origin::Quit);
+    stale.focused = true;
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "keepme", Origin::Explicit), stale],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Restore off: the quit entry is carried, not materialized.
+    let mut f = Fixture::with_config(config_restore(false));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+    f.state().apply_restored_focus();
+    assert_eq!(
+        f.state().gated_suspended_focus(),
+        None,
+        "a carried entry's flag restores no focus — it never materialized"
+    );
+
+    // Dismissing the explicit stand-in rewrites the file.
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].0.identity.app_id, "keepme");
+    f.state().dismiss_suspended(restored[0].0.id);
+
+    let after = session::read(&path);
+    assert_eq!(after.entries.len(), 1);
+    assert_eq!(after.entries[0].app_id, "onlyquit");
+    assert!(
+        !after.entries[0].focused,
+        "the carried entry is re-emitted unflagged"
+    );
 }
 
 /// With `restore_windows` off, an explicit entry materializes but a quit entry
@@ -379,7 +700,7 @@ fn durable_camera_seeds_fresh_boot() {
     f.state().load_session();
 
     // Fresh boot: no runtime entry for HEADLESS-1, so the durable seed applies.
-    let seed = f.state().session_store.durable_cameras.clone();
+    let seed = f.state().saved_camera_state();
     let (output, _global) =
         super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
     let (camera, zoom) = {
@@ -388,6 +709,78 @@ fn durable_camera_seeds_fresh_boot() {
     };
     assert_eq!(camera, Point::from((-1234.0, -5678.0)));
     assert_eq!(zoom, 0.75);
+}
+
+/// The runtime state file publishes each output's viewport centre, so a seed
+/// from it restores the viewport that centre framed — at a zoom where centre
+/// and internal camera are far apart.
+#[test]
+fn center_seed_restores_the_framed_viewport() {
+    let mut f = Fixture::with_config(Config::default());
+    let logical = Size::from((1920, 1080));
+    let camera = Point::from((-1234.0, -5678.0));
+    let zoom = 0.75;
+    let (x, y) = driftwm::canvas::viewport_center(camera, zoom, logical);
+
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x, y }, zoom),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (restored, restored_zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert!(
+        (restored.x - camera.x).abs() < 1e-6 && (restored.y - camera.y).abs() < 1e-6,
+        "restored camera {restored:?} does not frame the published centre"
+    );
+    assert_eq!(restored_zoom, zoom);
+}
+
+/// The seed is checked after it resolves, so the bounds guard the camera the
+/// output actually takes. A centre that is itself inside the canvas limit but
+/// lands outside it once the half-viewport is subtracted is refused, and the
+/// output keeps its default viewport.
+#[test]
+fn a_center_seed_resolving_out_of_range_is_refused() {
+    let mut f = Fixture::with_config(Config::default());
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x: -1e9, y: 0.0 }, 0.5),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (camera, zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert_eq!(camera, Point::from((-960.0, -540.0)), "default camera");
+    assert_eq!(zoom, 1.0, "default zoom");
+}
+
+/// A `zoom: 0.0` centre seed (hand-edit / corruption in the runtime state file,
+/// which validates nothing itself) divides the conversion to infinity. The
+/// output falls back to its default viewport instead of taking an inf camera.
+#[test]
+fn a_corrupt_zoom_center_seed_is_refused() {
+    let mut f = Fixture::with_config(Config::default());
+    let saved = HashMap::from([(
+        "HEADLESS-1".to_string(),
+        (CameraSeed::Center { x: 0.0, y: 0.0 }, 0.0),
+    )]);
+    let (output, _global) =
+        super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &saved);
+
+    let (camera, zoom) = {
+        let os = crate::state::output_state(&output);
+        (os.camera, os.zoom)
+    };
+    assert_eq!(camera, Point::from((-960.0, -540.0)), "default camera");
+    assert_eq!(zoom, 1.0, "default zoom");
 }
 
 /// A parseable entry with out-of-range geometry (a hand-edit / flipped byte)
@@ -472,7 +865,7 @@ fn invalid_zoom_seed_is_ignored_and_reserializes_sane() {
     );
 
     // The output connects with the default centered camera/zoom.
-    let seed = f.state().session_store.durable_cameras.clone();
+    let seed = f.state().saved_camera_state();
     let (output, _global) =
         super::headless::add_output_with_saved(f.state(), 1, (1920, 1080), &seed);
     let (camera, zoom) = {
@@ -651,6 +1044,10 @@ fn create_and_dismiss_write_immediately() {
     );
     assert_eq!(after_create.entries[0].app_id, "myapp");
     assert_eq!(after_create.entries[0].origin, Origin::Explicit);
+    assert!(
+        after_create.entries[0].focused,
+        "the stand-in inherited the closed window's focus, and the write kept it"
+    );
 
     let sid = after_create.entries[0].id;
     f.state().dismiss_suspended(crate::state::SuspendedId(sid));
@@ -731,4 +1128,523 @@ fn no_path_disables_persistence() {
     // Nothing to assert beyond "no panic, no file" — the fixture's teardown
     // baseline confirms no state leaked (e.g. a stray debounce timer).
     assert!(f.state().session_store.path.is_none());
+}
+
+/// A `restore_windows = false` rule keeps its app's live window out of the
+/// shutdown save even with the global flag on, while an unruled app's live
+/// window still saves — proving the exclusion is the rule, not a missing
+/// desktop entry or some other blanket ineligibility.
+#[test]
+fn restore_windows_false_rule_excludes_matching_app_from_shutdown_save() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded", "included"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "excluded", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "included", (400, 300), (800, 300));
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().all(|e| e.app_id != "excluded"),
+        "the ruled-out app's live window is not saved despite the global flag being on"
+    );
+    assert!(
+        saved.entries.iter().any(|e| e.app_id == "included"),
+        "the unruled app's live window still saves"
+    );
+}
+
+/// A `restore_windows = false` rule keeps a pre-existing `Quit` record from
+/// materializing at load, but the record is carried forward inert (re-emitted,
+/// not destroyed) since a carried entry is never itself materialized. The two
+/// non-matching apps flanking it in the file still materialize, in order.
+#[test]
+fn restore_windows_false_rule_quit_record_carries_forward_inert() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![
+            entry(1, "alpha", Origin::Quit),
+            entry(2, "excluded", Origin::Quit),
+            entry(3, "beta", Origin::Quit),
+        ],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        2,
+        "the ruled-out quit record never materializes"
+    );
+    assert_eq!(
+        restored
+            .iter()
+            .map(|(s, _)| s.identity.app_id.clone())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "the surviving records keep their original relative order"
+    );
+
+    f.state().session_store_write_now();
+    let after = session::read(&path);
+    assert!(
+        after.entries.iter().any(|e| e.app_id == "excluded"),
+        "the ruled-out quit record is carried forward, not destroyed"
+    );
+
+    for (s, _) in restored {
+        f.state().dismiss_suspended(s.id);
+    }
+}
+
+/// Dropping the rule that excluded a carried `Quit` record lets it materialize
+/// again on the next load: nothing about the earlier exclusion destroyed the
+/// record, it just sat inert in the file.
+#[test]
+fn restore_windows_false_rule_removed_rematerializes_carried_quit() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    // Boot 1: the rule excludes it — carried forward inert, rewritten as-is.
+    {
+        let config = config_restore_with_rule(
+            true,
+            "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+        );
+        let mut f = Fixture::with_config(config);
+        f.add_output(1, (1920, 1080));
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        assert_eq!(
+            suspended_in_order(&mut f).len(),
+            0,
+            "excluded while the rule is present"
+        );
+        f.state().session_store_write_now();
+    }
+
+    // Boot 2: the rule is gone — the very same record, untouched in the file,
+    // comes back.
+    let mut f = Fixture::with_config(config_restore(true));
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "dropping the rule restores the previously-excluded record"
+    );
+    assert_eq!(restored[0].0.identity.app_id, "excluded");
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// A rule keyed on both `app_id` and `title` is read off `app_id` alone at
+/// load, since a saved record carries no title: the record sits inert instead of
+/// materializing into a stand-in that would save itself again every cycle,
+/// coming back forever against the rule. The title criterion still narrows the
+/// save, where the live title is known.
+#[test]
+fn restore_windows_false_rule_with_title_excludes_records_by_app_id() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\ntitle = \"Some Window\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded"]);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    assert_eq!(
+        suspended_in_order(&mut f).len(),
+        0,
+        "a record the rule can't tell apart by title is excluded on its app_id"
+    );
+
+    // The live window's real title is known at save time, so the same rule keeps
+    // it out of the shutdown save — and the record is carried forward once, not
+    // re-saved as a stand-in of its own.
+    let id = f.add_client();
+    map_titled_at(
+        &mut f,
+        id,
+        "excluded",
+        "Some Window",
+        (400, 300),
+        (300, 300),
+    );
+
+    f.state().serialize_session_on_shutdown();
+    let after = session::read(&path);
+    assert_eq!(
+        after
+            .entries
+            .iter()
+            .filter(|e| e.app_id == "excluded")
+            .count(),
+        1,
+        "the live window stays out of the save, leaving just the carried record"
+    );
+    assert_eq!(
+        after.entries[0].position,
+        [100, 200],
+        "that one record is the untouched carry, not a fresh save of the live window"
+    );
+}
+
+/// A rule matching on `title` alone can't be keyed to a saved record — nothing
+/// in the file carries a title — so it governs the save only and leaves what
+/// comes back to the section key. Consulting it with the title unknown would
+/// make it answer for every app instead.
+#[test]
+fn a_title_only_restore_windows_rule_does_not_govern_what_comes_back() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "someapp", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\ntitle = \"Some Window\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "an unkeyable rule leaves the record to the section key"
+    );
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// An explicitly suspended stand-in is saved at shutdown even for an app a
+/// `restore_windows = false` rule keeps out of the save: the rule governs the
+/// automatic save of still-open windows, not an artifact the user deliberately
+/// left on the canvas — which is what the load side's `Explicit` bypass expects
+/// to find in the file.
+#[test]
+fn restore_windows_false_rule_still_saves_an_explicit_stand_in() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["excluded"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let id = f.add_client();
+    let surface = map_at(&mut f, id, "excluded", (400, 300), (300, 300));
+    let window = window_by_app_id(&mut f, "excluded").unwrap();
+    let serial = SERIAL_COUNTER.next_serial();
+    f.state().raise_and_focus(&window, serial);
+    f.state()
+        .execute_action(&driftwm::config::Action::SuspendWindow);
+    f.client(id).window(&surface).destroy();
+    f.roundtrip(id);
+    f.dispatch();
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert_eq!(saved.entries.len(), 1);
+    assert_eq!(saved.entries[0].app_id, "excluded");
+    assert_eq!(
+        saved.entries[0].origin,
+        Origin::Explicit,
+        "the deliberate stand-in is saved despite the rule"
+    );
+
+    let sid = suspended_in_order(&mut f)[0].0.id;
+    f.state().dismiss_suspended(sid);
+}
+
+/// `restore_windows` is resolved against the live config, not the rule stamped
+/// when a window mapped, so a rule added or dropped by a hot-reload decides the
+/// next shutdown save without either window remapping.
+#[test]
+fn a_hot_reloaded_restore_windows_rule_decides_the_next_save() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let rule_for =
+        |app: &str| format!("[[window_rules]]\napp_id = \"{app}\"\nrestore_windows = false\n");
+
+    let mut f = Fixture::with_config(config_restore_with_rule(true, &rule_for("alpha")));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["alpha", "beta"]);
+    f.state().session_store.path = Some(path.clone());
+
+    let a = f.add_client();
+    map_at(&mut f, a, "alpha", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "beta", (400, 300), (800, 300));
+
+    // Swap which app the rule excludes while both windows stay mapped.
+    f.state()
+        .reload_config_from_contents(&restore_toml(true, &rule_for("beta")));
+
+    f.state().serialize_session_on_shutdown();
+
+    let saved = session::read(&path);
+    assert!(
+        saved.entries.iter().any(|e| e.app_id == "alpha"),
+        "the app the reload stopped excluding is saved"
+    );
+    assert!(
+        saved.entries.iter().all(|e| e.app_id != "beta"),
+        "the app the reload started excluding is not"
+    );
+
+    // The headless fixture has no backend to drain a queued mode intent.
+    f.state().pending_mode_changes.clear();
+}
+
+/// A `restore_windows = false` rule does not touch `Explicit`-origin records:
+/// a deliberately suspended stand-in for that same app still materializes.
+#[test]
+fn restore_windows_false_rule_still_materializes_explicit_entry() {
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Explicit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let config = config_restore_with_rule(
+        true,
+        "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n",
+    );
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    let restored = suspended_in_order(&mut f);
+    assert_eq!(
+        restored.len(),
+        1,
+        "an explicit entry materializes regardless of the restore_windows rule"
+    );
+    assert_eq!(restored[0].0.identity.app_id, "excluded");
+
+    f.state().dismiss_suspended(restored[0].0.id);
+}
+
+/// A `restore_windows = true` rule saves and materializes its app even with
+/// the global flag off, while an unruled app's live window still doesn't
+/// save, and an unrelated pre-existing carried `Quit` record is untouched.
+#[test]
+fn restore_windows_true_rule_saves_and_materializes_with_global_off() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    // A prior session left a quit entry for an app this test never touches.
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "untouched", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let rules_toml = "[[window_rules]]\napp_id = \"included\"\nrestore_windows = true\n";
+    let mut f = Fixture::with_config(config_restore_with_rule(false, rules_toml));
+    f.add_output(1, (1920, 1080));
+    inject_cache(&mut f, &cache, &["included", "excluded", "untouched"]);
+    f.state().session_store.path = Some(path.clone());
+    f.state().load_session();
+
+    // The global flag is off and "untouched" has no rule, so its quit entry
+    // carries forward unmaterialized.
+    assert_eq!(
+        suspended_in_order(&mut f).len(),
+        0,
+        "nothing materializes at load"
+    );
+
+    let a = f.add_client();
+    map_at(&mut f, a, "included", (400, 300), (300, 300));
+    let b = f.add_client();
+    map_at(&mut f, b, "excluded", (400, 300), (800, 300));
+
+    f.state().serialize_session_on_shutdown();
+
+    let after = session::read(&path);
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|e| e.app_id == "included" && e.origin == Origin::Quit),
+        "the ruled-in app's live window is saved despite the global flag being off"
+    );
+    assert!(
+        after.entries.iter().all(|e| e.app_id != "excluded"),
+        "the unruled app's live window is not saved while the global flag is off"
+    );
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|e| e.app_id == "untouched" && e.origin == Origin::Quit),
+        "the unrelated carried quit record is preserved"
+    );
+
+    // A fresh load materializes the rule-included app from the same file.
+    let mut f2 = Fixture::with_config(config_restore_with_rule(false, rules_toml));
+    f2.add_output(1, (1920, 1080));
+    f2.state().session_store.path = Some(path.clone());
+    f2.state().load_session();
+    let restored = suspended_in_order(&mut f2);
+    assert!(
+        restored
+            .iter()
+            .any(|(s, _)| s.identity.app_id == "included"),
+        "the ruled-in app materializes on the next load despite the global flag being off"
+    );
+
+    for (s, _) in restored {
+        f2.state().dismiss_suspended(s.id);
+    }
+}
+
+/// A `restore_windows = false` rule's carried record doesn't accumulate across
+/// repeated login/logout cycles: the file always shows exactly the one record
+/// for the ruled app, never growing by one per logout, while an unruled app's
+/// live window keeps saving fresh every cycle.
+#[test]
+fn restore_windows_false_rule_carried_record_does_not_grow_across_cycles() {
+    let cache = TempDir::new();
+    let tmp = TempDir::new();
+    let path = tmp.path().join("session.json");
+
+    let envelope = SessionEnvelope {
+        version: session::VERSION,
+        bookmarks: BTreeMap::new(),
+        saved_at: 0,
+        entries: vec![entry(1, "excluded", Origin::Quit)],
+        outputs: BTreeMap::new(),
+    };
+    session::write(&path, &envelope, false).unwrap();
+
+    let rules_toml = "[[window_rules]]\napp_id = \"excluded\"\nrestore_windows = false\n";
+
+    for cycle in 0..3 {
+        let included_app = format!("included-{cycle}");
+        let mut f = Fixture::with_config(config_restore_with_rule(true, rules_toml));
+        f.add_output(1, (1920, 1080));
+        inject_cache(&mut f, &cache, &["excluded", included_app.as_str()]);
+        f.state().session_store.path = Some(path.clone());
+        f.state().load_session();
+        // A previous cycle's unruled entry materializes as a dormant stand-in
+        // now that it's a Quit record with the global flag on; dismiss it at
+        // the end of this cycle so the fixture's leak check stays clean.
+        let leftover = suspended_in_order(&mut f);
+
+        let a = f.add_client();
+        map_at(&mut f, a, "excluded", (400, 300), (300, 300));
+        let b = f.add_client();
+        map_at(&mut f, b, &included_app, (400, 300), (800, 300));
+
+        f.state().serialize_session_on_shutdown();
+
+        let after = session::read(&path);
+        let excluded_count = after
+            .entries
+            .iter()
+            .filter(|e| e.app_id == "excluded")
+            .count();
+        assert_eq!(
+            excluded_count, 1,
+            "cycle {cycle}: the ruled-out app's carried record count stays fixed, not growing"
+        );
+        assert!(
+            after
+                .entries
+                .iter()
+                .any(|e| e.app_id == included_app && e.origin == Origin::Quit),
+            "cycle {cycle}: the unruled app's live window is saved"
+        );
+
+        for (s, _) in leftover {
+            f.state().dismiss_suspended(s.id);
+        }
+    }
 }

@@ -4,7 +4,7 @@ pub mod layer_shell;
 pub mod xdg_shell;
 
 use crate::decorations::DecorationKey;
-use crate::state::{DriftWm, FocusIntent, FocusTarget};
+use crate::state::{DriftWm, FocusIntent, FocusTarget, StageWindow};
 use driftwm::window_ext::WindowExt;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
@@ -159,7 +159,7 @@ impl WaylandDndGrabHandler for DriftWm {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.dnd_icon = icon.map(|surface| crate::state::DndIcon {
+        let dnd_icon = icon.map(|surface| crate::state::DndIcon {
             surface,
             offset: (0, 0).into(),
         });
@@ -197,6 +197,10 @@ impl WaylandDndGrabHandler for DriftWm {
                 touch.set_grab(self, grab, serial);
             }
         }
+        // set_grab tears down any grab already in place, and a DnD grab going
+        // down that way reports cancelled() — which clears dnd_icon. Publish
+        // the new icon after that, or a restarted drag drops its own icon.
+        self.dnd_icon = dnd_icon;
     }
 }
 impl dnd::DndGrabHandler for DriftWm {
@@ -212,6 +216,10 @@ impl dnd::DndGrabHandler for DriftWm {
         for output in self.space.outputs().cloned().collect::<Vec<_>>() {
             self.clear_edge_pan(&output);
         }
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
     }
 }
 
@@ -352,7 +360,7 @@ impl XdgActivationHandler for DriftWm {
                 // interactive move/resize grab: teleporting it would fight the
                 // grab. Transient (unlike the carve-outs above), so leave the
                 // pending relaunch to its TTL and don't dismiss the stand-in.
-                if self.window_under_interactive_grab(&window, &root) {
+                if self.element_under_interactive_grab(&StageWindow::Client(window.clone())) {
                     return;
                 }
                 self.adopt_relaunched(&window, &root, sid);

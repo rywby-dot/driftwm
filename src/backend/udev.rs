@@ -591,7 +591,7 @@ pub fn init_udev(
             } => {
                 tracing::info!(
                     "Connector connected: {}-{} (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -609,14 +609,14 @@ pub fn init_udev(
             } => {
                 tracing::warn!(
                     "Connector {}-{} has no available CRTC",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id()
                 );
             }
             DrmScanEvent::Disconnected { connector, crtc } => {
                 tracing::debug!(
                     "Connector {}-{} disconnected (CRTC {:?})",
-                    connector_type_name(&connector),
+                    connector.interface().as_str(),
                     connector.interface_id(),
                     crtc,
                 );
@@ -790,7 +790,7 @@ pub fn init_udev(
                                     }
                                     tracing::info!(
                                         "Hotplug: {}-{} connected",
-                                        connector_type_name(&connector),
+                                        connector.interface().as_str(),
                                         connector.interface_id()
                                     );
                                     // Placeholders are retired inside output_connected,
@@ -903,7 +903,7 @@ fn log_drm_connectors(drm: &DrmDevice) {
         if let Ok(info) = ControlDevice::get_connector(drm, handle, true) {
             tracing::info!(
                 "  connector {}-{}: state={:?}, modes={}",
-                connector_type_name(&info),
+                info.interface().as_str(),
                 info.interface_id(),
                 info.state(),
                 info.modes().len(),
@@ -1038,7 +1038,7 @@ fn create_surface(
 ) -> Option<SurfaceData> {
     let connector_name = format!(
         "{}-{}",
-        connector_type_name(connector),
+        connector.interface().as_str(),
         connector.interface_id()
     );
 
@@ -1270,14 +1270,10 @@ fn render_frame(
     data.display_handle.flush_clients().ok();
 
     // Read per-output state for this frame
-    let (cur_camera, cur_zoom, last_cam, last_zoom) = {
+    let (cur_camera, cur_zoom) = data.world_view(output);
+    let (last_cam, last_zoom) = {
         let os = crate::state::output_state(output);
-        (
-            os.camera,
-            os.zoom,
-            os.last_rendered_camera,
-            os.last_rendered_zoom,
-        )
+        (os.last_rendered_camera, os.last_rendered_zoom)
     };
 
     // Update background element
@@ -1330,11 +1326,17 @@ fn render_frame(
     };
     #[cfg(feature = "profile-with-tracy")]
     let _cursor_span = tracy_client::span!("udev::build_cursor_elements");
+    // The cursor tracks the live camera, not `world_view` — see its doc for why
+    // the two can differ during a fullscreen entry.
+    let (cursor_camera, cursor_zoom) = {
+        let os = crate::state::output_state(output);
+        (os.camera, os.zoom)
+    };
     let cursor_elements = crate::render::build_cursor_elements(
         data,
         renderer,
-        cur_camera,
-        cur_zoom,
+        cursor_camera,
+        cursor_zoom,
         output.current_scale().fractional_scale(),
         cursor_alpha,
     );
@@ -1439,9 +1441,10 @@ fn render_frame(
 
     // Record camera+zoom for next-frame change detection
     {
+        let (camera, zoom) = data.world_view(output);
         let mut os = crate::state::output_state(output);
-        os.last_rendered_camera = os.camera;
-        os.last_rendered_zoom = os.zoom;
+        os.last_rendered_camera = camera;
+        os.last_rendered_zoom = zoom;
     }
     data.write_state_file_if_dirty();
 
@@ -1696,22 +1699,5 @@ fn convert_subpixel(sp: connector::SubPixel) -> Subpixel {
         connector::SubPixel::VerticalBgr => Subpixel::VerticalBgr,
         connector::SubPixel::None => Subpixel::None,
         _ => Subpixel::Unknown,
-    }
-}
-
-fn connector_type_name(connector: &connector::Info) -> &'static str {
-    match connector.interface() {
-        connector::Interface::DVII => "DVI-I",
-        connector::Interface::DVID => "DVI-D",
-        connector::Interface::DVIA => "DVI-A",
-        connector::Interface::SVideo => "S-Video",
-        connector::Interface::DisplayPort => "DP",
-        connector::Interface::HDMIA => "HDMI-A",
-        connector::Interface::HDMIB => "HDMI-B",
-        connector::Interface::EmbeddedDisplayPort => "eDP",
-        connector::Interface::LVDS => "LVDS",
-        connector::Interface::DSI => "DSI",
-        connector::Interface::VGA => "VGA",
-        _ => "Unknown",
     }
 }

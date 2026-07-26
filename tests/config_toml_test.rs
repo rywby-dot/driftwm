@@ -1,6 +1,6 @@
 use driftwm::config::{
     Action, BTN_RIGHT, BackgroundKind, BindingContext, Config, ContinuousAction,
-    GestureConfigEntry, GestureTrigger, Modifiers, MouseAction,
+    GestureConfigEntry, GestureTrigger, Modifiers, MouseAction, ThresholdAction,
 };
 use smithay::backend::input::AxisSource;
 use smithay::input::keyboard::{Keysym, ModifiersState, keysyms};
@@ -181,6 +181,134 @@ fn toml_gesture_context_priority() {
     );
 }
 
+#[test]
+fn toml_touch_thresholds_default_to_the_recognizer_constants() {
+    let (config, warnings) = Config::from_toml_collect("").unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 15.0);
+    assert_eq!(th.pinch_in_scale, 0.85);
+    assert_eq!(th.pinch_out_scale, 1.15);
+    assert_eq!(th.tap_max_ms, 250);
+    assert_eq!(th.double_tap_ms, 300);
+    assert_eq!(th.hold_ms, 350);
+    assert_eq!(th.dead_zone_mm, 2.0);
+    assert!(
+        warnings.is_empty(),
+        "defaults must not warn, got {warnings:?}"
+    );
+}
+
+#[test]
+fn toml_touch_thresholds_can_be_overridden() {
+    let toml = r#"
+        [touch]
+        swipe_threshold = 25.0
+        pinch_in_threshold = 0.7
+        pinch_out_threshold = 1.4
+        tap_time = 180
+        double_tap_time = 220
+        hold_time = 500
+        tap_travel = 3.5
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 25.0);
+    assert_eq!(th.pinch_in_scale, 0.7);
+    assert_eq!(th.pinch_out_scale, 1.4);
+    assert_eq!(th.tap_max_ms, 180);
+    assert_eq!(th.double_tap_ms, 220);
+    assert_eq!(th.hold_ms, 500);
+    assert_eq!(th.dead_zone_mm, 3.5);
+    assert!(
+        warnings.is_empty(),
+        "valid values must not warn, got {warnings:?}"
+    );
+}
+
+/// The whole point of the separate `[touch]` knobs: a trackpad tune must not
+/// silently retune the touchscreen (their swipe units differ), and vice versa.
+#[test]
+fn toml_touch_thresholds_are_independent_of_gesture_thresholds() {
+    let toml = r#"
+        [gestures]
+        swipe_threshold = 40.0
+        pinch_in_threshold = 0.5
+        pinch_out_threshold = 2.0
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let th = &config.touch_thresholds;
+    assert_eq!(th.swipe_distance_mm, 15.0);
+    assert_eq!(th.pinch_in_scale, 0.85);
+    assert_eq!(th.pinch_out_scale, 1.15);
+
+    let toml = r#"
+        [touch]
+        swipe_threshold = 40.0
+        pinch_in_threshold = 0.5
+        pinch_out_threshold = 2.0
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+    let gt = &config.gesture_thresholds;
+    assert_eq!(gt.swipe_distance, 12.0);
+    assert_eq!(gt.pinch_in_scale, 0.85);
+    assert_eq!(gt.pinch_out_scale, 1.15);
+}
+
+#[test]
+fn toml_touch_thresholds_reject_negatives_with_a_warning() {
+    let toml = r#"
+        [touch]
+        pinch_in_threshold = -0.5
+        tap_travel = -1.0
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    assert_eq!(config.touch_thresholds.pinch_in_scale, 0.0);
+    assert_eq!(config.touch_thresholds.dead_zone_mm, 0.0);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("touch.pinch_in_threshold"))
+            && warnings.iter().any(|w| w.contains("touch.tap_travel")),
+        "a negative value should floor at 0 with a warning, got {warnings:?}"
+    );
+}
+
+/// `swipe_threshold` is a divisor, not a floored knob: the recognizer rates a
+/// swipe's travel as a fraction of it and weighs that against the pinch scales,
+/// so 0 would read as infinite swipe progress and starve the pinch rather than
+/// hair-trigger the swipe. It falls back to the default instead.
+#[test]
+fn toml_non_positive_touch_swipe_threshold_falls_back_to_the_default() {
+    for value in ["0.0", "-5.0"] {
+        let toml = format!("[touch]\nswipe_threshold = {value}\n");
+        let (config, warnings) = Config::from_toml_collect(&toml).unwrap();
+        assert_eq!(config.touch_thresholds.swipe_distance_mm, 15.0);
+        assert!(
+            warnings.iter().any(|w| w.contains("touch.swipe_threshold")),
+            "{value} should warn, got {warnings:?}"
+        );
+    }
+}
+
+/// The timings are integers, so a negative one must still correct-and-warn like
+/// every other numeric key rather than failing the whole file to parse.
+#[test]
+fn toml_touch_timings_reject_negatives_with_a_warning() {
+    let toml = r#"
+        [touch]
+        tap_time = -1
+        hold_time = -200
+    "#;
+    let (config, warnings) = Config::from_toml_collect(toml).unwrap();
+    assert_eq!(config.touch_thresholds.tap_max_ms, 0);
+    assert_eq!(config.touch_thresholds.hold_ms, 0);
+    assert!(
+        warnings.iter().any(|w| w.contains("touch.tap_time"))
+            && warnings.iter().any(|w| w.contains("touch.hold_time")),
+        "negative timings should floor at 0 with a warning, got {warnings:?}"
+    );
+}
+
 // ── [bindings] disable_defaults ──────────────────────────────────────────
 
 #[test]
@@ -276,6 +404,70 @@ fn toml_disable_defaults_gestures_clears_default_gestures_only() {
 }
 
 #[test]
+fn toml_disable_defaults_touch_clears_default_touch_bindings_only() {
+    let toml = r#"
+        [bindings]
+        disable_defaults = ["touch"]
+        [touch.on-canvas]
+        "1-finger-swipe" = "center-nearest"
+    "#;
+    let config = Config::from_toml(toml).unwrap();
+
+    assert!(
+        config
+            .touch_lookup(
+                &GestureTrigger::Pinch { fingers: 2 },
+                BindingContext::OnCanvas,
+            )
+            .is_none(),
+        "default 2-finger canvas pinch should be gone when touch defaults are disabled"
+    );
+    assert!(
+        config
+            .touch_lookup(
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::Anywhere,
+            )
+            .is_none(),
+        "default 3-finger touch swipe should be gone when touch defaults are disabled"
+    );
+    assert_eq!(
+        config.touch_lookup(
+            &GestureTrigger::Swipe { fingers: 1 },
+            BindingContext::OnCanvas,
+        ),
+        Some(&GestureConfigEntry::Threshold(
+            ThresholdAction::CenterNearest
+        )),
+        "user-defined touch binding should still resolve"
+    );
+    assert!(
+        config
+            .gesture_lookup(
+                &ModifiersState::default(),
+                &GestureTrigger::Swipe { fingers: 3 },
+                BindingContext::Anywhere,
+            )
+            .is_some(),
+        "trackpad gesture defaults should survive disabling touch defaults"
+    );
+    assert!(
+        matches!(
+            config.lookup(&logo(), Keysym::from(keysyms::KEY_q)),
+            Some(Action::CloseWindow)
+        ),
+        "key defaults should survive disabling touch defaults"
+    );
+    assert!(
+        matches!(
+            config.mouse_button_lookup_ctx(&alt(), BTN_RIGHT, BindingContext::OnWindow),
+            Some(MouseAction::ResizeWindow)
+        ),
+        "mouse defaults should survive disabling touch defaults"
+    );
+}
+
+#[test]
 fn toml_disable_defaults_unknown_category_warns_and_keeps_defaults() {
     let toml = r#"
         [bindings]
@@ -352,6 +544,35 @@ fn toml_navigation_friction_is_migration_error_not_fatal() {
             .iter()
             .any(|w| w.contains("friction") && w.contains("drift")),
         "expected a friction→drift migration message, got {warnings:?}"
+    );
+}
+
+#[test]
+fn toml_navigation_animation_speed_is_migration_error_not_fatal() {
+    // `[navigation] animation_speed` was renamed to `camera_speed`, but
+    // deny_unknown_fields would otherwise make a stale value fail the whole
+    // parse — it must degrade to a migration message instead. The value is
+    // discarded (not carried over): window effects are tuned separately.
+    let toml = r#"
+        [navigation]
+        animation_speed = 0.8
+        nudge_step = 42
+    "#;
+    let (config, warnings) =
+        Config::from_toml_collect(toml).expect("animation_speed should not fail the parse");
+    assert_eq!(
+        config.nudge_step, 42,
+        "rest of the config should still apply"
+    );
+    assert!(
+        (config.camera_speed - 0.3).abs() < f64::EPSILON,
+        "camera_speed falls back to default (value not carried over)"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("animation_speed") && w.contains("camera_speed")),
+        "expected an animation_speed→camera_speed migration message, got {warnings:?}"
     );
 }
 

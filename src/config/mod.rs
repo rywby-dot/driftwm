@@ -28,7 +28,7 @@ use defaults::{
 use parse_helpers::{
     Warnings, clamp_warn, collect_warn, non_negative, parse_backend_config,
     parse_decoration_config, parse_effects_config, parse_output_outline, parse_output_rule,
-    parse_window_rule,
+    parse_window_rule, positive_or_default,
 };
 use toml::{ConfigFile, expand_tilde};
 
@@ -188,7 +188,7 @@ pub struct Config {
     pub edge_pan_latency_ms: u64,
     /// Base lerp factor for camera animation (frame-rate independent), in (0, 1].
     /// Lower = smoother; 1 = instant; 0 would freeze the camera.
-    pub animation_speed: f64,
+    pub camera_speed: f64,
     /// On close, pan the camera to the newly focused window (true). When false,
     /// focus only moves to an already-visible window — never off-screen.
     pub auto_navigate_on_close: bool,
@@ -231,6 +231,7 @@ pub struct Config {
     pub mouse_device: MouseDeviceSettings,
     pub touch: TouchSettings,
     pub gesture_thresholds: GestureThresholds,
+    pub touch_thresholds: TouchThresholds,
     pub layout_independent: bool,
     pub keyboard_layout: KeyboardLayout,
     /// Restore each window's last-used keyboard layout when it regains focus.
@@ -491,14 +492,16 @@ impl Config {
         let mut disable_keys = false;
         let mut disable_mouse = false;
         let mut disable_gestures = false;
+        let mut disable_touch = false;
         for cat in raw.bindings.disable_defaults.into_iter().flatten() {
             match cat.as_str() {
                 "keys" => disable_keys = true,
                 "mouse" => disable_mouse = true,
                 "gestures" => disable_gestures = true,
+                "touch" => disable_touch = true,
                 other => warn_and_collect!(
                     "config: unknown bindings.disable_defaults category '{other}' \
-                     (expected \"keys\", \"mouse\", or \"gestures\")"
+                     (expected \"keys\", \"mouse\", \"gestures\", or \"touch\")"
                 ),
             }
         }
@@ -661,7 +664,11 @@ impl Config {
             }
         }
 
-        let mut touch_bindings = default_touch_bindings();
+        let mut touch_bindings = if disable_touch {
+            ContextBindings::empty()
+        } else {
+            default_touch_bindings()
+        };
         let mut touch_dir_candidates: Vec<(BindingContext, GestureTrigger, String)> = Vec::new();
         for (ctx, section) in [
             (BindingContext::OnWindow, raw.touch.on_window),
@@ -815,6 +822,57 @@ impl Config {
             ),
         };
 
+        // Read the defaults back off the `Default` impl so the seven literals live
+        // in exactly one place; two copies would drift with nothing guarding them.
+        let fallback = TouchThresholds::default();
+        let touch_thresholds = TouchThresholds {
+            // The 4+ finger tier rates swipe travel as a fraction of this and
+            // compares it against the pinch scales, so a zero budget isn't a hair
+            // trigger — it makes swipe progress infinite and the pinch unreachable.
+            swipe_distance_mm: positive_or_default(
+                raw.touch.swipe_threshold,
+                "touch.swipe_threshold",
+                fallback.swipe_distance_mm,
+                &mut errors,
+            ),
+            pinch_in_scale: non_negative(
+                raw.touch
+                    .pinch_in_threshold
+                    .unwrap_or(fallback.pinch_in_scale),
+                "touch.pinch_in_threshold",
+                &mut errors,
+            ),
+            pinch_out_scale: non_negative(
+                raw.touch
+                    .pinch_out_threshold
+                    .unwrap_or(fallback.pinch_out_scale),
+                "touch.pinch_out_threshold",
+                &mut errors,
+            ),
+            tap_max_ms: non_negative(
+                raw.touch.tap_time.unwrap_or(fallback.tap_max_ms as i32),
+                "touch.tap_time",
+                &mut errors,
+            ) as u32,
+            double_tap_ms: non_negative(
+                raw.touch
+                    .double_tap_time
+                    .unwrap_or(fallback.double_tap_ms as i32),
+                "touch.double_tap_time",
+                &mut errors,
+            ) as u32,
+            hold_ms: non_negative(
+                raw.touch.hold_time.unwrap_or(fallback.hold_ms as i32),
+                "touch.hold_time",
+                &mut errors,
+            ) as u32,
+            dead_zone_mm: non_negative(
+                raw.touch.tap_travel.unwrap_or(fallback.dead_zone_mm),
+                "touch.tap_travel",
+                &mut errors,
+            ),
+        };
+
         let keyboard_layout = {
             let k = &raw.input.keyboard;
             KeyboardLayout {
@@ -898,10 +956,10 @@ impl Config {
         // Valid range is (0, 1]: at 0 the lerp factor stays 0 and the camera
         // never reaches its target, so reject it (and negatives/NaN) back to the
         // default rather than freezing. Above 1 just clamps to instant.
-        let animation_speed = match raw.navigation.animation_speed {
+        let camera_speed = match raw.navigation.camera_speed {
             Some(v) if v <= 0.0 || v.is_nan() => {
                 warn_and_collect!(
-                    "config: navigation.animation_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
+                    "config: navigation.camera_speed {v} must be in (0, 1] (0 freezes the camera), using 0.3"
                 );
                 0.3
             }
@@ -909,10 +967,15 @@ impl Config {
                 other.unwrap_or(0.3),
                 0.0,
                 1.0,
-                "navigation.animation_speed",
+                "navigation.camera_speed",
                 &mut errors,
             ),
         };
+        if raw.navigation.animation_speed.is_some() {
+            warn_and_collect!(
+                "config: [navigation] animation_speed was renamed to camera_speed — window effects are tuned separately via [effects] animation_speed"
+            );
+        }
         if raw.navigation.friction.is_some() {
             warn_and_collect!(
                 "config: [navigation] friction was renamed to drift — use 0 (off) to 1 (floatiest), default 0.5"
@@ -1024,7 +1087,7 @@ impl Config {
                 &mut errors,
             ),
             edge_pan_latency_ms: raw.navigation.edge_pan.latency_ms.unwrap_or(120),
-            animation_speed,
+            camera_speed,
             auto_navigate_on_close: raw.navigation.auto_navigate_on_close.unwrap_or(true),
             auto_navigate_on_click: raw.navigation.auto_navigate_on_click.unwrap_or(false),
             cycle_hold,
@@ -1083,6 +1146,7 @@ impl Config {
             mouse_device,
             touch,
             gesture_thresholds,
+            touch_thresholds,
             layout_independent: raw.input.keyboard.layout_independent.unwrap_or(true),
             keyboard_layout,
             remember_layout_per_window: raw
@@ -1330,6 +1394,7 @@ mod tests {
         const REFERENCE: &str = include_str!("../../config.reference.toml");
         // Deprecated, migration-only — intentionally undocumented.
         const ALLOWLIST: &[&str] = &[
+            "navigation.animation_speed",
             "navigation.friction",
             "snap.same_edge",
             "snap.edge_center",
@@ -1448,14 +1513,76 @@ mod tests {
     }
 
     #[test]
-    fn animation_speed_zero_falls_back_to_default() {
+    fn camera_speed_zero_falls_back_to_default() {
         let toml_str = r#"
             [navigation]
-            animation_speed = 0.0
+            camera_speed = 0.0
         "#;
         let (config, warnings) = Config::from_toml_collect(toml_str).unwrap();
-        assert_eq!(config.animation_speed, 0.3);
-        assert!(warnings.iter().any(|w| w.contains("animation_speed")));
+        assert_eq!(config.camera_speed, 0.3);
+        assert!(warnings.iter().any(|w| w.contains("camera_speed")));
+    }
+
+    #[test]
+    fn effects_animation_speed_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_speed = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.effects.animation_speed, 0.5);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_speed"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_speed = 5.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.effects.animation_speed, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_speed"))
+        );
+    }
+
+    #[test]
+    fn effects_animation_scale_out_of_range_rejects_and_clamps() {
+        let (zero, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 0.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(zero.effects.animation_scale, 0.95);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
+
+        let (high, warnings) = Config::from_toml_collect(
+            r#"
+            [effects]
+            animation_scale = 2.0
+        "#,
+        )
+        .unwrap();
+        assert_eq!(high.effects.animation_scale, 1.0);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("effects.animation_scale"))
+        );
     }
 
     #[test]

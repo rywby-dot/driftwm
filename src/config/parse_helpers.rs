@@ -71,6 +71,48 @@ where
     }
 }
 
+/// Validate a lerp/scale factor in (0, 1]: reject `<= 0`/NaN back to `default`
+/// with a warning (0 would freeze motion), clamp `> 1` down to 1.
+pub(super) fn unit_range_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be in (0, 1], using {default}"),
+            );
+            default
+        }
+        other => clamp_warn(other.unwrap_or(default), 0.0, 1.0, field, errors),
+    }
+}
+
+/// Validate a value the code goes on to *divide by*: reject `<= 0`/NaN back to
+/// `default` with a warning. Flooring at zero would be wrong here — zero isn't a
+/// hair trigger, it makes the ratio the value feeds infinite (or NaN at rest),
+/// and nothing measured against that ratio can ever win.
+pub(super) fn positive_or_default(
+    value: Option<f64>,
+    field: &str,
+    default: f64,
+    errors: &mut Warnings,
+) -> f64 {
+    match value {
+        Some(v) if v <= 0.0 || v.is_nan() => {
+            collect_warn(
+                errors,
+                format!("config: {field} {v} must be positive, using {default}"),
+            );
+            default
+        }
+        other => other.unwrap_or(default),
+    }
+}
+
 /// Floor a value at zero, warning when it was negative (or NaN). For knobs with
 /// a natural lower bound but no upper limit (speeds, steps, distances, sizes).
 pub(super) fn non_negative<T>(value: T, field: &str, errors: &mut Warnings) -> T
@@ -409,6 +451,7 @@ pub(super) fn parse_window_rule(
         widget: r.widget,
         pinned_to_screen: r.pinned_to_screen,
         suspend_on_close: r.suspend_on_close,
+        restore_windows: r.restore_windows,
         preserve_aspect_ratio: r.preserve_aspect_ratio,
         decoration,
         blur: r.blur.unwrap_or(false),
@@ -442,6 +485,18 @@ pub(super) fn parse_effects_config(raw: EffectsFileConfig, errors: &mut Warnings
         ),
         // 0 = off (frost freezes, stops re-sampling the animated wallpaper).
         animate_blur_fps: raw.animate_blur_fps.unwrap_or(20).min(144),
+        animation_speed: unit_range_or_default(
+            raw.animation_speed,
+            "effects.animation_speed",
+            0.5,
+            errors,
+        ),
+        animation_scale: unit_range_or_default(
+            raw.animation_scale,
+            "effects.animation_scale",
+            0.95,
+            errors,
+        ),
     }
 }
 

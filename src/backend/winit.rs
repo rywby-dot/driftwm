@@ -75,6 +75,10 @@ pub fn init_winit(
     // focus + pointer bootstrap, and Space mapping. Shared with the real
     // backends.
     data.output_connected(&output, &std::collections::HashMap::new());
+    // Mode and scale follow the host window's resizes, and the transform above
+    // is the renderer's Y-flip compensation — none of the three is
+    // config-derived, so config reload must leave them alone.
+    crate::state::output_state(&output).backend_owned_mode = true;
 
     // Notify output management clients about the winit output
     {
@@ -173,6 +177,8 @@ pub fn init_winit(
             // --- Camera animation (window navigation) ---
             data.apply_camera_animation(dt);
 
+            data.tick_window_animations(dt);
+
             // --- Coalesced pointer motion (after input + animations) ---
             data.flush_pointer_resync();
 
@@ -180,14 +186,10 @@ pub fn init_winit(
             data.check_exec_cursor_timeout();
 
             // --- Read per-output state for this frame ---
-            let (cur_camera, cur_zoom, last_cam, last_zoom) = {
+            let (cur_camera, cur_zoom) = data.world_view(&output);
+            let (last_cam, last_zoom) = {
                 let os = crate::state::output_state(&output);
-                (
-                    os.camera,
-                    os.zoom,
-                    os.last_rendered_camera,
-                    os.last_rendered_zoom,
-                )
+                (os.last_rendered_camera, os.last_rendered_zoom)
             };
 
             // --- Update cached background element ---
@@ -202,11 +204,17 @@ pub fn init_winit(
             };
 
             // --- Build cursor + compose frame ---
+            // The cursor tracks the live camera, not `world_view` — see its doc
+            // for why the two can differ during a fullscreen entry.
+            let (cursor_camera, cursor_zoom) = {
+                let os = crate::state::output_state(&output);
+                (os.camera, os.zoom)
+            };
             let cursor_elements = build_cursor_elements(
                 data,
                 backend.renderer(),
-                cur_camera,
-                cur_zoom,
+                cursor_camera,
+                cursor_zoom,
                 output.current_scale().fractional_scale(),
                 1.0,
             );
@@ -267,9 +275,10 @@ pub fn init_winit(
 
             // --- Record camera+zoom for next-frame change detection ---
             {
+                let (camera, zoom) = data.world_view(&output);
                 let mut os = crate::state::output_state(&output);
-                os.last_rendered_camera = os.camera;
-                os.last_rendered_zoom = os.zoom;
+                os.last_rendered_camera = camera;
+                os.last_rendered_zoom = zoom;
             }
             data.write_state_file_if_dirty();
 

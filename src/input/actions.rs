@@ -1,9 +1,11 @@
 use smithay::{
     input::keyboard::Layout,
-    utils::{Logical, Point, Size},
+    reexports::wayland_server::Resource,
+    utils::{Logical, Point, Rectangle, Size},
     wayland::seat::WaylandFocus,
 };
 
+use crate::state::window_animation::{AnimSpace, ContentPolicy, GeometryRole};
 use crate::state::{DriftWm, HomeReturn, StageWindow};
 use driftwm::canvas::{self};
 use driftwm::config::{Action, LayoutSwitch, Modifiers};
@@ -104,7 +106,13 @@ impl DriftWm {
                         (uy * step as f64).round() as i32,
                     );
                     let new_loc = loc + Point::from(offset);
+                    // The nudge is the window's new position, so a recenter owed
+                    // from a preceding fullscreen exit must not fire and undo it.
+                    if let Some(surface) = window.wl_surface() {
+                        self.pending_recenter.remove(&surface.id());
+                    }
                     self.map_window(window.clone(), new_loc, false);
+                    self.animate_window_move_from(&window, loc, None);
                 }
             }
             Action::PanViewport(dir) => {
@@ -211,11 +219,9 @@ impl DriftWm {
                     .windows()
                     .filter(|w| self.is_canvas_window(*w))
                     .map(|w| {
-                        // Bare content size (client geometry, stand-in body) so
-                        // an SSD bar strip doesn't skew either's proximity metric.
-                        let loc = self.stage.position_of(w).unwrap_or_default();
-                        let size = w.geometry().size;
-                        let closest = canvas::closest_point_on_rect(origin, loc, size);
+                        let closest = self.element_closest_point(origin, w);
+                        // A directional search needs a direction vector, and a
+                        // point sitting on the origin has none.
                         let point = if closest == origin {
                             self.nav_center(w)
                         } else {
@@ -308,7 +314,12 @@ impl DriftWm {
                             // Set camera/zoom directly — enter_fullscreen locks the viewport
                             self.set_camera(ret.camera);
                             self.set_zoom(ret.zoom);
-                            self.enter_fullscreen(ret.fullscreen_window.as_ref().unwrap(), None);
+                            let window = ret.fullscreen_window.as_ref().unwrap();
+                            self.enter_fullscreen(window, None);
+                            // The camera arrived in one frame, so the window
+                            // does too, instead of growing into a viewport it
+                            // is already filling.
+                            self.cancel_window_animation(window);
                         } else {
                             let vc = self.usable_center_screen();
                             self.set_zoom_animation_anchor(
@@ -334,9 +345,14 @@ impl DriftWm {
                     self.set_overview_return(None);
                     let vc = self.usable_center_screen();
                     let home = Point::from((-vc.x, -vc.y));
-                    if was_fullscreen.is_some() {
+                    if let Some(window) = &was_fullscreen {
                         // Snap instantly — matches the instant return path and
                         // avoids animation warps that misplace the cursor.
+                        // Whatever exited fullscreen to get here also armed a
+                        // leg back toward the view this snap is leaving, so
+                        // cancel it and let the window come along instead of
+                        // shrinking into a stale viewport.
+                        self.cancel_window_animation(window);
                         self.set_camera(home);
                         self.set_zoom(1.0);
                         self.update_output_from_camera();
@@ -392,6 +408,11 @@ impl DriftWm {
                             .unwrap_or_else(|| window.geometry().size);
                         let loc = canvas::rule_to_internal(rx, ry, size);
                         self.stage.clear_fill(&window);
+                        // The bookmark is the window's new position, so a recenter
+                        // owed from that exit must not fire and drag it back.
+                        if let Some(surface) = window.wl_surface() {
+                            self.pending_recenter.remove(&surface.id());
+                        }
                         self.map_window(window.clone(), loc, true);
                     }
                     Some(StageWindow::Suspended(s)) => {
@@ -543,6 +564,10 @@ impl DriftWm {
                         // (restoring its camera/zoom and any suspended pin) and
                         // sets focus itself.
                         self.enter_fullscreen(window, Some(target_output));
+                        // The window is fullscreen on both sides of this, so it
+                        // lands at the target's size rather than replaying an
+                        // entry out of a windowed rect it never returned to.
+                        self.cancel_window_animation(window);
                         return;
                     }
                     if self.is_pinned(window) {
@@ -692,6 +717,25 @@ impl DriftWm {
         else {
             return;
         };
+        // The on-screen rect the window is drawn at right now, read before the
+        // mutation flips which space "on screen" is derived from. At zoom != 1
+        // the flip is a `1/z` scale jump anchored at the content-box top-left,
+        // and this is the picture the new entry grows out of. Resolved against
+        // the same output each branch below uses.
+        let output = match self.stage.pin_of(&window) {
+            Some(site) => self.output_by_name(&site.output),
+            None => self.output_for_window(&window),
+        };
+        let pre_toggle = output.and_then(|output| self.window_screen_rect_on(&window, &output));
+        // Pin/unpin flips the chase space (canvas ↔ screen); an in-flight entry
+        // would keep a stale-space visual, so drop it — along with any parked
+        // pan and stashed capture belonging to the transition it supersedes. A
+        // recenter owed from a preceding fullscreen exit goes too — it would
+        // re-place the window after the pin decided where it lives.
+        self.cancel_window_animation(&window);
+        if let Some(surface) = window.wl_surface() {
+            self.pending_recenter.remove(&surface.id());
+        }
         if let Some(site) = self.stage.take_pin(&window) {
             // Unpin: convert the fixed screen position back to a canvas
             // location at the current camera/zoom — no visual jump.
@@ -708,6 +752,29 @@ impl DriftWm {
                 .0
                 .to_i32_round();
                 self.map_window(window.clone(), canvas, true);
+                // Converting the pre-toggle screen rect back through the same
+                // camera reproduces it exactly on the first frame; the chase then
+                // runs it out to the canvas rect the camera magnifies by `1/z`.
+                // Inside the output guard on purpose: without an output there is
+                // no camera to convert with, and the window was never re-mapped.
+                if let Some(screen) = pre_toggle {
+                    let seed = Rectangle::new(
+                        Point::from((
+                            camera.x + screen.loc.x / zoom,
+                            camera.y + screen.loc.y / zoom,
+                        )),
+                        Size::from((screen.size.w / zoom, screen.size.h / zoom)),
+                    );
+                    self.begin_geometry_animation_seeded(
+                        &window,
+                        seed,
+                        AnimSpace::Canvas,
+                        None,
+                        GeometryRole::Normal,
+                        ContentPolicy::Cap,
+                        None,
+                    );
+                }
             }
         } else {
             // Pin at the window's current on-screen position on its output.
@@ -737,6 +804,19 @@ impl DriftWm {
                     screen_pos,
                 },
             );
+            // The entry chases `screen_pos` at the window's real size under zoom
+            // 1, so a capture taken at zoom 0.5 grows into it from half size.
+            if let Some(seed) = pre_toggle {
+                self.begin_geometry_animation_seeded(
+                    &window,
+                    seed,
+                    AnimSpace::Screen(output.name()),
+                    None,
+                    GeometryRole::Normal,
+                    ContentPolicy::Cap,
+                    None,
+                );
+            }
         }
         // The hit-test path changed (pinned vs canvas); recompute pointer focus.
         self.refresh_pointer_focus();

@@ -20,7 +20,8 @@ pub const VERSION: u32 = 1;
 
 /// Why a durable entry exists, which decides whether it materializes on restore.
 /// `Explicit` (a live suspend) always comes back; `Quit` (serialized at
-/// graceful shutdown) only when `restore_windows` is on.
+/// graceful shutdown) only when `restore_windows` resolves on for its app — the
+/// global default, or a window rule keyed on the record's `app_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
@@ -46,6 +47,14 @@ pub struct SessionEntry {
     /// (SSD-origin).
     #[serde(default)]
     pub csd: bool,
+    /// Whether this entry held the focus at write time — or was restored as
+    /// focused and never handed it over — so restore can hand the focus back and
+    /// a new window's auto placement anchors where the user left off. At most
+    /// one entry per file carries it: the write side clears it on
+    /// carried-forward entries, whose focus belongs to a boot that's over.
+    /// Additive: a file without this field defaults to unfocused.
+    #[serde(default)]
+    pub focused: bool,
 }
 
 /// A per-output camera/zoom, mirroring the runtime state file's shape.
@@ -149,14 +158,16 @@ pub fn write(path: &Path, envelope: &SessionEnvelope, fsync: bool) -> std::io::R
 
 /// Split entries into those to materialize now and those to carry forward
 /// unchanged (re-emitted on the next write), so a flag-off session never
-/// destroys the saved session.
+/// destroys the saved session. `restore` answers per entry, since a window rule
+/// can override the global flag for one app; `Explicit` entries always
+/// materialize, bypassing it.
 pub fn partition_for_restore(
     entries: Vec<SessionEntry>,
-    restore_windows: bool,
+    restore: impl Fn(&SessionEntry) -> bool,
 ) -> (Vec<SessionEntry>, Vec<SessionEntry>) {
     entries
         .into_iter()
-        .partition(|e| restore_windows || e.origin == Origin::Explicit)
+        .partition(|e| e.origin == Origin::Explicit || restore(e))
 }
 
 /// Rename a bad file aside (`.<label>.<unix-ts>`) so startup can continue from
@@ -212,6 +223,7 @@ mod tests {
             size: [400, 300],
             origin,
             csd: false,
+            focused: false,
         }
     }
 
@@ -276,6 +288,25 @@ mod tests {
         assert!(
             !legacy.entries[0].csd,
             "a pre-field file defaults to an SSD-origin stand-in"
+        );
+    }
+
+    #[test]
+    fn focused_defaults_false_for_a_file_predating_the_field() {
+        let tmp = TempDir::new();
+        let path = tmp.path.join("session.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"saved_at":0,"outputs":{},"entries":[
+                {"id":1,"app_id":"a","desktop_id":"a","display_name":"A",
+                 "position":[0,0],"size":[400,300],"origin":"explicit","csd":false}]}"#,
+        )
+        .unwrap();
+
+        let legacy = read(&path);
+        assert!(
+            !legacy.entries[0].focused,
+            "a pre-field file restores unfocused"
         );
     }
 
@@ -360,7 +391,7 @@ mod tests {
             entry(2, Origin::Quit),
             entry(3, Origin::Explicit),
         ];
-        let (materialize, carried) = partition_for_restore(entries, false);
+        let (materialize, carried) = partition_for_restore(entries, |_| false);
         assert_eq!(
             materialize.iter().map(|e| e.id).collect::<Vec<_>>(),
             vec![1, 3],
@@ -376,7 +407,7 @@ mod tests {
     #[test]
     fn origin_filtering_with_restore_on_materializes_everything() {
         let entries = vec![entry(1, Origin::Explicit), entry(2, Origin::Quit)];
-        let (materialize, carried) = partition_for_restore(entries, true);
+        let (materialize, carried) = partition_for_restore(entries, |_| true);
         assert_eq!(materialize.len(), 2);
         assert!(carried.is_empty());
     }
@@ -398,7 +429,7 @@ mod tests {
 
         // Restore is off: the quit entry is carried, not materialized.
         let loaded = read(&path);
-        let (_materialize, carried) = partition_for_restore(loaded.entries, false);
+        let (_materialize, carried) = partition_for_restore(loaded.entries, |_| false);
 
         // The next rewrite re-emits the carried entry, so it isn't destroyed.
         let rewritten = SessionEnvelope {

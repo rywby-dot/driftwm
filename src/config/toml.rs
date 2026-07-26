@@ -54,6 +54,8 @@ pub(super) struct EffectsFileConfig {
     pub blur_strength: Option<f64>,
     pub animate_blur: Option<bool>,
     pub animate_blur_fps: Option<u32>,
+    pub animation_speed: Option<f64>,
+    pub animation_scale: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -119,6 +121,9 @@ pub(super) struct CursorConfig {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NavigationConfig {
+    pub camera_speed: Option<f64>,
+    /// Renamed to `camera_speed`; kept only so a stale value yields a migration
+    /// error instead of failing the whole parse via `deny_unknown_fields`.
     pub animation_speed: Option<f64>,
     pub auto_navigate_on_close: Option<bool>,
     pub auto_navigate_on_click: Option<bool>,
@@ -289,6 +294,11 @@ pub(super) struct WindowRuleFile {
     /// for terminals / scratchpads that should always really close (or always
     /// suspend). `None` inherits the global setting.
     pub suspend_on_close: Option<bool>,
+    /// Override the global `restore_windows` for matched windows, so an app can
+    /// be kept out of (or opted into) the graceful-shutdown save. Independent of
+    /// `suspend_on_close`, which only governs closes. `None` inherits the global
+    /// setting.
+    pub restore_windows: Option<bool>,
     /// Keep the window's aspect ratio during interactive resizes; the ratio is
     /// taken at the start of each resize.
     #[serde(default)]
@@ -345,12 +355,25 @@ pub(super) struct GestureFileConfig {
     pub anywhere: Option<HashMap<String, String>>,
 }
 
-/// Touch gesture *bindings* (`[touch]`) — distinct from `[input.touch]` device
-/// settings (`TouchDeviceFileConfig`). Touch has no modifiers, so no threshold
-/// tuning here (it reuses `[gestures]` thresholds); just the three context maps.
+/// Touch gesture *bindings* and thresholds (`[touch]`) — distinct from
+/// `[input.touch]` device settings (`TouchDeviceFileConfig`). Touch has no
+/// modifiers, so the three context maps carry no chords. The three scale and
+/// distance thresholds mirror `[gestures]`' names but are its own knobs, and
+/// `swipe_threshold` is in mm; the four timings have no `[gestures]` counterpart
+/// at all, since libinput recognizes the trackpad's gestures for us and only
+/// touch arrives as raw down/motion/up. The timings are signed so a *negative*
+/// floors to 0 with a warning like every other numeric key rather than failing
+/// the whole file; a fractional or out-of-range value still fails to deserialize.
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TouchFileConfig {
+    pub swipe_threshold: Option<f64>,
+    pub pinch_in_threshold: Option<f64>,
+    pub pinch_out_threshold: Option<f64>,
+    pub tap_time: Option<i32>,
+    pub double_tap_time: Option<i32>,
+    pub hold_time: Option<i32>,
+    pub tap_travel: Option<f64>,
     #[serde(rename = "on-window")]
     pub on_window: Option<HashMap<String, String>>,
     #[serde(rename = "on-canvas")]

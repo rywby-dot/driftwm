@@ -55,6 +55,16 @@ impl SizeConstraints {
         }
     }
 
+    /// Constraints for a suspended stand-in, which has no client to declare
+    /// min/max. Its usable-chrome floor ([`MIN_SUSPENDED_SIZE`]) rides in as the
+    /// minimum so the shared apply head clamps it exactly like a client minimum.
+    pub fn for_suspended() -> Self {
+        Self {
+            min: Size::from((MIN_SUSPENDED_SIZE, MIN_SUSPENDED_SIZE)),
+            max: Size::from((0, 0)),
+        }
+    }
+
     /// Clamp a requested size to `[min, max]` along each axis. Zero values
     /// on either bound are ignored (unconstrained). Also enforces a 1×1
     /// floor so clients never see nonsense geometry from a fast drag.
@@ -308,9 +318,14 @@ impl PointerGrab<DriftWm> for ResizeGrab {
         match &self.target {
             // A client resize arms the commit-time reposition via
             // `WaitingForLastCommit`; a stand-in has no client to configure, so
-            // persist its settled size on the session-store debounce instead.
+            // persist its settled size on the session-store debounce instead,
+            // and balance the grab-target entry its install armed (a client's
+            // resize is witnessed by the surface's own `ResizeState`).
             ClusterMember::Client(_) => self.finalize(),
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+            ClusterMember::Suspended(id) => {
+                data.disarm_interactive_move(id);
+                data.session_store_mark_dirty();
+            }
         }
         // Common to both arms: refresh every resolved member's stable snap rect
         // so a later close can reconstruct the cluster. The client primary's own
@@ -383,11 +398,12 @@ impl ResizeGrab {
 
     /// Touch-initiated resize. The edge is fixed at grab start (chosen by where
     /// the fingers landed); the drag drives the size from `touch_start.location`.
-    /// Touch resize is client-only.
+    /// `constraints` and `locked_ratio` come from the caller because a stand-in
+    /// has no client to read them from (see [`MIN_SUSPENDED_SIZE`]).
     #[allow(clippy::too_many_arguments)]
     pub fn new_touch(
         touch_start: TouchGrabStartData<DriftWm>,
-        window: Window,
+        target: impl Into<ClusterMember>,
         edges: xdg_toplevel::ResizeEdge,
         initial_window_location: Point<i32, Logical>,
         initial_window_size: Size<i32, Logical>,
@@ -396,15 +412,15 @@ impl ResizeGrab {
         slots: usize,
         cluster_resize: ClusterResizeSnapshot,
         pinned_initial_screen_pos: Option<Point<i32, Logical>>,
+        locked_ratio: Option<f64>,
     ) -> Self {
-        let locked_ratio = locked_ratio_for(&window, initial_window_size);
         Self {
             start_data: GrabStartData {
                 focus: None,
                 button: 0,
                 location: touch_start.location,
             },
-            target: ClusterMember::Client(window),
+            target: target.into(),
             edges,
             initial_window_location,
             initial_window_size,
@@ -741,7 +757,10 @@ impl TouchGrab<DriftWm> for ResizeGrab {
         // would lose the app's shape when the pointer next reappears.
         match &self.target {
             ClusterMember::Client(_) => self.finalize(),
-            ClusterMember::Suspended(_) => data.session_store_mark_dirty(),
+            ClusterMember::Suspended(id) => {
+                data.disarm_interactive_move(id);
+                data.session_store_mark_dirty();
+            }
         }
         for member in &self.cluster_resize.members {
             if let Some(element) = member.window.resolve(&data.stage) {

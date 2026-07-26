@@ -45,7 +45,16 @@ impl CompositorHandler for DriftWm {
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) {
         // Safety net for crash path — toplevel_destroyed handles normal xdg
-        // shutdown, but a client crash destroys wl_surface without it.
+        // shutdown, but a client crash destroys wl_surface without it. If the
+        // window is still mapped here (no toplevel_destroyed ran), flatten its
+        // close animation before cleanup discards the captured textures. Route
+        // through the fullscreen lookup so a crash-while-fullscreen fades
+        // screen-space on its home output instead of at the parked camera origin
+        // (`reap_dead_fullscreen` below still tears the entry down).
+        if let Some(window) = self.window_for_surface(surface) {
+            let fs_output = self.find_fullscreen_output_for_surface(surface);
+            self.snapshot_closing_window(&window, surface, fs_output.as_ref(), false);
+        }
         self.cleanup_surface_state(surface);
         // lock_surfaces is keyed by output — sweep values.
         self.lock_surfaces
@@ -83,6 +92,13 @@ impl CompositorHandler for DriftWm {
         // `suspend_on_close`.
         add_pre_commit_hook::<DriftWm, _>(surface, |state, _dh, surface| {
             state.capture_unmap_snapshot(surface);
+            // Clone the still-imported textures on buffer removal so the close
+            // animation can flatten them after teardown (renderer-gated).
+            state.capture_close_pixels_on_unmap(surface);
+            // The mirror case: on a *new* buffer for a window frozen by a
+            // compositor resize, clone the content it is replacing so the leg can
+            // crossfade out of it.
+            state.stash_resize_content(surface);
         });
 
         // DMA-BUF readiness blocker. Must inspect the *pending* buffer here
@@ -232,6 +248,9 @@ impl CompositorHandler for DriftWm {
             let window = self.window_for_surface(&root);
             if let Some(window) = window {
                 window.on_commit();
+                // A commit that acks the requested size (or picks a different
+                // one) resolves an in-flight geometry chase to the live rect.
+                self.resolve_window_animation_commit(&window);
 
                 if self.pending_center.remove(&root) {
                     let geo = window.geometry();
@@ -650,6 +669,12 @@ impl CompositorHandler for DriftWm {
                             // the body size the client hasn't acked yet, so it
                             // establishes a stable rect on its next settle.
                             self.refresh_stable_snap_rect(&StageWindow::Client(window.clone()));
+                            // Scale+fade the window in. A window opening straight
+                            // into fullscreen/fit runs both in this same commit,
+                            // so this entry is never drawn: the geometry entry
+                            // below takes its fade over and plays it at the
+                            // destination rect instead.
+                            self.start_window_open_animation(&window);
 
                             if let Some(client_output) = self.pending_fullscreen.remove(&root) {
                                 let target = self.resolve_fullscreen_output(&root, client_output);

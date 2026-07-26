@@ -24,7 +24,7 @@ use driftwm::window_ext::WindowExt;
 
 use crate::decorations::DecorationKey;
 use crate::grabs::ResizeState;
-use crate::state::{DriftWm, StageWindow, SuspendedId, SuspendedWindow};
+use crate::state::{ClusterMember, DriftWm, StageWindow, SuspendedId, SuspendedWindow};
 use crate::surface_tree::focus_belongs_to_toplevel;
 
 /// A close whose `toplevel_destroyed` should convert into a suspended window,
@@ -308,27 +308,33 @@ impl DriftWm {
         candidates.first().map(|(sid, _)| *sid)
     }
 
-    /// A window mid-interactive-move or -resize is being driven by a live grab;
-    /// adopting it into a stand-in slot would fight that grab (the next motion
-    /// snaps it back, button-up reseeds the snap rect). Unlike the durable
-    /// fullscreen/pinned/widget/dialog carve-outs this is transient, so the
-    /// caller leaves the pending relaunch to its TTL rather than dismissing.
-    pub(crate) fn window_under_interactive_grab(
-        &self,
-        window: &Window,
-        surface: &WlSurface,
-    ) -> bool {
-        if self.interactive_move.iter().any(|w| w == window) {
+    /// An element mid-interactive-move or -resize is being driven by a live
+    /// grab, so nothing may reposition it out from under that grab: adopting a
+    /// window into a stand-in slot would be fought by the next motion (which
+    /// snaps it back, with button-up reseeding the snap rect), and an animation
+    /// entry would re-seed its leg on every motion and rubber-band behind the
+    /// cursor. Unlike the durable fullscreen/pinned/widget/dialog carve-outs
+    /// this is transient, so the relaunch caller leaves the pending relaunch to
+    /// its TTL rather than dismissing.
+    pub(crate) fn element_under_interactive_grab(&self, element: &StageWindow) -> bool {
+        if self
+            .interactive_move
+            .contains(&ClusterMember::from_element(element))
+        {
             return true;
         }
-        with_states(surface, |states| {
-            !matches!(
-                *states
-                    .data_map
-                    .get_or_insert(|| std::cell::RefCell::new(ResizeState::Idle))
-                    .borrow(),
-                ResizeState::Idle
-            )
+        // The resize half is a client-side protocol state, so it answers for
+        // clients only; a stand-in's resize grab is compositor-side.
+        element.wl_surface().is_some_and(|surface| {
+            with_states(&surface, |states| {
+                !matches!(
+                    *states
+                        .data_map
+                        .get_or_insert(|| std::cell::RefCell::new(ResizeState::Idle))
+                        .borrow(),
+                    ResizeState::Idle
+                )
+            })
         })
     }
 
@@ -401,6 +407,34 @@ impl DriftWm {
         let client = StageWindow::Client(window.clone());
         let history_slot = self.stage.focus_history().iter().position(|w| *w == client);
 
+        // Crossfade the departing stand-in over the window that takes its slot
+        // (backend-gated — headless never accumulates render transients). Drop
+        // animation entries for both involved ids: the discarded fresh entry and
+        // the suspended entry the window inherits.
+        if self.backend.is_some() {
+            // Read before the relaunch is cancelled and focus moves below, so the
+            // fade keeps the chrome the user was actually looking at.
+            let launching = self.is_suspended_launching(sid);
+            let focused = self.gated_suspended_focus() == Some(sid);
+            self.standin_fades.push(crate::render::StandInFade {
+                suspended: s.clone(),
+                loc: pos,
+                launching,
+                focused,
+                // A representation exchange, not a close: alpha only.
+                shrink: 1.0,
+                progress: 0.0,
+            });
+        }
+        if let Some(id) = self.stage.id_of(&client) {
+            self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
+        }
+        if let Some(id) = self.stage.id_of(&suspended) {
+            self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
+        }
+
         // Compound replace: the fresh entry must leave before the suspended
         // entry is replaced, or the same window would sit in two z-slots and
         // trip the duplicate-window invariant.
@@ -455,6 +489,25 @@ impl DriftWm {
             self.stage.restore_focus_history_at(&client, idx);
         }
         self.refresh_pointer_focus();
+
+        // Hold the adopted rect from the first frame: the client is still
+        // committing buffers at whatever size it mapped with until it acks the
+        // configure the caller is about to send, so without this it draws
+        // undersized beneath the fading stand-in chrome — a flicker instead of a
+        // crossfade. Seeding the chase with from == target holds the slot until
+        // the ack lands, then it bends to the real geometry.
+        self.begin_geometry_animation_seeded(
+            window,
+            Rectangle::new(adopt_pos.to_f64(), adopt_size.to_f64()),
+            crate::state::window_animation::AnimSpace::Canvas,
+            Some(adopt_size),
+            crate::state::window_animation::GeometryRole::Normal,
+            // The window has inherited this slot, so fill it: capping here would
+            // render it undersized in the corner of the slot under the crossfade.
+            crate::state::window_animation::ContentPolicy::Stretch,
+            None,
+        );
+
         // An adopt is an immediate, user-visible change — write through now.
         self.session_store_write_now();
     }
@@ -477,6 +530,9 @@ impl DriftWm {
         let Some(s) = self.find_suspended(id) else {
             return;
         };
+        // Read before the cancel below clears it, so the fade freezes the label
+        // the user was looking at when they dismissed.
+        let launching = self.is_suspended_launching(id);
         // A dismiss mid-relaunch cancels it: a late token then finds no live
         // pending and falls through to normal placement.
         self.cancel_pending_relaunch(id);
@@ -485,7 +541,57 @@ impl DriftWm {
             Some(crate::state::FocusIntent::Suspended(sid)) if sid == id
         );
 
-        self.stage.remove(&StageWindow::Suspended(s));
+        // Fade the stand-in out like a real window close. The chrome textures
+        // live on the Rc, so retaining it here — before the cache evictions
+        // below — keeps them renderable after the stage entry is gone. Skipped
+        // when it would never be seen (headless, or off every drawable output).
+        let element = StageWindow::Suspended(s.clone());
+        // Resolved while the stand-in is still on the stage — its rect is what
+        // the cluster/overlap and nearest-visible queries below are relative to.
+        let (follow, home, center) = if was_focused {
+            let follow = self
+                .first_spatially_related_in_history(&element)
+                // An off-screen follow is only worth panning to when the user
+                // asked for that; otherwise focus must stay somewhere visible.
+                .filter(|t| self.config.auto_navigate_on_close || self.window_fully_in_viewport(t));
+            let home = self
+                .output_for_window(&element)
+                .or_else(|| self.active_output());
+            let center = self
+                .visual_frame_rect(&element)
+                .map(|r| Point::from(((r.x_low + r.x_high) / 2.0, (r.y_low + r.y_high) / 2.0)));
+            (follow, home, center)
+        } else {
+            (None, None, None)
+        };
+
+        let rect = self
+            .stage
+            .position_of(&element)
+            .map(|loc| (loc, s.size.get()));
+        if self.backend.is_some()
+            && let Some((loc, size)) = rect
+            && self.canvas_rect_drawable(Rectangle::new(loc, size))
+        {
+            let focused = self.gated_suspended_focus() == Some(id);
+            self.standin_fades.push(crate::render::StandInFade {
+                suspended: s.clone(),
+                loc,
+                launching,
+                focused,
+                shrink: self.config.effects.animation_scale,
+                progress: 0.0,
+            });
+        }
+
+        // The tick reaps an entry whose id no longer resolves, but only on the
+        // next tick — one stale frame of a slide that has nothing left to slide.
+        if let Some(eid) = self.stage.id_of(&element) {
+            self.window_animations.remove(eid);
+            self.drop_resize_crossfade(eid);
+        }
+
+        self.stage.remove(&element);
         self.decorations.remove(&DecorationKey::Suspended(id));
         self.render
             .border_cache
@@ -495,22 +601,39 @@ impl DriftWm {
             .remove(&DecorationKey::Suspended(id));
 
         if was_focused {
-            // Close-style follow: return to the most-recent live window, panning
-            // only if it isn't already fully on screen.
-            let follow = self
-                .stage
-                .focus_history()
-                .iter()
-                .filter_map(|w| w.client())
-                .find(|w| w.alive())
-                .cloned();
+            // Mirrors a real close's follow tiers, minus the parent tier (a
+            // stand-in is an app-level slot, so no xdg parent link exists): a
+            // spatially related history entry first, else a visible MRU window
+            // on the stand-in's home output, else the nearest visible one to
+            // where it sat, else nothing. That fallback arm never pans.
             let serial = SERIAL_COUNTER.next_serial();
             match follow {
                 Some(target) if self.window_fully_in_viewport(&target) => {
                     self.raise_and_focus(&target, serial);
                 }
                 Some(target) => self.navigate_to_window(&target, false),
-                None => self.set_window_focus(None, serial),
+                None => {
+                    let mru = self
+                        .stage
+                        .focus_history()
+                        .iter()
+                        .filter_map(|w| w.client())
+                        .find(|w| w.alive())
+                        .cloned();
+                    let target = match (home.as_ref(), mru) {
+                        (Some(out), Some(m)) if self.window_intersects_viewport_on(&m, out) => {
+                            Some(m)
+                        }
+                        (Some(out), _) => {
+                            center.and_then(|c| self.nearest_visible_window_on(c, out, None))
+                        }
+                        (None, _) => None,
+                    };
+                    match target {
+                        Some(target) => self.raise_and_focus(&target, serial),
+                        None => self.set_window_focus(None, serial),
+                    }
+                }
             }
         }
         // The suspended window may have sat under the cursor; re-target so a
@@ -692,6 +815,61 @@ impl DriftWm {
                 csd,
             },
         );
+    }
+
+    /// One entry point for the close-animation capture: on buffer removal the
+    /// OLD buffer's textures are still what surface state returns, so clone them
+    /// for the eventual flatten. Renderer-gated (the flatten needs one anyway),
+    /// and invalidated on remap — the unmap hook fires on every hide, not just
+    /// closes, so a hide-to-tray app must not pin stale textures.
+    pub fn capture_close_pixels_on_unmap(&mut self, surface: &WlSurface) {
+        enum Change {
+            Unmap,
+            Remap,
+            Other,
+        }
+        let change = with_states(surface, |states| {
+            match states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .pending()
+                .buffer
+            {
+                Some(BufferAssignment::Removed) => Change::Unmap,
+                Some(BufferAssignment::NewBuffer(_)) => Change::Remap,
+                None => Change::Other,
+            }
+        });
+        let id = surface.id();
+        match change {
+            Change::Remap => {
+                self.close_pixels.remove(&id);
+                return;
+            }
+            Change::Other => return,
+            Change::Unmap => {}
+        }
+        // First capture wins for this surface.
+        if self.close_pixels.contains_key(&id) {
+            return;
+        }
+        // Record the geometry alongside the pixels: this is the last moment it is
+        // readable, since the null-buffer commit this hook precedes collapses it.
+        let Some(geometry) = self.window_for_surface(surface).map(|w| w.geometry()) else {
+            return;
+        };
+        let Some(mut backend) = self.backend.take() else {
+            return;
+        };
+        if let Some(pixels) = crate::render::capture_close_pixels(
+            backend.renderer(),
+            surface,
+            geometry,
+            Instant::now(),
+        ) {
+            self.close_pixels.insert(id, pixels);
+        }
+        self.backend = Some(backend);
     }
 
     /// Resolve a surface `app_id` to a launchable identity, using the warmed
@@ -899,6 +1077,14 @@ impl DriftWm {
         let was_focused = self
             .window_focus_surface()
             .is_some_and(|t| focus_belongs_to_toplevel(&t.0, surface));
+
+        // Drop any window animation entry: `stage.replace` preserves the id, so
+        // the stand-in would otherwise inherit a stale client chase — or wear the
+        // dead client's crossfade.
+        if let Some(id) = self.stage.id_of(window) {
+            self.window_animations.remove(id);
+            self.drop_resize_crossfade(id);
+        }
 
         let sid = SuspendedId(self.next_suspended_id);
         self.next_suspended_id += 1;

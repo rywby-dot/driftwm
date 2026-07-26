@@ -5,8 +5,11 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use super::{DriftWm, PendingRecenter, StageWindow, ZoomAnimationAnchor};
+use super::{
+    DriftWm, PendingRecenter, PendingView, StageWindow, ZoomAnimationAnchor, output_state,
+};
 use driftwm::config;
+use driftwm::stage::ElementId;
 use driftwm::window_ext::WindowExt;
 
 /// Build a `SnapRect` from a hypothetical canvas position, size, SSD
@@ -53,6 +56,9 @@ impl DriftWm {
         ));
         let usable_center_x = usable.loc.x as f64 + usable.size.w as f64 / 2.0;
         let usable_center_y = usable.loc.y as f64 + usable.size.h as f64 / 2.0;
+        // `window_visual_center` sizes from the last configure, so a fit pressed
+        // while fullscreen centers on the restored window instead of the viewport
+        // the client is still reporting (see `configured_window_size`).
         let visual_center = self.window_visual_center(window).unwrap_or_default();
         let target_camera = Point::from((
             visual_center.x - usable_center_x,
@@ -92,6 +98,24 @@ impl DriftWm {
             visual_center: center,
         } = self.compute_fit_geometry(window);
 
+        // A fit establishes its own placement, so an exit recenter still owed
+        // from the fullscreen/fill exit that preceded it must not fire: it would
+        // land on the client's next resize and yank the fitted window back to the
+        // pre-exit center (`enter_fullscreen` drops it for the same reason).
+        self.pending_recenter.remove(&wl_surface.id());
+
+        // A freeze this fit arms of its own accord is the only one allowed to
+        // hold its pan back, and a request-carrying (re)start is what bumps the
+        // generation. A freeze already running belongs to some other action,
+        // which never promised to release this camera.
+        let generation_before = self
+            .stage
+            .id_of(window)
+            .and_then(|id| self.window_animations.generation_of(id));
+
+        // The fit position is passed in because the stage still holds the
+        // pre-fit one — the map below is what writes it.
+        self.animate_window_geometry(window, target_size, Some(new_loc));
         window.enter_fit_configure(target_size);
         self.map_window(window.clone(), new_loc, false);
         // After the map — set_fit needs the window's stage entry, which the
@@ -109,16 +133,53 @@ impl DriftWm {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.raise_and_focus(window, serial);
         self.set_overview_return(None);
-        let viewport_center = self.usable_center_screen();
-        self.with_output_state(|os| {
+        let anchor = ZoomAnimationAnchor {
+            canvas: center,
+            screen: self.usable_center_screen(),
+        };
+        let frozen = self.stage.id_of(window).filter(|id| {
+            self.window_animations.generation_of(*id) != generation_before
+                && self.window_animations.start_held(*id)
+        });
+        let Some(output) = self.active_output() else {
+            return;
+        };
+        // This fit owns the output's view from here on, whether it parks its pan
+        // or applies it below. A pan parked on some other window's freeze was
+        // promised to an action this one has just superseded.
+        self.window_animations.drop_pending_views_on(&output.name());
+        let Some(id) = frozen else {
+            let mut os = output_state(&output);
             os.momentum.stop();
-            os.zoom_animation_anchor = Some(ZoomAnimationAnchor {
-                canvas: center,
-                screen: viewport_center,
-            });
+            os.zoom_animation_anchor = Some(anchor);
             os.camera_target = Some(target_camera);
             os.zoom_target = Some(1.0);
-        });
+            return;
+        };
+        // Whatever navigation was in flight does not wait for the freeze too:
+        // left running it would fly for the whole freeze and then be jumped out
+        // of by the fit's own pan, and clearing it also makes the stamp below
+        // exact — nothing legitimately moves this camera between here and the
+        // release.
+        let (staged_camera, staged_zoom) = {
+            let mut os = output_state(&output);
+            os.momentum.stop();
+            os.camera_target = None;
+            os.zoom_target = None;
+            os.zoom_animation_anchor = None;
+            (os.camera, os.zoom)
+        };
+        self.window_animations.stage_pending_view(
+            id,
+            PendingView {
+                output: output.name(),
+                camera: target_camera,
+                zoom: 1.0,
+                anchor,
+                staged_camera,
+                staged_zoom,
+            },
+        );
     }
 
     pub fn unfit_window(&mut self, window: &Window) {
@@ -130,7 +191,10 @@ impl DriftWm {
             return;
         };
 
-        // Resize in-place around the preserved visual center.
+        // Resize in-place around the preserved visual center. Sized from the last
+        // configure, so an unfit dispatched out of a fullscreen exit centers on
+        // the restored (fit-sized) window, not the viewport still being reported.
+        // The insert below replaces any recenter the exit left owed.
         let center = self.window_visual_center(window).unwrap_or_default();
         let bar = self.window_ssd_bar(window);
         let new_loc = super::frame_loc_for_center(center, saved_size, bar);
@@ -140,6 +204,7 @@ impl DriftWm {
         // then re-center using the real post-unfit size.
         let pre_exit_size = window.geometry().size;
 
+        self.animate_window_geometry(window, saved_size, None);
         window.exit_fit_configure(saved_size);
         self.map_window(window.clone(), new_loc, false);
 
@@ -258,7 +323,10 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let primary_id = self.stage.id_of(window);
+        let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        self.animate_cluster_shift(old_member_locs, primary_id);
         self.fit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
@@ -279,7 +347,9 @@ impl DriftWm {
         let Some(old_loc) = self.stage.position_of(window) else {
             return;
         };
-        let old_size = window.geometry().size;
+        // Last configured, not last committed — the cluster deltas below must be
+        // measured against the rect the window is actually becoming.
+        let old_size = super::configured_window_size(window);
         let bar = self.window_ssd_bar(window);
         let bw = self.window_border_width(&wl_surface);
         // Mirror unfit_window's new_loc so per-edge deltas match.
@@ -300,13 +370,45 @@ impl DriftWm {
             .filter(|w| w != window)
             .collect()
         };
+        let primary_id = self.stage.id_of(window);
+        let old_member_locs = self.cluster_member_positions(&cluster_members);
         self.shift_cluster_around_primary(window, old_rect, new_rect);
+        self.animate_cluster_shift(old_member_locs, primary_id);
         self.unfit_window(window);
         for member in &cluster_members {
             self.refresh_stable_snap_rect(member);
         }
         // Primary's cache is refreshed by the pending_recenter completion
         // in `handlers/compositor.rs` once the client acks the exit configure.
+    }
+
+    /// Snapshot each cluster member's pre-shift canvas position, so the shift
+    /// can be animated after the stage moves them.
+    fn cluster_member_positions(
+        &self,
+        members: &[StageWindow],
+    ) -> Vec<(StageWindow, Point<i32, Logical>)> {
+        members
+            .iter()
+            .filter_map(|m| Some((m.clone(), self.stage.position_of(m)?)))
+            .collect()
+    }
+
+    /// Animate each cluster member from its captured pre-shift position to its
+    /// new (already-applied) stage position, held back until `primary`'s own
+    /// resize freeze releases so the push and the window pushing it start on the
+    /// same tick. `primary`'s entry does not exist yet here — the wait is
+    /// resolved at tick time, and one that never resolves is simply dropped.
+    fn animate_cluster_shift(
+        &mut self,
+        old_locs: Vec<(StageWindow, Point<i32, Logical>)>,
+        primary: Option<ElementId>,
+    ) {
+        for (member, old_loc) in old_locs {
+            if self.stage.position_of(&member) != Some(old_loc) {
+                self.animate_element_move_from(&member, old_loc, primary);
+            }
+        }
     }
 
     pub fn toggle_fit_window_snapped(&mut self, window: &Window) {

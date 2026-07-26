@@ -2,6 +2,7 @@ mod background;
 mod blur;
 mod capture;
 mod capture_background;
+mod closing;
 mod cursor;
 mod elements;
 mod error_bar;
@@ -19,9 +20,15 @@ pub use background::{BackgroundElement, init_background, update_background_eleme
 pub(crate) use blur::compile_blur_shaders;
 pub use blur::{BlurCache, SharedBlur};
 pub use capture::{render_capture_frames, render_screencopy, render_toplevel_captures};
+pub(crate) use closing::{
+    BakeChrome, CloseChrome, ClosePixels, ClosingSnapshot, ResizeCaptures, ResizeCrossfade,
+    StandInFade, capture_close_pixels, close_pixels_fresh, resize_crossfade, snapshot_canvas,
+    snapshot_screen,
+};
 pub use cursor::build_cursor_elements;
 pub use elements::{
     OutputRenderElements, PixelSnapRescaleElement, RoundedCornerElement, TileShaderElement,
+    WindowTransformElement,
 };
 pub use error_bar::ErrorBarCache;
 pub use lifecycle::{
@@ -42,6 +49,69 @@ pub(crate) use suspended::{ensure_body, ensure_label};
 use blur::{BlurLayer, BlurRequestData, process_blur_requests};
 use layers::{build_canvas_layer_elements, build_layer_elements};
 use shaders::{push_border_element, push_shadow_element};
+
+/// The per-window affine transform for an in-flight open/close/geometry
+/// animation, threaded through the chrome push helpers so the surface, border,
+/// shadow, and decoration all lerp together. Physical `origin`/`offset`; the
+/// `scale` is the visual stretch relative to the live rect.
+#[derive(Clone, Copy)]
+pub(super) struct WindowRenderAnimation {
+    origin: Point<f64, Physical>,
+    offset: Point<f64, Physical>,
+    scale: Scale<f64>,
+}
+
+/// The whole extent of a texture we rasterized ourselves, as the `src` a
+/// `TextureRenderElement` wants.
+///
+/// Our offscreens hold `logical * scale` texels but are wrapped at buffer scale
+/// 1, so for them one "logical" unit *is* one texel and `src` has to be given in
+/// texels. Leaving `src` at `None` makes smithay fall back to the element's
+/// logical size — the *destination* extent — which on a HiDPI or zoomed-in
+/// surface samples only the top-left `1/scale`-squared of the texture and
+/// stretches it over the whole destination.
+pub(super) fn texel_src(texels: Size<i32, Physical>) -> Rectangle<f64, Logical> {
+    Rectangle::from_size(Size::from((texels.w as f64, texels.h as f64)))
+}
+
+/// One adoption crossfade's render inputs, lifted out of `state` before the
+/// per-fade mutable borrows. `focused`/`launching` are frozen at fade creation.
+struct FadeRender {
+    suspended: std::rc::Rc<crate::state::SuspendedWindow>,
+    loc: Point<i32, Logical>,
+    focused: bool,
+    launching: bool,
+    alpha: f32,
+    /// `None` unless the fade actually shrinks — an identity transform would
+    /// still change the element variant and drop its opaque regions, so the
+    /// adoption crossfade must keep taking the untransformed path.
+    animation: Option<WindowRenderAnimation>,
+}
+
+impl WindowRenderAnimation {
+    /// Apply the same affine the element decorator applies, so the frost rect
+    /// follows the animated window instead of its (instant) logical position.
+    fn transform_phys_rect(&self, rect: Rectangle<i32, Physical>) -> Rectangle<i32, Physical> {
+        let x0 = self.origin.x + (rect.loc.x as f64 - self.origin.x) * self.scale.x + self.offset.x;
+        let y0 = self.origin.y + (rect.loc.y as f64 - self.origin.y) * self.scale.y + self.offset.y;
+        let x1 = self.origin.x
+            + ((rect.loc.x + rect.size.w) as f64 - self.origin.x) * self.scale.x
+            + self.offset.x;
+        let y1 = self.origin.y
+            + ((rect.loc.y + rect.size.h) as f64 - self.origin.y) * self.scale.y
+            + self.offset.y;
+        // Round each corner independently, matching `WindowTransformElement`'s
+        // own rounding, so the frost rect and the element rect can't disagree by
+        // a pixel.
+        Rectangle::new(
+            Point::from((x0.round() as i32, y0.round() as i32)),
+            Size::from((
+                (x1.round() as i32 - x0.round() as i32).max(0),
+                (y1.round() as i32 - y0.round() as i32).max(0),
+            )),
+        )
+    }
+}
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::{
@@ -115,6 +185,7 @@ fn push_corner_clipped_elements(
     corner_radius: [f32; 4],
     zoom: f64,
     output_scale: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     let aa_scale = (output_scale * zoom) as f32;
     // Clamp radii so a tiny window doesn't get corners wider than half its
@@ -128,20 +199,30 @@ fn push_corner_clipped_elements(
         corner_radius[3].clamp(0.0, max_r),
     ];
     for elem in elems {
-        target.push(OutputRenderElements::CsdWindow(
-            PixelSnapRescaleElement::from_element(
-                RoundedCornerElement::new(
-                    elem,
-                    shader.clone(),
-                    geometry,
-                    clamped,
-                    output_scale,
-                    aa_scale,
-                ),
-                Point::<i32, Physical>::from((0, 0)),
-                zoom,
+        let elem = PixelSnapRescaleElement::from_element(
+            RoundedCornerElement::new(
+                elem,
+                shader.clone(),
+                geometry,
+                clamped,
+                output_scale,
+                aa_scale,
             ),
-        ));
+            Point::<i32, Physical>::from((0, 0)),
+            zoom,
+        );
+        if let Some(animation) = animation {
+            target.push(OutputRenderElements::AnimatedCsdWindow(
+                WindowTransformElement::new(
+                    elem,
+                    animation.origin,
+                    animation.offset,
+                    animation.scale,
+                ),
+            ));
+        } else {
+            target.push(OutputRenderElements::CsdWindow(elem));
+        }
     }
 }
 
@@ -149,13 +230,21 @@ fn push_plain_elements(
     target: &mut Vec<OutputRenderElements>,
     elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     zoom: f64,
+    animation: Option<WindowRenderAnimation>,
 ) {
     target.extend(elems.into_iter().map(|elem| {
-        OutputRenderElements::Window(PixelSnapRescaleElement::from_element(
-            elem,
-            Point::<i32, Physical>::from((0, 0)),
-            zoom,
-        ))
+        let elem =
+            PixelSnapRescaleElement::from_element(elem, Point::<i32, Physical>::from((0, 0)), zoom);
+        if let Some(animation) = animation {
+            OutputRenderElements::AnimatedWindow(WindowTransformElement::new(
+                elem,
+                animation.origin,
+                animation.offset,
+                animation.scale,
+            ))
+        } else {
+            OutputRenderElements::Window(elem)
+        }
     }));
 }
 
@@ -232,6 +321,11 @@ pub(crate) fn compose_capture_elements(
                     loc,
                     focused,
                     launching,
+                    1.0,
+                    // Captures and screenshots want the settled frame, never a
+                    // mid-slide one — deliberately un-animated, like the client
+                    // arm below.
+                    None,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -379,7 +473,7 @@ pub(crate) fn compose_capture_elements(
 
         let target = if is_widget { &mut widgets } else { &mut normal };
         // Popups push first so they sit above the title bar and window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, None);
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -442,12 +536,13 @@ pub(crate) fn compose_capture_elements(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        None,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, None);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
 
             if effective_bw > 0
@@ -470,6 +565,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
 
@@ -493,6 +589,7 @@ pub(crate) fn compose_capture_elements(
                     opacity,
                     scale,
                     zoom,
+                    None,
                 );
             }
         } else if let Some(ref shader) = state.render.corner_clip_shader {
@@ -516,6 +613,7 @@ pub(crate) fn compose_capture_elements(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    None,
                 );
 
                 if effective_bw > 0
@@ -534,6 +632,7 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
 
@@ -557,13 +656,14 @@ pub(crate) fn compose_capture_elements(
                         opacity,
                         scale,
                         zoom,
+                        None,
                     );
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, None);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, None);
         }
     }
 
@@ -608,11 +708,19 @@ pub fn compose_frame(
     }
 
     let name = output.name();
-    let output_fullscreen = state.is_output_fullscreen(output);
-    // The fullscreen window fully occludes its output: only it, the overlay
-    // layer, and the cursor render; everything beneath is culled below. Pinned
-    // windows count as top-tier toplevels and get covered like the top layer.
-    let fullscreen_window = state.fullscreen_window_on(output);
+    let output_fullscreen = state.is_output_visually_fullscreen(output);
+    // The fullscreen picture fully occludes its output: only what draws at or
+    // above it, the overlay layer, and the cursor render; everything beneath is
+    // culled below. Pinned windows count as top-tier toplevels and get covered
+    // like the top layer. Resolved visually, so an exit still frozen on the
+    // fullscreen picture keeps showing that picture instead of being culled
+    // along with everything else — and so does a window growing into the
+    // fullscreen that exit is handing over.
+    let fullscreen_windows = if output_fullscreen {
+        state.visually_fullscreen_windows_on(output)
+    } else {
+        Vec::new()
+    };
     let mut did_init_bg = false;
     if output_fullscreen {
         // Fullscreen fully occludes the canvas: free its chunk caches and skip
@@ -629,10 +737,19 @@ pub fn compose_frame(
 
     // Read per-output state directly — active_output() follows the pointer,
     // which is wrong when rendering an output the pointer isn't on.
-    let (camera, zoom) = {
+    let (live_camera, live_zoom) = {
         let os = crate::state::output_state(output);
         (os.camera, os.zoom)
     };
+    // Entering fullscreen parks the viewport at zoom 1 in one step, but the
+    // window only covers the output at the end of its growth — so for those few
+    // frames the whole scene behind it would pop to the parked view. Draw the
+    // world through the pre-fullscreen view instead: it is culled outright the
+    // moment the leg lands, so it never has to travel anywhere and the park stays
+    // the implementation detail it is. Only the entering window itself reads the
+    // live view below, since that is the frame its growth was seeded in.
+    let entering_fullscreen = state.fullscreen_entry_on(output);
+    let (camera, zoom) = state.world_view(output);
 
     // A just-re-created `cached_bg` carries placeholder camera=(0,0)/zoom=1.0
     // (see `init_background`), so without this it renders one frame at the wrong
@@ -662,6 +779,9 @@ pub fn compose_frame(
     // Screen-pinned windows: own bucket, rendered above normal and below
     // Top/Overlay layer-shell (see all_elements assembly below).
     let mut zoomed_pinned: Vec<OutputRenderElements> = Vec::new();
+    // Closing snapshots + adoption fades: their own bucket above normal windows
+    // so they never shift the normal windows' blur element indices.
+    let mut zoomed_closing: Vec<OutputRenderElements> = Vec::new();
 
     let blur_enabled = state.render.blur_down_shader.is_some()
         && state.render.blur_up_shader.is_some()
@@ -697,9 +817,30 @@ pub fn compose_frame(
                     Point::<i32, Logical>::from((loc.x - pad, loc.y - bar - pad)),
                     Size::<i32, Logical>::from((size.w + 2 * pad, size.h + bar + 2 * pad)),
                 );
-                if !visible_rect.overlaps(bbox) {
+                let element_id = state.stage.id_of(element);
+                if !visible_rect.overlaps(state.window_cull_rect(element_id, bbox)) {
                     continue;
                 }
+                // A stand-in's entry is position-only, so the whole slide lives
+                // in `offset` and there is no stretch: its visual size always
+                // equals the live size, both being `StageElement::size`.
+                let animation = element_id.and_then(|id| {
+                    let v = state.animated_visual(id, loc.to_f64(), size.to_f64());
+                    (v.loc != loc.to_f64()).then(|| {
+                        let physical_zoom = output_scale * zoom;
+                        WindowRenderAnimation {
+                            origin: Point::from((
+                                (loc.x as f64 - camera.x) * physical_zoom,
+                                (loc.y as f64 - camera.y) * physical_zoom,
+                            )),
+                            offset: Point::from((
+                                (v.loc.x - loc.x as f64) * physical_zoom,
+                                (v.loc.y - loc.y as f64) * physical_zoom,
+                            )),
+                            scale: Scale::from(1.0),
+                        }
+                    })
+                });
                 let focused = state.gated_suspended_focus() == Some(s.id);
                 let launching = state.is_suspended_launching(s.id);
                 let border_shader = state.render.border_shader.clone();
@@ -710,6 +851,8 @@ pub fn compose_frame(
                     loc,
                     focused,
                     launching,
+                    1.0,
+                    animation,
                     &state.config.decorations,
                     state.decoration_scale,
                     &mut state.decorations,
@@ -728,7 +871,7 @@ pub fn compose_frame(
         let Some(loc) = state.stage.position_of(window) else {
             continue;
         };
-        if output_fullscreen && fullscreen_window.as_ref() != Some(window) {
+        if output_fullscreen && !fullscreen_windows.contains(window) {
             continue;
         }
         let geom_loc = window.geometry().loc;
@@ -736,7 +879,15 @@ pub fn compose_frame(
         let Some(wl_surface) = window.wl_surface() else {
             continue;
         };
-        let is_fullscreen = state.stage.is_fullscreen(window);
+        // Resolved once: `Stage::id_of` is a linear scan and three of the passes
+        // below want the id.
+        let element_id = state.stage.id_of(window);
+        // Not stage membership: a resize freeze holds the pre-action picture on
+        // screen after the stage has flipped, and a fullscreen leg trades the
+        // chrome for the bare picture gradually instead of at one frame. Chrome
+        // is built for as long as any of it is still visible.
+        let chrome_alpha = state.chrome_alpha_of(element_id, window);
+        let is_fullscreen = chrome_alpha <= 0.0;
         let has_ssd = !is_fullscreen
             && state
                 .decorations
@@ -744,7 +895,16 @@ pub fn compose_frame(
 
         let applied = driftwm::config::applied_rule(&wl_surface);
         let is_widget = applied.as_ref().is_some_and(|r| r.widget);
+        // Live pin membership — `window_render_transform` below decides the
+        // canvas/screen frame from the same source, and the animation reference
+        // frame has to agree with it.
         let is_pinned = state.is_pinned(window);
+        // Whether the picture wears the pin: its title-bar marker, and normally
+        // its z-bucket and blur layer too. Entering fullscreen unpins at the
+        // action, and the freeze then holds the pinned picture on screen for the
+        // rest of its budget — nothing may restack over a frame that isn't moving.
+        let shows_pinned = state.pinned_picture_of(element_id, window);
+        let bucket_pinned = state.draws_pinned_on(element_id, window, output_fullscreen);
         let is_focused = focused_surface.as_ref().is_some_and(|f| *f == *wl_surface);
         let effective_mode = driftwm::config::effective_decoration_mode(
             applied.as_ref().and_then(|r| r.decoration.as_ref()),
@@ -795,7 +955,7 @@ pub fn compose_frame(
             bbox.size.w += 2 * effective_bw;
             bbox.size.h += 2 * effective_bw;
         }
-        if !visible_rect.overlaps(bbox) {
+        if !visible_rect.overlaps(state.window_cull_rect(element_id, bbox)) {
             continue;
         }
 
@@ -803,10 +963,54 @@ pub fn compose_frame(
         // output-relative `screen_pos` with zoom 1.0 (identity), normal windows
         // use the camera transform. `zoom` is shadowed so every downstream
         // scale (clip, border, shadow, blur, rescale) follows automatically.
+        // A window growing into fullscreen is the one thing on the output that
+        // belongs to the parked view rather than the world behind it.
+        let (view_camera, view_zoom) = if entering_fullscreen.as_ref() == Some(window) {
+            (live_camera, live_zoom)
+        } else {
+            (camera, zoom)
+        };
         let Some((render_loc, zoom)) =
-            state.window_render_transform(window, Some(output), camera, zoom)
+            state.window_render_transform(window, Some(output), view_camera, view_zoom)
         else {
             continue;
+        };
+
+        // Per-window lifecycle/geometry animation. A pinned window's chase runs
+        // in screen space against its pin's content-box origin (`site.screen_pos`),
+        // but `render_loc` is that origin minus `geom_loc` (the surface origin),
+        // so add `geom_loc` back to align with what the Screen entry chases; a
+        // normal window's reference is its canvas stage location.
+        let anim_ref = if is_pinned {
+            render_loc + geom_loc.to_f64()
+        } else {
+            loc.to_f64()
+        };
+        let target_size = geom_size.to_f64();
+        let visual = element_id.map(|id| state.animated_visual(id, anim_ref, target_size));
+        let (visual_alpha, window_animation) = match visual {
+            Some(v) if v.loc != anim_ref || v.size != target_size || v.alpha != 1.0 => {
+                let physical_zoom = output_scale * zoom;
+                let content_origin = Point::from((
+                    (render_loc.x + geom_loc.x as f64) * physical_zoom,
+                    (render_loc.y + geom_loc.y as f64) * physical_zoom,
+                ));
+                let animation = WindowRenderAnimation {
+                    origin: content_origin,
+                    offset: Point::from((
+                        (v.loc.x - anim_ref.x) * physical_zoom,
+                        (v.loc.y - anim_ref.y) * physical_zoom,
+                    )),
+                    // Never magnifies a buffer the client has not redrawn yet.
+                    scale: Scale::from(crate::state::window_animation::content_scale(
+                        v.size,
+                        target_size,
+                        v.cap_content,
+                    )),
+                };
+                (v.alpha, Some(animation))
+            }
+            _ => (1.0, None),
         };
 
         #[cfg(feature = "profile-with-tracy")]
@@ -822,7 +1026,28 @@ pub fn compose_frame(
         // Empty rect list = client explicitly opted out → treat as off.
         let client_blur = client_blur_rects.as_ref().is_some_and(|r| !r.is_empty());
         let wants_blur = blur_enabled && (applied.as_ref().is_some_and(|r| r.blur) || client_blur);
-        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0);
+        let opacity = applied.as_ref().and_then(|r| r.opacity).unwrap_or(1.0) * visual_alpha as f64;
+        // Bar, border and shadow ride the fullscreen ramp on top of the window's
+        // own opacity; `chrome_alpha` is 1 for every other window.
+        let chrome_opacity = opacity * chrome_alpha as f64;
+
+        // A resize crossfade rides the window's own transform, so the old content
+        // lands on the interpolated visual rect for Canvas and Screen entries
+        // alike. Positioned at the *live* geometry rect, which that transform
+        // then maps exactly as it maps the live content.
+        let resize_overlay = element_id
+            .and_then(|id| state.resize_crossfades.get(&id))
+            .map(|crossfade| {
+                let geometry_phys: Point<f64, Physical> = Point::from((
+                    (render_loc.x + geom_loc.x as f64) * zoom * output_scale,
+                    (render_loc.y + geom_loc.y as f64) * zoom * output_scale,
+                ));
+                let geometry_size: Size<i32, Logical> = Size::from((
+                    (geom_size.w as f64 * zoom).round() as i32,
+                    (geom_size.h as f64 * zoom).round() as i32,
+                ));
+                crossfade.render_element(geometry_phys, geometry_size, window_animation, opacity)
+            });
 
         // Split elements: toplevel + subsurfaces get corner-clipped, popups
         // don't (they can legitimately extend outside the parent's geometry —
@@ -866,9 +1091,9 @@ pub fn compose_frame(
             (elems, Vec::new())
         };
 
-        // Test `is_pinned` BEFORE `is_widget`: a pinned *widget* must land in the
+        // Test pinned BEFORE `is_widget`: a pinned *widget* must land in the
         // pinned bucket (above normal), not `zoomed_widgets` (below normal).
-        let target = if is_pinned {
+        let target = if bucket_pinned {
             &mut zoomed_pinned
         } else if is_widget {
             &mut zoomed_widgets
@@ -880,7 +1105,11 @@ pub fn compose_frame(
 
         // Popups push first (earlier in vec = on-top in smithay z-order) so
         // they sit above the title bar and clipped window content.
-        push_plain_elements(target, popup_elems, zoom);
+        push_plain_elements(target, popup_elems, zoom, window_animation);
+        // Where a resize crossfade goes: above the live content, below the SSD
+        // bar and popups. Spliced in at the end so the branches below stay one
+        // content push each.
+        let mut overlay_at = target.len();
 
         if has_ssd {
             let bar_height = state.config.decorations.title_bar_height;
@@ -903,7 +1132,7 @@ pub fn compose_frame(
                 deco.update(
                     geom_size.w,
                     is_focused,
-                    is_pinned,
+                    shows_pinned,
                     state.decoration_scale,
                     &deco_title,
                     &state.config.decorations,
@@ -916,8 +1145,8 @@ pub fn compose_frame(
             {
                 let bar_physical: Point<f64, Physical> =
                     Point::from((loc_phys.x as f64, loc_phys.y as f64 - bar_h_phys));
-                let bar_alpha = if opacity < 1.0 {
-                    Some(opacity as f32)
+                let bar_alpha = if chrome_opacity < 1.0 {
+                    Some(chrome_opacity as f32)
                 } else {
                     None
                 };
@@ -930,15 +1159,26 @@ pub fn compose_frame(
                     None,
                     Kind::Unspecified,
                 ) {
-                    target.push(OutputRenderElements::Decoration(
-                        PixelSnapRescaleElement::from_element(
-                            bar_elem,
-                            Point::<i32, Physical>::from((0, 0)),
-                            zoom,
-                        ),
-                    ));
+                    let bar_elem = PixelSnapRescaleElement::from_element(
+                        bar_elem,
+                        Point::<i32, Physical>::from((0, 0)),
+                        zoom,
+                    );
+                    if let Some(animation) = window_animation {
+                        target.push(OutputRenderElements::AnimatedDecoration(
+                            WindowTransformElement::new(
+                                bar_elem,
+                                animation.origin,
+                                animation.offset,
+                                animation.scale,
+                            ),
+                        ));
+                    } else {
+                        target.push(OutputRenderElements::Decoration(bar_elem));
+                    }
                 }
             }
+            overlay_at = target.len();
 
             // Only bottom corners round (title bar covers the top edge).
             if let Some(ref shader) = state.render.corner_clip_shader {
@@ -960,12 +1200,13 @@ pub fn compose_frame(
                         [0.0, 0.0, radius, radius],
                         zoom,
                         output_scale,
+                        window_animation,
                     );
                 } else {
-                    push_plain_elements(target, elems, zoom);
+                    push_plain_elements(target, elems, zoom, window_animation);
                 }
             } else {
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
 
             // Border wraps title bar + content; drawn between window content
@@ -987,9 +1228,10 @@ pub fn compose_frame(
                     effective_bw,
                     border_color,
                     is_focused,
-                    opacity,
+                    chrome_opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
             }
 
@@ -1014,9 +1256,10 @@ pub fn compose_frame(
                     &shader,
                     body_logical,
                     (effective_corner_radius + effective_bw) as f32,
-                    opacity,
+                    chrome_opacity,
                     scale,
                     zoom,
+                    window_animation,
                 );
                 shadow_count = 1;
             }
@@ -1053,6 +1296,7 @@ pub fn compose_frame(
                     [radius, radius, radius, radius],
                     zoom,
                     output_scale,
+                    window_animation,
                 );
 
                 if effective_bw > 0
@@ -1068,9 +1312,10 @@ pub fn compose_frame(
                         effective_bw,
                         border_color,
                         is_focused,
-                        opacity,
+                        chrome_opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                 }
 
@@ -1093,18 +1338,25 @@ pub fn compose_frame(
                         &shader,
                         body_logical,
                         (effective_corner_radius + effective_bw) as f32,
-                        opacity,
+                        chrome_opacity,
                         scale,
                         zoom,
+                        window_animation,
                     );
                     shadow_count = 1;
                 }
             } else {
                 // Bare (`decoration = "none"`) or fullscreen: pass through.
-                push_plain_elements(target, elems, zoom);
+                push_plain_elements(target, elems, zoom, window_animation);
             }
         } else {
-            push_plain_elements(target, elems, zoom);
+            push_plain_elements(target, elems, zoom, window_animation);
+        }
+
+        // In-bucket, ahead of the trailing shadow, so the blur element counts
+        // below stay valid.
+        if let Some(overlay) = resize_overlay {
+            target.insert(overlay_at, overlay);
         }
 
         if wants_blur && (target.len() - elem_start - shadow_count) > 0 {
@@ -1143,6 +1395,11 @@ pub fn compose_frame(
                 screen_size,
             )
             .to_physical_precise_round(output_scale);
+            // Frost tracks the animated window's visual rect, not its instant
+            // logical position (accepted cost: a frosted animation re-blurs at
+            // frame rate, throttled by `animate_blur_fps` like a drag).
+            let screen_rect =
+                window_animation.map_or(screen_rect, |anim| anim.transform_phys_rect(screen_rect));
 
             // Convert client blur region: surface-local Logical → mask-local
             // Physical at composite_scale = zoom × output_scale.
@@ -1194,7 +1451,13 @@ pub fn compose_frame(
                     screen_rect,
                     elem_start,
                     elem_count,
-                    layer: if is_pinned {
+                    // Must follow the bucket the elements went into, since the
+                    // blur splices by that bucket's prefix offset. The tag also
+                    // marks a layer as screen-fixed, so its blur recomputes on
+                    // camera moves — moot for a picture giving the bucket up,
+                    // since a fullscreen output's camera is locked and there is
+                    // no scene left behind it to pan anyway.
+                    layer: if bucket_pinned {
                         BlurLayer::Pinned
                     } else if is_widget {
                         BlurLayer::Widget
@@ -1204,6 +1467,78 @@ pub fn compose_frame(
                     region_rects,
                 });
             }
+        }
+    }
+
+    // Closing snapshots + adoption fades draw above normal windows, but never on
+    // a visually-fullscreen output (no dying-window flash over a fullscreen app).
+    if !output_fullscreen {
+        zoomed_closing = closing::render_snapshots_for_output(
+            &state.closing_snapshots,
+            &name,
+            visible_rect,
+            camera,
+            zoom,
+            output_scale,
+        );
+        // Collected before the per-fade mutable borrows of `state` below.
+        // `focused`/`launching` are the values frozen at fade creation, never a
+        // live lookup: adoption already ended the relaunch and moved focus, and
+        // the chrome caches key on both, so re-resolving them would re-rasterize
+        // the label and re-color the bar mid-fade.
+        let fades: Vec<FadeRender> = state
+            .standin_fades
+            .iter()
+            .filter(|f| visible_rect.overlaps(Rectangle::new(f.loc, f.suspended.size.get())))
+            .map(|f| {
+                let shrink = f.shrink_scale();
+                let size = f.suspended.size.get();
+                let bar = state.config.decorations.title_bar_height;
+                // Shrink toward the centre of the frame the stand-in occupied
+                // (its body plus the bar strip above it).
+                let centre = Point::<f64, Physical>::from((
+                    (f.loc.x as f64 - camera.x + size.w as f64 / 2.0) * zoom * output_scale,
+                    (f.loc.y as f64 - camera.y - bar as f64 / 2.0 + size.h as f64 / 2.0)
+                        * zoom
+                        * output_scale,
+                ));
+                FadeRender {
+                    suspended: f.suspended.clone(),
+                    loc: f.loc,
+                    focused: f.focused,
+                    launching: f.launching,
+                    alpha: f.alpha(),
+                    animation: (shrink < 1.0).then(|| WindowRenderAnimation {
+                        origin: centre,
+                        offset: Point::default(),
+                        scale: Scale::from(shrink),
+                    }),
+                }
+            })
+            .collect();
+        for fade in fades {
+            let border_shader = state.render.border_shader.clone();
+            let shadow_shader = state.render.shadow_shader.clone();
+            suspended::push_suspended_element(
+                renderer,
+                &fade.suspended,
+                fade.loc,
+                fade.focused,
+                fade.launching,
+                fade.alpha,
+                fade.animation,
+                &state.config.decorations,
+                state.decoration_scale,
+                &mut state.decorations,
+                &mut state.render.border_cache,
+                &mut state.render.shadow_cache,
+                border_shader.as_ref(),
+                shadow_shader.as_ref(),
+                camera,
+                zoom,
+                scale,
+                &mut zoomed_closing,
+            );
         }
     }
 
@@ -1276,7 +1611,6 @@ pub fn compose_frame(
         vec![]
     };
 
-    let is_fullscreen = state.is_output_fullscreen(output);
     #[cfg(feature = "profile-with-tracy")]
     let _layers_span = tracy_client::span!("compose::layers");
     let (overlay_elements, overlay_blur) = build_layer_elements(
@@ -1286,17 +1620,17 @@ pub fn compose_frame(
         WlrLayer::Overlay,
         Some(BlurLayer::Overlay),
     );
-    let (top_elements, top_blur) = if !is_fullscreen {
+    let (top_elements, top_blur) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Top, Some(BlurLayer::Top))
     } else {
         (vec![], vec![])
     };
-    let (bottom_elements, _) = if !is_fullscreen {
+    let (bottom_elements, _) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Bottom, None)
     } else {
         (vec![], vec![])
     };
-    let (background_layer_elements, _) = if !is_fullscreen {
+    let (background_layer_elements, _) = if !output_fullscreen {
         build_layer_elements(state, output, renderer, WlrLayer::Background, None)
     } else {
         (vec![], vec![])
@@ -1304,11 +1638,13 @@ pub fn compose_frame(
     #[cfg(feature = "profile-with-tracy")]
     drop(_layers_span);
 
-    // Prefix offsets locate each group in all_elements for blur insertion.
+    // Prefix offsets locate each group in all_elements for blur insertion. The
+    // closing bucket sits between pinned and normal, so `normal_prefix` counts
+    // it and the normal windows' blur indices stay correct.
     let overlay_prefix = cursor_elements.len();
     let top_prefix = overlay_prefix + overlay_elements.len();
     let pinned_prefix = top_prefix + top_elements.len();
-    let normal_prefix = pinned_prefix + zoomed_pinned.len();
+    let normal_prefix = pinned_prefix + zoomed_pinned.len() + zoomed_closing.len();
     let widget_prefix = normal_prefix + zoomed_normal.len() + canvas_layer_elements.len();
 
     // Layer surfaces first (front-to-back), then windows.
@@ -1322,6 +1658,7 @@ pub fn compose_frame(
             + overlay_elements.len()
             + top_elements.len()
             + zoomed_pinned.len()
+            + zoomed_closing.len()
             + zoomed_normal.len()
             + canvas_layer_elements.len()
             + zoomed_widgets.len()
@@ -1341,6 +1678,7 @@ pub fn compose_frame(
     all_elements.extend(overlay_elements);
     all_elements.extend(top_elements);
     all_elements.extend(zoomed_pinned);
+    all_elements.extend(zoomed_closing);
     all_elements.extend(zoomed_normal);
     all_elements.extend(canvas_layer_elements);
     all_elements.extend(zoomed_widgets);
@@ -1422,15 +1760,15 @@ fn build_output_outline_elements(
             continue;
         }
         // A fullscreen output shows a screen-space window, not a canvas
-        // viewport, so it has no outline to project onto other monitors.
-        if state.is_output_fullscreen(other) {
+        // viewport, so it has no outline to project onto other monitors (once
+        // the fullscreen-entry transition has covered the canvas).
+        if state.is_output_visually_fullscreen(other) {
             continue;
         }
 
-        let (other_camera, other_zoom) = {
-            let os = crate::state::output_state(other);
-            (os.camera, os.zoom)
-        };
+        // The view that output is showing its canvas at, which through a
+        // fullscreen entry is still the pre-park one.
+        let (other_camera, other_zoom) = state.world_view(other);
         let other_size = crate::state::output_logical_size(other);
 
         let other_canvas =
@@ -1514,4 +1852,42 @@ fn build_output_outline_elements(
     }
 
     elements
+}
+
+#[cfg(test)]
+mod texel_src_tests {
+    use super::*;
+
+    /// The whole point of [`texel_src`]: for a scale-1-wrapped offscreen the src
+    /// must span every texel, which on a 2x surface is twice the destination
+    /// extent per axis. Passing the destination (what `src: None` falls back to)
+    /// would sample a quarter of the texture and magnify it.
+    #[test]
+    fn texel_src_spans_the_whole_texture_not_the_destination() {
+        let logical: Size<i32, Logical> = Size::from((800, 600));
+        let scale = 2.0;
+        let texels: Size<i32, Physical> = Size::from((
+            (logical.w as f64 * scale) as i32,
+            (logical.h as f64 * scale) as i32,
+        ));
+
+        let src = texel_src(texels);
+        assert_eq!(src.loc, Point::from((0.0, 0.0)));
+        assert_eq!(src.size.w, texels.w as f64, "src covers every texel across");
+        assert_eq!(src.size.h, texels.h as f64, "src covers every texel down");
+        assert_ne!(
+            src.size.w, logical.w as f64,
+            "src must not collapse to the destination extent — that is the bug"
+        );
+    }
+
+    /// Fractional scales round-trip too (the reason src is carried in texels
+    /// rather than derived from an integer buffer scale).
+    #[test]
+    fn texel_src_handles_a_fractional_scale() {
+        let texels: Size<i32, Physical> = Size::from((1200, 900));
+        let src = texel_src(texels);
+        assert_eq!(src.size.w, 1200.0);
+        assert_eq!(src.size.h, 900.0);
+    }
 }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::surface_tree::focus_belongs_to_window;
-use driftwm::canvas::{CanvasPos, canvas_to_screen};
+use driftwm::canvas::{CanvasPos, canvas_to_screen, closest_point_on_rect};
 use driftwm::window_ext::WindowExt;
 use smithay::{
     desktop::Window,
@@ -540,6 +540,19 @@ impl DriftWm {
         super::visual_frame_center(loc, size, bar)
     }
 
+    /// Point of `w` nearest `origin`, on the bare content rect (client geometry,
+    /// stand-in body) so an SSD bar strip doesn't skew it. Shared by directional
+    /// navigation and auto placement's anchor fallback so the two searches can't
+    /// drift apart on the measurement.
+    pub fn element_closest_point(
+        &self,
+        origin: Point<f64, Logical>,
+        w: &super::StageWindow,
+    ) -> Point<f64, Logical> {
+        let loc = self.stage.position_of(w).unwrap_or_default();
+        closest_point_on_rect(origin, loc, w.geometry().size)
+    }
+
     /// Nearest window (by canvas distance from `from_center`) that is at least
     /// partially visible on `output`. Excludes `exclude`; widgets, pinned, and
     /// fullscreen windows have no canvas snap rect, so `window_intersects_viewport_on`
@@ -548,12 +561,14 @@ impl DriftWm {
         &self,
         from_center: Point<f64, Logical>,
         output: &Output,
-        exclude: &Window,
+        exclude: Option<&Window>,
     ) -> Option<Window> {
         self.stage
             .windows()
             .filter_map(|w| w.client())
-            .filter(|w| *w != exclude && self.window_intersects_viewport_on(*w, output))
+            .filter(|w| {
+                exclude.is_none_or(|e| *w != e) && self.window_intersects_viewport_on(*w, output)
+            })
             .min_by(|a, b| {
                 let dist = |w: &Window| {
                     self.window_visual_center(w)
@@ -581,10 +596,13 @@ impl DriftWm {
     /// sequence, so the live geometry at this point may not reflect what the
     /// user last saw as the cluster.
     #[allow(clippy::mutable_key_type)]
-    pub fn first_spatially_related_in_history(&self, destroyed: &Window) -> Option<Window> {
-        let destroyed_elem = StageWindow::Client(destroyed.clone());
-        let cached_destroyed_rect = destroyed
-            .wl_surface()
+    pub fn first_spatially_related_in_history(&self, departing: &StageWindow) -> Option<Window> {
+        let destroyed_elem = departing.clone();
+        // Only a client has a surface to key the stable-rect cache on; a
+        // stand-in's live rect is already its settled one.
+        let cached_destroyed_rect = departing
+            .client()
+            .and_then(|w| w.wl_surface())
             .and_then(|s| self.stable_snap_rects.get(&s.id()).copied());
         let destroyed_rect =
             cached_destroyed_rect.or_else(|| self.snap_rect_for(&destroyed_elem))?;
@@ -592,7 +610,7 @@ impl DriftWm {
         let mut rects = self.all_windows_with_snap_rects();
         if cached_destroyed_rect.is_some() {
             for (w, r) in &mut rects {
-                if w == destroyed {
+                if w == &destroyed_elem {
                     *r = destroyed_rect;
                 }
             }
@@ -606,7 +624,7 @@ impl DriftWm {
             .focus_history()
             .iter()
             .filter_map(|w| w.client())
-            .filter(|w| *w != destroyed)
+            .filter(|w| destroyed_elem != **w)
             .find(|w| {
                 let elem = StageWindow::Client((*w).clone());
                 cluster.contains(&elem)
