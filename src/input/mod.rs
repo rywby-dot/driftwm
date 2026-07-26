@@ -1187,6 +1187,37 @@ impl DriftWm {
             .then_some(PickTarget::Client(window))
     }
 
+    /// The stage element a move or resize gesture at `canvas_pos` may drag — a
+    /// client window or a suspended stand-in. Shared by the trackpad and touch
+    /// paths of both. Screen-pinned windows are *not* resolved here; they
+    /// hit-test in screen space and each caller checks `pinned_element_under`
+    /// first.
+    ///
+    /// Each channel is topmost-first and stops at the first element it finds
+    /// covering the point, so nothing below an occluder *on that channel* is
+    /// reachable. The two are sequential rather than interleaved, though: the
+    /// surface channel is exhausted before the decoration one is consulted at
+    /// all, so a point on window A's SSD title bar that also lies over window
+    /// B's content resolves to B even when A is on top. The canvas gate is a
+    /// stop, not a skip: a widget on top makes the gesture find nothing, rather
+    /// than reaching through it to the window underneath.
+    pub(crate) fn draggable_element_under(
+        &self,
+        canvas_pos: Point<f64, smithay::utils::Logical>,
+    ) -> Option<StageWindow> {
+        let element = if let Some((window, _)) = self.element_under_raw(canvas_pos) {
+            StageWindow::Client(window.clone())
+        } else {
+            // SSD chrome lies outside the surface bbox and a stand-in owns no
+            // surface at all, so both are only visible on the decoration channel.
+            match self.decoration_under(canvas_pos)? {
+                (DecoTarget::Client(w), _) => StageWindow::Client(w),
+                (DecoTarget::Suspended(s), _) => StageWindow::Suspended(s),
+            }
+        };
+        self.is_canvas_window(&element).then_some(element)
+    }
+
     /// The screen-pinned window under an output-relative screen position:
     /// `pinned_window_under` resolved from focus surface to window element.
     pub(crate) fn pinned_element_under(&self, screen_pos: Point<f64, Logical>) -> Option<Window> {

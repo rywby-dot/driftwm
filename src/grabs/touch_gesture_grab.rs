@@ -23,7 +23,6 @@ use driftwm::window_ext::WindowExt;
 use crate::input::touch::HeldTouchEvent;
 use crate::state::{DriftWm, FocusTarget, StageWindow, output_state};
 
-use super::MoveGrab;
 use super::touch_recognizer::{Decision, TapOutcome, TouchInput, TouchKind, TouchRecognizer};
 
 /// Logical pixels per millimetre for `output`, used to convert physical gesture
@@ -66,7 +65,7 @@ fn output_px_per_mm(output: &Output, device_mm: Option<(f64, f64)>) -> f64 {
 /// (`origin` is canvas-space, `loc`/`size` are the window's canvas rect). The
 /// center cell — and any window too small for the fingers to land off-center —
 /// falls back to the bottom-right corner.
-fn edge_from_origin(
+pub(crate) fn edge_from_origin(
     origin: Point<f64, Logical>,
     loc: Point<i32, Logical>,
     size: Size<i32, Logical>,
@@ -214,30 +213,6 @@ impl TouchGestureGrab {
             return true;
         }
 
-        let Some((window, loc)) = data
-            .element_under_raw(event.location)
-            .map(|(w, l)| (w.clone(), l))
-        else {
-            return false;
-        };
-        if !data.is_canvas_window(&window) {
-            return false;
-        }
-        let serial = SERIAL_COUNTER.next_serial();
-        data.raise_and_focus(&window, serial);
-        // Moving re-anchors the window, invalidating any fill restore point.
-        data.stage.clear_fill(&window);
-        let initial = data.stage.position_of(&window).unwrap_or(loc);
-        let members = if cluster {
-            data.cluster_snapshot_for_drag(&StageWindow::Client(window.clone()), initial)
-        } else {
-            Vec::new()
-        };
-        // Members ride along with the primary, so their fill restore points go
-        // stale too.
-        for (member, _) in &members {
-            data.stage.clear_fill(member);
-        }
         let start = TouchGrabStartData {
             focus: None,
             slot: event.slot,
@@ -246,16 +221,21 @@ impl TouchGestureGrab {
         // All current fingers are already down; seed the count so the move grab
         // stays alive until every one of them lifts.
         let slots = self.core.finger_count();
-        data.arm_interactive_move(&window);
-        let grab = MoveGrab::new_touch(start, window, initial, self.output.clone(), slots, members);
+        let Some(grab) =
+            data.build_touch_move_grab(event.location, start, self.output.clone(), slots, cluster)
+        else {
+            return false;
+        };
         handle.set_grab(self, data, seq, grab);
         true
     }
 
     /// Hold-then-drag resize: pick the edge from where the fingers landed (a 3×3
-    /// grid over the window) and hand off to a touch resize grab. `snapped`
-    /// extends the resize to the window's snap-cluster. Returns false (and keeps
-    /// panning) if there's no canvas window under the landing point.
+    /// grid over the element) and hand off to a touch resize grab. A suspended
+    /// stand-in resizes like a live window — the picker and the grab are both
+    /// element-generic. `snapped` extends the resize to the element's
+    /// snap-cluster. Returns false (and keeps panning) if there's nothing
+    /// resizable under the landing point.
     fn try_start_resize(
         &mut self,
         data: &mut DriftWm,
@@ -288,7 +268,7 @@ impl TouchGestureGrab {
             };
             let slots = self.core.finger_count();
             let Some(grab) = data.build_touch_resize_grab(
-                &window,
+                &StageWindow::Client(window.clone()),
                 edges,
                 start,
                 self.output.clone(),
@@ -304,27 +284,16 @@ impl TouchGestureGrab {
         }
 
         let origin = screen_to_canvas(ScreenPos(screen_centroid), camera, zoom).0;
-        let Some((window, _)) = data.element_under_raw(origin).map(|(w, l)| (w.clone(), l)) else {
-            return false;
-        };
-        if !data.is_canvas_window(&window) {
-            return false;
-        }
-        let Some(loc) = data.stage.position_of(&window) else {
-            return false;
-        };
-        let edges = edge_from_origin(origin, loc, window.geometry().size);
         let start = TouchGrabStartData {
             focus: None,
             slot: event.slot,
             location: event.location,
         };
         let slots = self.core.finger_count();
-        // Build before raising/focusing so a failed build leaves no stray focus
-        // change (it falls through to pan).
-        let Some(grab) = data.build_touch_resize_grab(
-            &window,
-            edges,
+        // The builder raises only after it commits to a grab, so a fall-through
+        // to pan leaves no stray focus change.
+        let Some(grab) = data.build_touch_gesture_resize_grab(
+            origin,
             start,
             self.output.clone(),
             slots,
@@ -332,8 +301,6 @@ impl TouchGestureGrab {
         ) else {
             return false;
         };
-        let serial = SERIAL_COUNTER.next_serial();
-        data.raise_and_focus(&window, serial);
         handle.set_grab(self, data, seq, grab);
         true
     }
