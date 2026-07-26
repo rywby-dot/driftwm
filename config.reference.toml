@@ -136,7 +136,6 @@
 # camera_speed = 0.3          # camera lerp factor (higher = faster)
 # animation_speed = 0.3       # window animation lerp factor (higher = faster; 1 = instant)
 =======
-# camera_speed = 0.3          # camera lerp factor, 0-1 (higher = faster, 1 = instant)
 >>>>>>> origin/main
 # auto_navigate_on_close = true  # on close, pan to the newly focused window if off-screen
                               # false = camera stays put; focus only moves to a visible window
